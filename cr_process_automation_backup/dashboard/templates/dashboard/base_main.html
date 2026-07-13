@@ -1,0 +1,67 @@
+{% load static %}
+<link rel="stylesheet" href="{% static 'css/style.css' %}">
+<script src="{% static 'js/dashboard.js' %}"></script>
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ page_title }}</title>
+    <link rel="stylesheet" href="{% static 'dashboard/css/style.css' %}">
+</head>
+<body>
+    <a class="skip-link" href="#main-content">Skip to content</a>
+    <div class="app-shell">
+        <header class="top-header">
+            <div class="header-left">
+                <nav class="top-nav" aria-label="Primary">
+                    <a href="{% url 'cr_planning' %}">Home</a>
+                    <a href="#">Contact us</a>
+                </nav>
+            </div>
+
+            <div class="header-center">
+                <h1 class="app-main-title">Welcome to CR Process Automation</h1>
+            </div>
+
+            <div class="header-right">
+                <div class="user-summary">
+                    <span class="user-summary-text">{{ user_name }}</span>
+                    <span class="user-summary-separator">|</span>
+                    <span class="user-summary-text">{{ user_role }}</span>
+                </div>
+                <a href="/accounts/logout/" class="logout-btn">Logout</a>
+            </div>
+        </header>
+
+        <main id="main-content" class="content-area">
+            {% block main_content %}{% endblock %}
+        </main>
+
+        <footer class="bottom-footer">
+            <section class="footer-panel">
+                <h3>Running Task</h3>
+                <div class="panel-body running-task-box" id="running-task-box">{{ running_task }}</div>
+            </section>
+
+            <section class="footer-panel footer-panel-wide">
+                <h3>Task Log Events</h3>
+                <div class="panel-body task-log-box" id="task-log-box">
+                    {% if task_logs %}
+                        <ul class="log-list">
+                            {% for log in task_logs %}
+                                <li><span class="log-message">{{ log.message|default:log }}</span></li>
+                            {% endfor %}
+                        </ul>
+                    {% else %}
+                        <p>No log events available.</p>
+                    {% endif %}
+                </div>
+            </section>
+        </footer>
+    </div>
+
+    <script src="{% static 'dashboard/js/dashboard.js' %}"></script>
+</body>
+</html>
