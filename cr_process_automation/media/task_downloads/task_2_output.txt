@@ -1,4 +1,0 @@
-Task Name: CR Hygiene Checks
-Status: Completed
-Input: media/task_uploads/karan-loomba/2026-07-08/cr-hygiene-checks/MPBN CR Planning & Execution Task Automation_HQFqjNZ.docx
-Output: Generated successfully
