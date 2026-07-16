@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Success</title>
+    <style>
+        body { 
+            font-family: sans-serif; 
+            display: flex; 
+            align-items: center; 
+            justify-content: center; 
+            height: 100vh; 
+            margin: 0; 
+            text-align: center; 
+            color: #28a745;
+        }
+    </style>
+</head>
+<body>
+    <div>
+        <h3>✔ Code Accepted</h3>
+        <p>Resuming the automation task...</p>
+    </div>
+    
+    <script>
+        // Wait 1 second so the user can see the success message, then tell the parent dashboard to close the modal
+        setTimeout(function() {
+            window.parent.postMessage({ status: 'success', action: 'close_iframe' }, '*');
+        }, 1000);
+    </script>
+</body>
+</html>
