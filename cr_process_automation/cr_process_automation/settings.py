@@ -31,7 +31,7 @@ ROOT_URLCONF = 'cr_process_automation.urls'
 TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [],
+        'DIRS': [BASE_DIR / "templates"],
         'APP_DIRS': True,
         'OPTIONS': {
             'context_processors': [
@@ -76,3 +76,16 @@ LOGIN_REDIRECT_URL = '/'
 LOGOUT_REDIRECT_URL = '/admin/login/'
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+CACHES = {
+    "default": {
+        "BACKEND": "django_redis.cache.RedisCache",
+        # Update this URL if your Redis is hosted elsewhere (e.g., AWS ElastiCache)
+        "LOCATION": "redis://127.0.0.1:6379/1", 
+        "OPTIONS": {
+            "CLIENT_CLASS": "django_redis.client.DefaultClient",
+        }
+    }
+}
+
+X_FRAME_OPTIONS = 'SAMEORIGIN'

@@ -1,6 +1,6 @@
-
 {% extends 'dashboard/base_module.html' %}
 {% block module_content %}
+{% csrf_token %}
 <div class="content-card compact-content-card">
     <div class="page-head compact-page-head">
         <h2 class="module-page-title compact-module-title">CR Planning Tasks</h2>
@@ -28,6 +28,7 @@
                     <td class="task-name-cell">{{ task.name }}</td>
                     <td>
                         <button type="button" class="action-btn start-btn compact-btn js-start-task" data-task-id="{{ task.id }}">Start</button>
+                        <!-- <button type="button" class="action-btn start-btn compact-btn" data-task-id="{{ task.id }}">Start</button> -->
                     </td>
                     <td class="js-total-crs">{{ task.total_crs }}</td>
                     <td class="js-north-crs">{{ task.north_crs }}</td>
@@ -57,6 +58,13 @@
             {% endfor %}
             </tbody>
         </table>
+    </div>
+</div>
+
+<div id="auth-overlay" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.6); z-index: 1050; align-items: center; justify-content: center; backdrop-filter: blur(3px);">
+    <div class="auth-modal" style="background: white; padding: 20px; border-radius: 8px; box-shadow: 0 10px 25px rgba(0,0,0,0.2); position: relative; width: 450px; max-width: 90%;">
+        <button type="button" onclick="document.getElementById('auth-overlay').style.display='none'" style="position: absolute; top: 12px; right: 15px; background: none; border: none; font-size: 20px; cursor: pointer; color: #666;">&times;</button>
+        <iframe id="auth-iframe" src="" width="100%" height="320" frameborder="0"></iframe>
     </div>
 </div>
 {% endblock %}

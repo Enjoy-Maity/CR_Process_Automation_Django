@@ -3,6 +3,7 @@ import platform
 import ctypes
 from playwright.sync_api import sync_playwright
 from dashboard.views import _timestamp
+# import dashboard.task_modules.dependencies.playwright_common_methods as pcm
 
 def check_admin_status():
     try:
@@ -69,7 +70,7 @@ def run_task(request, task, runtime, GLOBAL_LOGS=None, timestamp_fn=None):
 
         otp = runtime.get("otp")
         if not otp:
-            runtime["status"] = "Failed"
+            runtime["status"] = "Failed" 
             msg = "OTP not received in time."
             GLOBAL_LOGS.append(f"{task['name']}: {msg} ---- {timestamp_fn()}")
             browser.close()

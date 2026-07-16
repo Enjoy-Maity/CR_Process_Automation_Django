@@ -7,9 +7,12 @@ import threading
 from django.conf import settings
 from django.http import JsonResponse, FileResponse, Http404
 from django.shortcuts import render, redirect
+from django.views.decorators.clickjacking import xframe_options_sameorigin
+# from django.core.cache import cache
 from django.views.decorators.http import require_GET, require_POST
 from django.contrib import messages
-from .forms import ExcelUploadForm
+from .forms import TwoFactorAuthForm
+# from .forms import ExcelUploadForm
 from .models import MasterCRDatabase
 import pandas as pd
 from importlib import import_module
@@ -290,3 +293,37 @@ def download_task_output(request, task_id):
     if not fp.exists():
         raise Http404("Generated file not found")
     return FileResponse(open(fp, "rb"), as_attachment=True, filename=runtime["download_name"])
+
+
+@xframe_options_sameorigin
+def playwright_auth_iframe(request):
+    if request.method == 'POST':
+        form = TwoFactorAuthForm(request.POST)
+        if form.is_valid():
+            # Extract data
+            task_id = int(form.cleaned_data['task_id'])
+            two_factor_code = form.cleaned_data['two_factor_code']
+            
+            # Access your existing memory dictionary directly!
+            runtime = TASK_RUNTIME.get(task_id)
+            if runtime:
+                # Store the code and turn off the OTP flag
+                runtime["otp"] = two_factor_code
+                runtime["otp_required"] = False
+                
+                # Unpause the specific Playwright thread instantly
+                otp_event = runtime.get("otp_event")
+                if otp_event:
+                    otp_event.set()
+                
+                GLOBAL_LOGS.append(f"Task ID {task_id}: OTP received via Iframe ---- {_timestamp()}")
+            
+            # Render the success template so JS knows to close the modal
+            return render(request, 'dashboard/iframe_success.html')
+    else:
+        # GET request: Pre-fill the hidden task_id field from the URL query params
+        task_id = request.GET.get('task_id', '')
+        form = TwoFactorAuthForm(initial={'task_id': task_id})
+
+    # Render the form template
+    return render(request, 'dashboard/iframe_form.html', {'form': form})

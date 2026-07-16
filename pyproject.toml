@@ -1,12 +1,18 @@
 [project]
-name = "test-cr-process-automation"
+name = "cr-process-automation-django"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.14"
+requires-python = ">=3.13"
 dependencies = [
-    "django>=6.0.6",
+    "bs4>=0.0.2",
+    "django>=6.0.7",
+    "django-redis>=7.0.0",
+    "keyboard>=0.13.5",
+    "lxml>=6.1.1",
     "openpyxl>=3.1.5",
     "pandas>=3.0.3",
     "playwright>=1.61.0",
+    "pywin32>=312",
+    "tabulate>=0.10.0",
 ]

@@ -9,5 +9,6 @@ urlpatterns = [
     path('api/task/start/<int:task_id>/', views.start_task, name='start_task'),
     path('api/task/dashboard-data/', views.task_dashboard_data, name='task_dashboard_data'),
     path('download/task/<int:task_id>/', views.download_task_output, name='download_task_output'),
-    path("import-master-cr/", views.import_master_cr_view, name="import-master-cr")
+    # path("import-master-cr/", views.import_master_cr_view, name="import-master-cr")
+    path('playwright-auth-iframe/', views.playwright_auth_iframe, name='playwright_auth_iframe'),
 ]

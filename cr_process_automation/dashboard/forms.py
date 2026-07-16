@@ -1,14 +1,10 @@
 from django import forms
-from .models import TaskRun
 
-
-class TaskUploadForm(forms.ModelForm):
-    class Meta:
-        model = TaskRun
-        fields = ['uploaded_template']
-        widgets = {
-            'uploaded_template': forms.ClearableFileInput(attrs={'class': 'file-input'})
-        }
-        
-class ExcelUploadForm(forms.Form):
-    excel_file = forms.FileField()
+class TwoFactorAuthForm(forms.Form):
+    two_factor_code = forms.CharField(
+        max_length=6,
+        widget=forms.TextInput(attrs={'class': 'form-control', 'placeholder': 'Enter 6-digit 2FA'}),
+        required=True,
+        label="2FA Code"
+    )
+    task_id = forms.CharField(widget=forms.HiddenInput(), required=True)
