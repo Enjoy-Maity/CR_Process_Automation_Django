@@ -13,3 +13,5 @@ __pycache__/
 pw-browsers/
 .env
 Session_store_files/
+*.dll
+*.exe
