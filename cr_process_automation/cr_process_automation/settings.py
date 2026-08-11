@@ -1,3 +1,5 @@
+import os
+from datetime import datetime
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -89,3 +91,9 @@ CACHES = {
 }
 
 X_FRAME_OPTIONS = 'SAMEORIGIN'
+
+# Read the path from the environment, fallback to a local 'downloads' folder
+HOST_DOWNLOAD_DIR = os.environ.get(
+    'DJANGO_DOWNLOAD_DIR', 
+    os.path.join(os.path.abspath(os.sep), "Automation", "PS_Core_Automation", "Task_Wise_Automation")
+)

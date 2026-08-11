@@ -2,6 +2,7 @@
 /.env
 /env
 /venv
+.env
 .gitignore
 .python-version
 *.toml
@@ -9,3 +10,4 @@
 /cr_process_automation/media
 /cr_process_automation/cr_process_automation/Standard_Template
 __pycache__/
+Session_store_files/
