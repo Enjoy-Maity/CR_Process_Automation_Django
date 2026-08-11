@@ -1,6 +1,12 @@
 from pathlib import Path
+import os
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+HOST_DOWNLOAD_DIR = os.getenv(
+     "DJANGO_DOWNLOAD_DIR", 
+    os.path.join(os.path.abspath(os.sep), "PS-Core-Automation")
+)
 
 SECRET_KEY = 'django-insecure-change-me'
 DEBUG = True
@@ -71,9 +77,14 @@ STATIC_ROOT = BASE_DIR / 'staticfiles'
 MEDIA_URL = 'media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
-LOGIN_URL = '/admin/login/'
-LOGIN_REDIRECT_URL = '/'
-LOGOUT_REDIRECT_URL = '/admin/login/'
+# LOGIN_URL = '/admin/login/'
+# LOGIN_REDIRECT_URL = '/'
+# LOGOUT_REDIRECT_URL = '/admin/login/'
+
+AUTH_USER_MODEL = "dashboard.UserManagement"
+LOGIN_URL = "login"
+LOGIN_REDIRECT_URL = "cr_planning"
+LOGOUT_REDIRECT_URL = "login"
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 

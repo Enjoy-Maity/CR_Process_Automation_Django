@@ -1,0 +1,373 @@
+{% extends 'dashboard/base_module.html' %}
+{% block module_content %}
+<div class="region-crs-page">
+  <div class="region-cr-panel">
+    <div class="region-filter-panel">
+      <h2 class="module-page-title compact-module-title">CR History (PAN-INDIA)</h2>
+      <br>
+      <div class="region-filter-row cr-history-filter-row">
+        <label class="history-date-option">
+        <input type="date" id="crhistorydate" class="history-date-input">
+        </label>
+
+        <label class="history-range-option">
+          <input type="checkbox" class="history-range-checkbox" value="1m">
+          <span>Last Month CR</span>
+        </label>
+
+        <label class="history-range-option">
+          <input type="checkbox" class="history-range-checkbox" value="3m">
+          <span>Last 3-Months CR</span>
+        </label>
+
+        <label class="history-range-option">
+          <input type="checkbox" class="history-range-checkbox" value="6m">
+          <span>Last 6-Months CR</span>
+        </label>
+
+        <label class="history-range-option">
+          <input type="checkbox" class="history-range-checkbox" value="12m">
+          <span>Last Year CR</span>
+        </label>
+
+        <button type="button" id="fetch-history-cr-btn" class="action-btn compact-btn apply-filter-btn">
+          Fetch CRs
+        </button>
+
+        <button type="button" id="download-history-cr-btn" class="action-btn compact-btn download-btn" disabled>
+          Download
+        </button>
+      </div>
+    </div>
+
+    <div class="region-cr-data-panel">
+      <div class="region-cr-status-bar hidden" id="history-cr-status-bar"></div>
+
+      <div class="region-cr-table-meta" id="history-cr-table-meta">
+        Select a date or one period and click Fetch CRs to load data.
+      </div>
+
+      <div class="region-cr-scroll-wrap">
+        <table class="region-cr-table" id="history-cr-table">
+        <colgroup id="history-cr-table-colgroup"></colgroup>
+          <thead>
+            <tr id="history-cr-table-head"></tr>
+          </thead>
+          <tbody id="history-cr-table-body">
+            <tr>
+              <td colspan="20" class="region-cr-empty-cell">
+                {% comment %} Select a date or one period and click Fetch CRs to load data. {% endcomment %}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+let HISTORY_ROWS = [];
+let HISTORY_SELECTED_RANGE = null;
+let HISTORY_SELECTED_DATE = null;
+let HISTORY_STATUS_TIMEOUT = null;
+
+const CR_HISTORY_SESSION_KEY = 'cr_history_page_state';
+
+function saveCrHistorySessionState() {
+    const state = {
+        date: HISTORY_SELECTED_DATE,
+        range: HISTORY_SELECTED_RANGE,
+        rows: HISTORY_ROWS,
+    };
+    try {
+        sessionStorage.setItem(CR_HISTORY_SESSION_KEY, JSON.stringify(state));
+    } catch (e) {
+        // ignore
+    }
+}
+
+function restoreCrHistorySessionState() {
+    let saved;
+    try {
+        saved = JSON.parse(sessionStorage.getItem(CR_HISTORY_SESSION_KEY));
+    } catch (e) {
+        saved = null;
+    }
+
+    if (!saved || (!saved.date && !saved.range)) return false;
+
+    if (saved.date) {
+        document.getElementById('crhistorydate').value = saved.date;
+        HISTORY_SELECTED_DATE = saved.date;
+        document.querySelectorAll('.history-range-checkbox').forEach(cb => {
+            cb.checked = false;
+            cb.disabled = true;
+        });
+    } else if (saved.range) {
+        HISTORY_SELECTED_RANGE = saved.range;
+        document.querySelectorAll('.history-range-checkbox').forEach(cb => {
+            cb.checked = cb.value === saved.range;
+            cb.disabled = cb.value !== saved.range;
+        });
+    }
+
+    HISTORY_ROWS = Array.isArray(saved.rows) ? saved.rows : [];
+
+    if (HISTORY_ROWS.length) {
+        renderHistoryTable(HISTORY_ROWS);
+        setHistoryMeta(`Showing ${HISTORY_ROWS.length} record(s).`);
+    }
+
+    return true;
+}
+
+function setHistoryMeta(message) {
+    document.getElementById('history-cr-table-meta').textContent = message;
+}
+
+function showHistoryStatus(message, type = 'info') {
+    const bar = document.getElementById('history-cr-status-bar');
+    bar.textContent = message;
+    bar.className = `region-cr-status-bar status-${type}`;
+
+    if (HISTORY_STATUS_TIMEOUT) {
+        clearTimeout(HISTORY_STATUS_TIMEOUT);
+        HISTORY_STATUS_TIMEOUT = null;
+    }
+
+    if (!message) {
+        bar.classList.add('hidden');
+        return;
+    }
+
+    if (type === 'success' || type === 'error') {
+        HISTORY_STATUS_TIMEOUT = setTimeout(() => {
+            clearHistoryStatus();
+        }, 4000);
+    }
+}
+
+function clearHistoryStatus() {
+    const bar = document.getElementById('history-cr-status-bar');
+    bar.textContent = '';
+    bar.className = 'region-cr-status-bar hidden';
+
+    if (HISTORY_STATUS_TIMEOUT) {
+        clearTimeout(HISTORY_STATUS_TIMEOUT);
+        HISTORY_STATUS_TIMEOUT = null;
+    }
+}
+
+function setHistoryTableMessage(message, colspan = 20) {
+    document.getElementById('history-cr-table-head').innerHTML = '';
+    document.getElementById('history-cr-table-body').innerHTML =
+        `<tr><td colspan="${colspan}" class="region-cr-empty-cell">${message}</td></tr>`;
+}
+
+function escapeHtml(value) {
+    return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+}
+
+const FROZEN_COLUMN_WIDTHS = {
+    sno: 60,
+    ms_project: 100,
+    execution_date: 120,
+    maintenance_window: 170,
+    cr_no: 150,
+};
+const DEFAULT_COLUMN_WIDTH = 160;
+
+function getColumnWidth(col) {
+    return FROZEN_COLUMN_WIDTHS[col] || DEFAULT_COLUMN_WIDTH;
+}
+
+function renderHistoryTable(rows) {
+    const colgroup = document.getElementById('history-cr-table-colgroup');
+    const head = document.getElementById('history-cr-table-head');
+    const body = document.getElementById('history-cr-table-body');
+
+    head.innerHTML = '';
+    body.innerHTML = '';
+    colgroup.innerHTML = '';
+
+    if (!rows || !rows.length) {
+        setHistoryTableMessage('No entries found for the selected period.', 20);
+        document.getElementById('download-history-cr-btn').disabled = true;
+        return;
+    }
+
+    const rawColumns = Object.keys(rows[0]);
+    const columns = rawColumns.filter(col => col !== 'id');
+    const freezeUntilIndex = columns.indexOf('cr_no');
+
+    const leftOffsets = [];
+    let cumulative = 0;
+    columns.forEach((col, index) => {
+        leftOffsets[index] = cumulative;
+        cumulative += getColumnWidth(col);
+    });
+
+    colgroup.innerHTML = columns.map(col =>
+        `<col style="width:${getColumnWidth(col)}px">`
+    ).join('');
+
+    head.innerHTML = columns.map((col, index) => {
+        const frozen = index <= freezeUntilIndex;
+        const cls = frozen ? 'sticky-col sticky-corner' : '';
+        const style = frozen ? `style="left:${leftOffsets[index]}px"` : '';
+        return `<th class="${cls}" ${style}>${escapeHtml(formatHeaderLabel(col))}</th>`;
+    }).join('');
+
+    body.innerHTML = rows.map((row, rowIndex) => `
+        <tr data-row-id="${row.id}">
+            ${columns.map((col, index) => {
+                const frozen = index <= freezeUntilIndex;
+                const cls = frozen ? 'sticky-col' : '';
+                const style = frozen ? `style="left:${leftOffsets[index]}px"` : '';
+
+                if (col === 'sno') {
+                    return `<td class="${cls}" ${style}>${rowIndex + 1}</td>`;
+                }
+                return `<td class="${cls}" ${style}>${escapeHtml(row[col] ?? '')}</td>`;
+            }).join('')}
+        </tr>
+    `).join('');
+
+    document.getElementById('download-history-cr-btn').disabled = false;
+}
+
+function updateCheckboxState(selectedCheckbox) {
+    const checkboxes = document.querySelectorAll('.history-range-checkbox');
+
+    checkboxes.forEach(cb => {
+        if (cb !== selectedCheckbox) {
+            cb.checked = false;
+        }
+    });
+
+    HISTORY_SELECTED_RANGE = selectedCheckbox && selectedCheckbox.checked ? selectedCheckbox.value : null;
+
+    checkboxes.forEach(cb => {
+        if (HISTORY_SELECTED_RANGE) {
+            cb.disabled = !cb.checked;
+        } else {
+            cb.disabled = false;
+        }
+    });
+}
+
+document.getElementById('crhistorydate').addEventListener('change', function () {
+    HISTORY_SELECTED_DATE = this.value || null;
+
+    if (HISTORY_SELECTED_DATE) {
+        document.querySelectorAll('.history-range-checkbox').forEach(cb => {
+            cb.checked = false;
+            cb.disabled = true;
+        });
+        HISTORY_SELECTED_RANGE = null;
+    } else {
+        document.querySelectorAll('.history-range-checkbox').forEach(cb => {
+            cb.disabled = false;
+        });
+    }
+});
+
+document.querySelectorAll('.history-range-checkbox').forEach(cb => {
+    cb.addEventListener('change', function () {
+        updateCheckboxState(cb);
+
+        if (!cb.checked) {
+            HISTORY_SELECTED_RANGE = null;
+            document.querySelectorAll('.history-range-checkbox').forEach(item => item.disabled = false);
+        }
+    });
+});
+
+function fetchHistoryCRs() {
+    const date = document.getElementById('crhistorydate').value || HISTORY_SELECTED_DATE;
+
+    if (!date && !HISTORY_SELECTED_RANGE) {
+        clearHistoryStatus();
+        setHistoryMeta('Please select a date or one period.');
+        setHistoryTableMessage('Please select a date or one period before fetching.', 20);
+        document.getElementById('download-history-cr-btn').disabled = true;
+        return;
+    }
+
+    clearHistoryStatus();
+    setHistoryMeta('Loading CR history...');
+    setHistoryTableMessage('Loading data...', 20);
+    document.getElementById('download-history-cr-btn').disabled = true;
+
+    const params = new URLSearchParams();
+    if (date) {
+        params.set('date', date);
+    } else {
+        params.set('range', HISTORY_SELECTED_RANGE);
+    }
+
+    fetch(`{% url 'fetch_cr_history' %}?${params.toString()}`)
+        .then(res => res.json())
+        .then(data => {
+            if (!data.ok) {
+                HISTORY_ROWS = [];
+                setHistoryMeta(data.message || 'Failed to fetch CR history.');
+                setHistoryTableMessage(data.message || 'Failed to fetch CR history.', 20);
+                return;
+            }
+
+            HISTORY_ROWS = data.rows || [];
+            renderHistoryTable(HISTORY_ROWS);
+            setHistoryMeta(`${data.message || 'Showing ' + HISTORY_ROWS.length + ' records.'}`);
+            saveCrHistorySessionState();
+        })
+        .catch(() => {
+            HISTORY_ROWS = [];
+            setHistoryMeta('Error fetching CR history.');
+            setHistoryTableMessage('Error fetching CR history.', 20);
+        });
+}
+
+function formatHeaderLabel(col) {
+    if (col === 'sno') return 'S.No';
+    return col
+        .split('_')
+        .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+        .join(' ');
+}
+
+function downloadHistoryCRs() {
+    const date = document.getElementById('crhistorydate').value || HISTORY_SELECTED_DATE;
+
+    if ((!date && !HISTORY_SELECTED_RANGE) || !HISTORY_ROWS.length) {
+        showHistoryStatus('No data available to download.', 'error');
+        return;
+    }
+
+    showHistoryStatus('Preparing Excel download...', 'info');
+
+    setTimeout(() => {
+        clearHistoryStatus();
+    }, 3000);
+
+    const params = new URLSearchParams();
+    if (date) {
+        params.set('date', date);
+    } else {
+        params.set('range', HISTORY_SELECTED_RANGE);
+    }
+
+    window.location.href = `{% url 'download_cr_history' %}?${params.toString()}`;
+}
+
+document.getElementById('fetch-history-cr-btn').addEventListener('click', fetchHistoryCRs);
+document.getElementById('download-history-cr-btn').addEventListener('click', downloadHistoryCRs);
+restoreCrHistorySessionState();
+</script>
+{% endblock %}

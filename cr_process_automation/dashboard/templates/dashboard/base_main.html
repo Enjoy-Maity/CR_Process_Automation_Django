@@ -10,7 +10,7 @@
     <title>{{ page_title }}</title>
     <link rel="stylesheet" href="{% static 'dashboard/css/style.css' %}">
 </head>
-<body>
+<body data-selected-option="{{ selected_option }}">
     <a class="skip-link" href="#main-content">Skip to content</a>
     <div class="app-shell">
         <header class="top-header">
@@ -22,7 +22,7 @@
             </div>
 
             <div class="header-center">
-                <h1 class="app-main-title">Welcome to CR Process Automation</h1>
+                <h1 class="app-main-title">CR Process Automation (PS-CORE)</h1>
             </div>
 
             <div class="header-right">
@@ -31,7 +31,7 @@
                     <span class="user-summary-separator">|</span>
                     <span class="user-summary-text">{{ user_role }}</span>
                 </div>
-                <a href="/accounts/logout/" class="logout-btn">Logout</a>
+                <a href="{% url 'logout' %}" class="logout-btn">Logout</a>
             </div>
         </header>
 

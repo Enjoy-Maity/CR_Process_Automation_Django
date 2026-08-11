@@ -1,5 +1,6 @@
 from django.conf import settings
 from django.db import models
+from django.contrib.auth.models import AbstractUser
 
 
 class AutomationTask(models.Model):
@@ -35,7 +36,7 @@ class TaskRun(models.Model):
     ]
 
     task = models.ForeignKey(AutomationTask, on_delete=models.CASCADE, related_name='runs')
-    triggered_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL)
+    triggered_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.CASCADE)
     status = models.CharField(max_length=30, choices=RUN_STATUS_CHOICES, default='Queued')
     uploaded_template = models.FileField(upload_to='task_templates/', null=True, blank=True)
     output_file = models.FileField(upload_to='task_outputs/', null=True, blank=True)
@@ -107,3 +108,50 @@ class MasterCRDatabase(models.Model):
 
     def __str__(self):
         return self.cr_no
+
+class UserManagement(AbstractUser):
+    ROLE_ADMIN = "Admin"
+    ROLE_VALIDATOR = "Validator"
+    ROLE_NIGHT_SPOC = "Night-SPOC"
+    ROLE_EXECUTOR = "Executor"
+
+    ROLE_CHOICES = [
+        (ROLE_ADMIN, "Admin"),
+        (ROLE_VALIDATOR, "Validator"),
+        (ROLE_NIGHT_SPOC, "Night-SPOC"),
+        (ROLE_EXECUTOR, "Executor"),
+    ]
+
+    email = models.EmailField("user mail id", unique=True)
+    employee_name = models.CharField(max_length=150, null=True, blank=True)
+    employee_signum = models.CharField(max_length=100, null=True, blank=True, unique=True)
+    role = models.CharField(max_length=20, choices=ROLE_CHOICES, default=ROLE_EXECUTOR)
+    
+    def __str__(self):
+        return f"{self.username} ({self.role})"
+
+class CRWiseStatus(models.Model):
+    sno = models.IntegerField(null=True, blank=True)
+    execution_date = models.DateField(null=True, blank=True)
+    maintenance_window = models.CharField(max_length=50, null=True, blank=True)
+    cr_no = models.CharField(max_length=50, unique=True)
+    risk = models.CharField(max_length=100, null=True, blank=True)
+    activity_description = models.TextField(null=True, blank=True)
+    bpms_cr_yes_no = models.CharField(max_length=10, null=True, blank=True)
+    circle = models.CharField(max_length=50, null=True, blank=True)
+    region = models.CharField(max_length=50, null=True, blank=True)
+    technical_validator = models.CharField(max_length=100, null=True, blank=True)
+    CR_Hygiene_Checks = models.CharField(max_length=100, null=True, blank=True)
+    Install_Test_Plan_Downloads = models.CharField(max_length=100, null=True, blank=True)
+    MOP_Attachment = models.CharField(max_length=100, null=True, blank=True)
+    CR_Approvals = models.CharField(max_length=100, null=True, blank=True)
+    NIAM_Ticket = models.CharField(max_length=100, null=True, blank=True)
+
+    class Meta:
+            db_table = "cr_wise_status"
+    
+    def __str__(self):
+        return self.cr_no
+
+
+    

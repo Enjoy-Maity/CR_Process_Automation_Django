@@ -1,8 +1,544 @@
 {% extends 'dashboard/base_module.html' %}
-
 {% block module_content %}
-<div class="content-card blank-card">
-    <h2 class="module-page-title">Region CRs</h2>
-    <p>This page is intentionally blank for now.</p>
+<div class="region-crs-page">
+  <div class="region-cr-panel">
+    <div class="region-filter-panel">
+      <h2 class="module-page-title compact-module-title">Region CRs</h2>
+      <br>
+      <div class="region-filter-row">
+        <label for="region-cr-date" class="region-date-label">Date</label>
+        <input type="date" id="region-cr-date" name="region_cr_date">
+        <button type="button" id="fetch-region-cr-btn" class="action-btn compact-btn apply-filter-btn">Fetch CRs</button>
+        <button type="button" id="save-region-cr-btn" class="action-btn compact-btn save-region-cr-btn" {% if not can_edit_region_crs %}disabled{% endif %}>Save Changes</button>
+        <button type="button" class="action-btn compact-btn region-tab-btn" data-region="north">North</button>
+        <button type="button" class="action-btn compact-btn region-tab-btn" data-region="west">West</button>
+        <button type="button" class="action-btn compact-btn region-tab-btn" data-region="east">East</button>
+        <button type="button" class="action-btn compact-btn region-tab-btn" data-region="south">South</button>
+      </div>
+    </div>
+
+    <div class="region-cr-data-panel">
+      <div class="region-cr-status-bar hidden" id="region-cr-status-bar"></div>
+
+      <div class="region-cr-table-meta" id="region-cr-table-meta">
+        Select a date and click Fetch CRs to load data.
+      </div>
+
+      <div class="region-cr-scroll-wrap" id="region-cr-table-wrap">
+        <table class="region-cr-table" id="region-cr-table">
+        <colgroup id="region-cr-table-colgroup"></colgroup>
+          <thead>
+            <tr id="region-cr-table-head"></tr>
+          </thead>
+          <tbody id="region-cr-table-body">
+            <tr><td colspan="20" class="region-cr-empty-cell">
+                {% comment %} Select a date and click Fetch CRs to load data. {% endcomment %}
+            </td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
 </div>
+
+
+<script>
+let ALL_ROWS = [];
+let SELECTED_REGION = null;
+let ORIGINAL_ROWS_BY_ID = {};
+let STATUS_TIMEOUT = null;
+
+const EDITABLE_FIELDS = {{ editable_region_cr_fields|safe }};
+const CAN_EDIT = {{ can_edit_region_crs|yesno:"true,false" }};
+
+const REGION_CR_SESSION_KEY = 'region_crs_page_state';
+
+function saveRegionCrSessionState() {
+    const date = document.getElementById('region-cr-date').value;
+    const state = {
+        date,
+        selectedRegion: SELECTED_REGION,
+        allRows: ALL_ROWS,
+    };
+    try {
+        sessionStorage.setItem(REGION_CR_SESSION_KEY, JSON.stringify(state));
+    } catch (e) {
+        // storage full or unavailable — ignore silently
+    }
+}
+
+function restoreRegionCrSessionState() {
+    let saved;
+    try {
+        saved = JSON.parse(sessionStorage.getItem(REGION_CR_SESSION_KEY));
+    } catch (e) {
+        saved = null;
+    }
+
+    if (!saved || !saved.date) return false;
+
+    document.getElementById('region-cr-date').value = saved.date;
+
+    ALL_ROWS = Array.isArray(saved.allRows) ? saved.allRows : [];
+    ORIGINAL_ROWS_BY_ID = {};
+    cloneRows(ALL_ROWS).forEach(row => {
+        ORIGINAL_ROWS_BY_ID[row.id] = row;
+    });
+
+    SELECTED_REGION = saved.selectedRegion || null;
+
+    document.querySelectorAll('.region-tab-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.region === SELECTED_REGION);
+    });
+
+    if (ALL_ROWS.length) {
+        applyRegionFilter();
+        bindDirtyTracking();
+    }
+
+    return true;
+}
+
+function getCookie(name) {
+    const cookies = document.cookie ? document.cookie.split(';') : [];
+    for (let i = 0; i < cookies.length; i++) {
+        const cookie = cookies[i].trim();
+        if (cookie.startsWith(name + '=')) {
+            return decodeURIComponent(cookie.substring(name.length + 1));
+        }
+    }
+    return null;
+}
+
+function cloneRows(rows) {
+    return JSON.parse(JSON.stringify(rows || []));
+}
+
+function getDisplayDate(isoDate) {
+    if (!isoDate) return '';
+    const [year, month, day] = isoDate.split('-');
+    return `${day}-${month}-${year}`;
+}
+
+function setRegionCrDateMin() {
+    const dateInput = document.getElementById('region-cr-date');
+    if (!dateInput) return;
+
+    const today = new Date();
+    const yesterday = new Date(today);
+    yesterday.setDate(today.getDate() - 1);
+
+    const pad = num => String(num).padStart(2, '0');
+    const formattedYesterday = `${yesterday.getFullYear()}-${pad(yesterday.getMonth() + 1)}-${pad(yesterday.getDate())}`;
+
+    dateInput.min = formattedYesterday;
+}
+
+function isBeforeMinAllowedDate(dateValue) {
+    const dateInput = document.getElementById('region-cr-date');
+    if (!dateInput || !dateInput.min || !dateValue) return false;
+    return dateValue < dateInput.min;
+}
+
+function setMeta(message) {
+    document.getElementById('region-cr-table-meta').textContent = message;
+}
+
+function showStatus(message, type = 'info') {
+    const bar = document.getElementById('region-cr-status-bar');
+    bar.textContent = message;
+    bar.className = `region-cr-status-bar status-${type}`;
+
+    if (STATUS_TIMEOUT) {
+        clearTimeout(STATUS_TIMEOUT);
+        STATUS_TIMEOUT = null;
+    }
+
+    if (!message) {
+        bar.classList.add('hidden');
+        return;
+    }
+
+    if (type === 'success' || type === 'error') {
+        STATUS_TIMEOUT = setTimeout(() => {
+            clearStatus();
+        }, 4000);
+    }
+}
+
+function clearStatus() {
+    const bar = document.getElementById('region-cr-status-bar');
+    bar.textContent = '';
+    bar.className = 'region-cr-status-bar hidden';
+
+    if (STATUS_TIMEOUT) {
+        clearTimeout(STATUS_TIMEOUT);
+        STATUS_TIMEOUT = null;
+    }
+}
+
+function setTableMessage(message, colspan = 20) {
+    document.getElementById('region-cr-table-head').innerHTML = '';
+    document.getElementById('region-cr-table-body').innerHTML =
+        `<tr><td colspan="${colspan}" class="region-cr-empty-cell">${message}</td></tr>`;
+}
+
+function isEditableColumn(column) {
+    return CAN_EDIT && EDITABLE_FIELDS.includes(column);
+}
+
+function escapeHtml(value) {
+    return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+}
+
+function renderEditableCell(row, column) {
+    const value = row[column] ?? '';
+    const rowId = row.id;
+
+    if (column === 'node_count') {
+        return `<input type="number" class="region-cr-input region-cr-input-sm" data-row-id="${rowId}" data-field="${column}" value="${escapeHtml(value)}">`;
+    }
+
+    if (['node_details', 'reason_for_rollback_cancel', 'test_cases', 'additional_info'].includes(column)) {
+        return `<textarea class="region-cr-input region-cr-textarea" data-row-id="${rowId}" data-field="${column}">${escapeHtml(value)}</textarea>`;
+    }
+
+    return `<input type="text" class="region-cr-input" data-row-id="${rowId}" data-field="${column}" value="${escapeHtml(value)}">`;
+}
+
+const FROZEN_COLUMN_WIDTHS = {
+    sno: 60,
+    ms_project: 100,
+    execution_date: 120,
+    maintenance_window: 170,
+    cr_no: 150,
+};
+const DEFAULT_COLUMN_WIDTH = 160;
+
+function getColumnWidth(col) {
+    return FROZEN_COLUMN_WIDTHS[col] || DEFAULT_COLUMN_WIDTH;
+}
+
+function renderTable(rows) {
+    const table = document.getElementById('region-cr-table');
+    const colgroup = document.getElementById('region-cr-table-colgroup');
+    const head = document.getElementById('region-cr-table-head');
+    const body = document.getElementById('region-cr-table-body');
+
+    head.innerHTML = '';
+    body.innerHTML = '';
+    colgroup.innerHTML = '';
+
+    if (!rows || !rows.length) {
+        setTableMessage('No entries found.', 20);
+        return;
+    }
+
+    const rawColumns = Object.keys(rows[0]);
+    const columns = rawColumns.filter(col => col !== 'id');
+    const freezeUntilIndex = columns.indexOf('cr_no');
+
+    const leftOffsets = [];
+    let cumulative = 0;
+    columns.forEach((col, index) => {
+        leftOffsets[index] = cumulative;
+        cumulative += getColumnWidth(col);
+    });
+
+    colgroup.innerHTML = columns.map(col =>
+        `<col style="width:${getColumnWidth(col)}px">`
+    ).join('');
+
+    head.innerHTML = columns.map((col, index) => {
+        const frozen = index <= freezeUntilIndex;
+        const cls = frozen ? 'sticky-col sticky-corner' : '';
+        const style = frozen ? `style="left:${leftOffsets[index]}px"` : '';
+        return `<th class="${cls}" ${style}>${escapeHtml(formatHeaderLabel(col))}</th>`;
+    }).join('');
+
+    body.innerHTML = rows.map((row, rowIndex) => `
+        <tr data-row-id="${row.id}">
+            ${columns.map((col, index) => {
+                const frozen = index <= freezeUntilIndex;
+                const cls = frozen ? 'sticky-col' : '';
+                const style = frozen ? `style="left:${leftOffsets[index]}px"` : '';
+
+                if (col === 'sno') {
+                    return `<td class="${cls}" ${style}>${rowIndex + 1}</td>`;
+                }
+                if (isEditableColumn(col)) {
+                    return `<td class="${cls} editable-cell" ${style}>${renderEditableCell(row, col)}</td>`;
+                }
+                return `<td class="${cls}" ${style}>${escapeHtml(row[col] ?? '')}</td>`;
+            }).join('')}
+        </tr>
+    `).join('');
+}
+
+function formatHeaderLabel(col) {
+    if (col === 'sno') return 'S.No';
+    return col
+        .split('_')
+        .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+        .join(' ');
+}
+
+function getVisibleRows() {
+    if (!SELECTED_REGION) return ALL_ROWS;
+    return ALL_ROWS.filter(row => String(row.region || '').toLowerCase() === SELECTED_REGION);
+}
+
+function applyRegionFilter() {
+    const date = document.getElementById('region-cr-date').value;
+    const displayDate = getDisplayDate(date);
+
+    if (!ALL_ROWS.length) {
+        setMeta('No data loaded.');
+        setTableMessage('Select a date and click Fetch CRs to load data.', 20);
+        return;
+    }
+
+    const visibleRows = getVisibleRows();
+    renderTable(visibleRows);
+
+    if (!SELECTED_REGION) {
+        setMeta(`Showing ${visibleRows.length} CRs for all regions on ${displayDate}.`);
+    } else {
+        const regionLabel = SELECTED_REGION.charAt(0).toUpperCase() + SELECTED_REGION.slice(1);
+        setMeta(`Showing ${visibleRows.length} CRs for ${regionLabel} on ${displayDate}.`);
+    }
+}
+
+function buildRowsFromApiResponse(data) {
+    if (data.rows && Array.isArray(data.rows)) {
+        return data.rows;
+    }
+
+    if (data.data && typeof data.data === 'object') {
+        return ['north', 'west', 'east', 'south'].flatMap(region => data.data[region] || []);
+    }
+
+    return [];
+}
+
+function getNormalizedValue(value) {
+    return value === null || value === undefined ? '' : String(value).trim();
+}
+
+function markInputDirtyState(input) {
+    const rowId = parseInt(input.dataset.rowId, 10);
+    const field = input.dataset.field;
+    const originalRow = ORIGINAL_ROWS_BY_ID[rowId];
+
+    if (!originalRow) return;
+
+    const originalValue = getNormalizedValue(originalRow[field]);
+    const currentValue = getNormalizedValue(input.value);
+    const cell = input.closest('td');
+
+    if (currentValue !== originalValue) {
+        input.classList.add('dirty-input');
+        if (cell) cell.classList.add('dirty-cell');
+    } else {
+        input.classList.remove('dirty-input');
+        if (cell) cell.classList.remove('dirty-cell');
+    }
+}
+
+function bindDirtyTracking() {
+    document.querySelectorAll('.region-cr-input').forEach(input => {
+        input.addEventListener('input', function () {
+            markInputDirtyState(input);
+        });
+        markInputDirtyState(input);
+    });
+}
+
+function fetchAllForDate() {
+    const date = document.getElementById('region-cr-date').value;
+    if (!date) {
+        clearStatus();
+        setMeta('Please select a date.');
+        setTableMessage('Select a date and click Fetch CRs to load data.', 20);
+        return;
+    }
+
+    if (isBeforeMinAllowedDate(date)) {
+        clearStatus();
+        setMeta('Please select yesterday, today, or a future date.');
+        setTableMessage('Dates before yesterday are not allowed.', 20);
+        return;
+    }
+
+    clearStatus();
+    setMeta(`Loading CRs for ${getDisplayDate(date)}...`);
+    setTableMessage('Loading data...', 20);
+
+    fetch(`{% url 'fetch_region_cr_details' %}?${new URLSearchParams({ date }).toString()}`)
+        .then(res => res.json())
+        .then(data => {
+            if (!data.ok) {
+                ALL_ROWS = [];
+                ORIGINAL_ROWS_BY_ID = {};
+                setMeta(data.message || 'Failed to fetch region CR details.');
+                setTableMessage(data.message || 'Failed to fetch region CR details.', 20);
+                return;
+            }
+
+            ALL_ROWS = buildRowsFromApiResponse(data);
+            ORIGINAL_ROWS_BY_ID = {};
+
+            cloneRows(ALL_ROWS).forEach(row => {
+                ORIGINAL_ROWS_BY_ID[row.id] = row;
+            });
+
+            applyRegionFilter();
+            bindDirtyTracking();
+            saveRegionCrSessionState();
+        })
+        .catch(() => {
+            ALL_ROWS = [];
+            ORIGINAL_ROWS_BY_ID = {};
+            setMeta('Error fetching Region CR details.');
+            setTableMessage('Error fetching Region CR details.', 20);
+        });
+}
+
+function collectChanges() {
+    const changesByRow = {};
+
+    document.querySelectorAll('.region-cr-input').forEach(input => {
+        const rowId = parseInt(input.dataset.rowId, 10);
+        const field = input.dataset.field;
+        const originalRow = ORIGINAL_ROWS_BY_ID[rowId];
+
+        if (!originalRow) return;
+
+        const newValue = getNormalizedValue(input.value);
+        const oldValue = getNormalizedValue(originalRow[field]);
+
+        if (newValue !== oldValue) {
+            if (!changesByRow[rowId]) {
+                changesByRow[rowId] = { id: rowId, fields: {} };
+            }
+            changesByRow[rowId].fields[field] = newValue;
+        }
+    });
+
+    return Object.values(changesByRow);
+}
+
+function syncInputsToAllRows() {
+    const rowMap = {};
+    ALL_ROWS.forEach(row => {
+        rowMap[row.id] = row;
+    });
+
+    document.querySelectorAll('.region-cr-input').forEach(input => {
+        const rowId = parseInt(input.dataset.rowId, 10);
+        const field = input.dataset.field;
+
+        if (rowMap[rowId]) {
+            rowMap[rowId][field] = getNormalizedValue(input.value);
+        }
+    });
+}
+
+function clearDirtyHighlights() {
+    document.querySelectorAll('.region-cr-input').forEach(input => input.classList.remove('dirty-input'));
+    document.querySelectorAll('.dirty-cell').forEach(cell => cell.classList.remove('dirty-cell'));
+}
+
+function saveChanges() {
+    if (!CAN_EDIT) {
+        showStatus('You are not authorized to save changes.', 'error');
+        return;
+
+    }
+
+    const changes = collectChanges();
+
+    if (!changes.length) {
+        showStatus('No changes to save.', 'info');
+        return;
+    }
+
+    const saveBtn = document.getElementById('save-region-cr-btn');
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Saving...';
+    showStatus('Saving changes...', 'info');
+
+    fetch(`{% url 'save_region_cr_details' %}`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'X-CSRFToken': getCookie('csrftoken'),
+        },
+        body: JSON.stringify({ changes }),
+    })
+        .then(res => res.json())
+        .then(data => {
+            if (!data.ok) {
+                showStatus('Failed to save record.', 'error');
+                return;
+            }
+
+            syncInputsToAllRows();
+            ORIGINAL_ROWS_BY_ID = {};
+            cloneRows(ALL_ROWS).forEach(row => {
+                ORIGINAL_ROWS_BY_ID[row.id] = row;
+            });
+
+            clearDirtyHighlights();
+            saveRegionCrSessionState();
+
+            const updatedCount = Array.isArray(data.updated_rows) ? data.updated_rows.length : 0;
+
+            if (updatedCount > 0) {
+                const label = updatedCount === 1 ? 'record' : 'records';
+                showStatus(`${updatedCount} ${label} updated successfully.`, 'success');
+            } else {
+                showStatus('Failed to save record.', 'error');
+            }
+        })
+        .catch(() => {
+            showStatus('Failed to save record.', 'error');
+        })
+        .finally(() => {
+            saveBtn.disabled = !CAN_EDIT;
+            saveBtn.textContent = 'Save Changes';
+        });
+}
+
+setRegionCrDateMin();
+restoreRegionCrSessionState();
+
+document.querySelectorAll('.region-tab-btn').forEach(btn => {
+    btn.addEventListener('click', function () {
+        document.querySelectorAll('.region-tab-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        SELECTED_REGION = btn.dataset.region;
+
+        if (!ALL_ROWS.length) {
+            fetchAllForDate();
+        } else {
+            applyRegionFilter();
+            saveRegionCrSessionState();
+        }
+    });
+});
+
+document.getElementById('fetch-region-cr-btn').addEventListener('click', function () {
+    document.querySelectorAll('.region-tab-btn').forEach(b => b.classList.remove('active'));
+    SELECTED_REGION = null;
+    fetchAllForDate();
+});
+
+document.getElementById('save-region-cr-btn').addEventListener('click', saveChanges);
+</script>
 {% endblock %}
