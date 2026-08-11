@@ -10,9 +10,6 @@
 /cr_process_automation/media
 /cr_process_automation/cr_process_automation/Standard_Template
 __pycache__/
-<<<<<<< HEAD
-Session_store_files/
-=======
 pw-browsers/
 .env
->>>>>>> secondary/main
+Session_store_files/
