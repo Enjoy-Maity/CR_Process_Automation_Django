@@ -9,6 +9,7 @@ dependencies = [
     "charset-normalizer>=3.4.9",
     "django>=6.0.7",
     "django-redis>=7.0.0",
+    "git-filter-repo>=2.47.0",
     "keyboard>=0.13.5",
     "lxml>=6.1.1",
     "openpyxl>=3.1.5",
