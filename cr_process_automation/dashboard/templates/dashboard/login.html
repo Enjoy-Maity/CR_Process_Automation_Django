@@ -1,0 +1,43 @@
+
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Login</title>
+    <link rel="stylesheet" href="{% static 'dashboard/css/style.css' %}">
+    <style>
+        .login-page{min-height:100vh;display:flex;align-items:center;justify-content:center;background:#edf3fa}
+        .login-card{width:100%;max-width:420px;background:#fff;border:1px solid #d5dde8;border-radius:12px;box-shadow:0 8px 24px rgba(10,35,66,.08);padding:28px}
+        .login-card h1{margin:0 0 18px;color:#0a5ea8;text-align:center;font-size:26px}
+        .login-form-row{margin-bottom:16px}
+        .login-form-row label{display:block;margin-bottom:6px;font-weight:700;color:#1f2937}
+        .login-form-row input{width:100%;padding:10px 12px;border:1px solid #cbd5e1;border-radius:8px}
+        .login-btn{width:100%;border:none;background:#0a5ea8;color:#fff;padding:11px 14px;border-radius:8px;font-weight:700;cursor:pointer}
+        .login-error{margin-bottom:14px;background:#fee2e2;color:#b91c1c;border:1px solid #fecaca;padding:10px 12px;border-radius:8px;text-align:center}
+    </style>
+</head>
+<body>
+    <div class="login-page">
+        <div class="login-card">
+            <h1>CR Process Automation (CRPA)</h1>
+            {% if message %}
+                <div class="login-error">{{ message }}</div>
+            {% endif %}
+            <form method="post">
+                {% csrf_token %}
+                <div class="login-form-row">
+                    <label for="id_username">Username</label>
+                    {{ form.username }}
+                </div>
+                <div class="login-form-row">
+                    <label for="id_password">Password</label>
+                    {{ form.password }}
+                </div>
+                <button type="submit" class="login-btn">Login</button>
+            </form>
+        </div>
+    </div>
+</body>
+</html>

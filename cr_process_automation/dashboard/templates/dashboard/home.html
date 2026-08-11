@@ -5,6 +5,30 @@
     <div class="page-head compact-page-head">
         <h2 class="module-page-title compact-module-title">CR Planning Tasks</h2>
     </div>
+    {% comment %} <div class="user-summary-panel" style="margin-bottom:14px;padding:12px 14px;border:1px solid #d5dde8;border-radius:10px;background:#f7f9fc;">
+        <div><strong>User Name:</strong> {{ user_name }}</div>
+        <div><strong>User Role:</strong> {{ user_role }}</div>
+        <div><strong>User Mail Id:</strong> {{ user_email }}</div>
+    </div> {% endcomment %}
+    <div class="region-filter-panel" style="margin-bottom:16px;padding:14px;border:1px solid #d5dde8;border-radius:10px;background:#f7f9fc;">
+    <div style="margin-bottom:12px;">
+            <span class="cr-history-filter-label">Note:- Select Date and Regions before proceeding for task.</span>
+    </div>  
+    <div style="display:flex;gap:20px;align-items:center;flex-wrap:wrap;">
+        
+        <div>
+            <label for="cr_filter_date" style="font-weight:700;margin-right:8px;">Date:</label>
+            <input type="date" id="cr_filter_date" name="cr_filter_date">
+        </div>
+        <div style="display:flex;gap:14px;align-items:center;">
+            <label><input type="checkbox" class="region-checkbox" value="north"> North</label>
+            <label><input type="checkbox" class="region-checkbox" value="west"> West</label>
+            <label><input type="checkbox" class="region-checkbox" value="east"> East</label>
+            <label><input type="checkbox" class="region-checkbox" value="south"> South</label>
+        </div>
+        <button type="button" id="apply_region_filter_btn" class="action-btn compact-btn apply-filter-btn">Apply Filter</button>  
+    </div> 
+</div>
     <div class="table-wrap compact-table-wrap">
         <table class="task-table compact-task-table ultra-compact-task-table">
             <thead>
@@ -35,31 +59,163 @@
                     <td class="js-east-crs">{{ task.east_crs }}</td>
                     <td class="js-south-crs">{{ task.south_crs }}</td>
                     <td>
-                        <span class="status-badge compact-status js-task-status {% if task.status == 'Completed' %}status-success{% elif task.status == 'Running' %}status-progress{% elif task.status == 'Failed' %}status-failed{% endif %}">
+                    <span class="status-badge compact-status js-task-status {% if task.status == 'Completed' %}status-success{% elif task.status == 'Running' %}status-progress{% elif task.status == 'Failed' %}status-failed{% endif %}">
                             {{ task.status }}
-                        </span>
+                    </span>
                     </td>
                     <td>
                         <div class="download-area">
-                            {% if task.download_ready %}
-                                <a href="{% url 'download_task_output' task.id %}" class="action-btn download-btn compact-btn js-download-link auto-ready" data-task-id="{{ task.id }}">Download</a>
+                            {% if task.id != 5 and task.id != 7 %}
+                                {% if task.status == 'Completed' and task.download_ready %}
+                                    <a href="{% url 'download_task_output' task.id %}" class="action-btn download-btn compact-btn js-download-link auto-ready" data-task-id="{{ task.id }}">Download</a>
+                                {% else %}
+                                    <a href="#" class="action-btn download-btn compact-btn js-download-link hidden" data-task-id="{{ task.id }}">Download</a>
+                                    <span class="text-muted js-download-placeholder">Waiting</span>
+                                {% endif %}
                             {% else %}
-                                <a href="#" class="action-btn download-btn compact-btn js-download-link hidden" data-task-id="{{ task.id }}">Download</a>
-                                <span class="text-muted js-download-placeholder">Waiting</span>
+                                <span class="text-muted js-download-placeholder">Not Applicable</span>
                             {% endif %}
                         </div>
                     </td>
                 </tr>
             {% empty %}
-                <tr>
-                    <td colspan="10">No tasks configured yet.</td>
-                </tr>
+                <tr><td colspan="10">No tasks configured yet.</td></tr>
             {% endfor %}
             </tbody>
         </table>
     </div>
 </div>
 
+<script>
+const HOME_SESSION_KEY = 'home_page_state';
+
+function saveHomeSessionState(date, regions, countsAll, countsPlanned) {
+    const perTaskCounts = [];
+
+    document.querySelectorAll("tr[data-task-id]").forEach(row => {
+        const taskId = parseInt(row.dataset.taskId, 10);
+        const totalCell = row.querySelector(".js-total-crs");
+        const northCell = row.querySelector(".js-north-crs");
+        const westCell = row.querySelector(".js-west-crs");
+        const eastCell = row.querySelector(".js-east-crs");
+        const southCell = row.querySelector(".js-south-crs");
+
+        perTaskCounts.push({
+            task_id: taskId,
+            total_crs: totalCell ? totalCell.textContent : "",
+            north_crs: northCell ? northCell.textContent : "",
+            west_crs: westCell ? westCell.textContent : "",
+            east_crs: eastCell ? eastCell.textContent : "",
+            south_crs: southCell ? southCell.textContent : "",
+        });
+    });
+
+    const state = {
+        date,
+        regions,
+        perTaskCounts,
+    };
+
+    try {
+        sessionStorage.setItem(HOME_SESSION_KEY, JSON.stringify(state));
+    } catch (e) {
+        // ignore storage errors
+    }
+}
+
+function restoreHomeSessionState() {
+    let saved;
+    try {
+        saved = JSON.parse(sessionStorage.getItem(HOME_SESSION_KEY));
+    } catch (e) {
+        saved = null;
+    }
+
+    if (!saved) return false;
+
+    const dateInput = document.getElementById("cr_filter_date");
+    if (saved.date && dateInput) {
+        dateInput.value = saved.date;
+    }
+
+    const regionCheckboxes = document.querySelectorAll(".region-checkbox");
+    if (Array.isArray(saved.regions) && regionCheckboxes.length) {
+        regionCheckboxes.forEach(cb => {
+            cb.checked = saved.regions.includes(cb.value);
+        });
+    }
+
+    if (Array.isArray(saved.perTaskCounts)) {
+        saved.perTaskCounts.forEach(savedRow => {
+            const row = document.querySelector(`tr[data-task-id="${savedRow.task_id}"]`);
+            if (!row) return;
+
+            const totalCell = row.querySelector(".js-total-crs");
+            const northCell = row.querySelector(".js-north-crs");
+            const westCell = row.querySelector(".js-west-crs");
+            const eastCell = row.querySelector(".js-east-crs");
+            const southCell = row.querySelector(".js-south-crs");
+
+            if (totalCell) totalCell.textContent = savedRow.total_crs ?? "";
+            if (northCell) northCell.textContent = savedRow.north_crs ?? "";
+            if (westCell) westCell.textContent = savedRow.west_crs ?? "";
+            if (eastCell) eastCell.textContent = savedRow.east_crs ?? "";
+            if (southCell) southCell.textContent = savedRow.south_crs ?? "";
+        });
+    }
+
+    return true;
+}
+
+document.getElementById("apply_region_filter_btn").addEventListener("click", function () {
+    const date = document.getElementById("cr_filter_date").value;
+    const checkboxes = document.querySelectorAll(".region-checkbox:checked");
+    const regions = Array.from(checkboxes).map(cb => cb.value);
+
+    if (!date || regions.length === 0) {
+        alert("Please select a date and at least one region.");
+        return;
+    }
+
+    const params = new URLSearchParams({ date: date, regions: regions.join(",") });
+
+    fetch(`/filter-region-crs/?${params.toString()}`)
+        .then(res => res.json())
+        .then(data => {
+            if (!data.ok) {
+                alert(data.message || "Failed to fetch region CR counts.");
+                return;
+            }
+
+            const countsAll = data.counts_all || {};
+            const countsPlanned = data.counts_planned || {};
+
+            document.querySelectorAll("tr[data-task-id]").forEach(row => {
+                const taskId = parseInt(row.dataset.taskId, 10);
+                const totalCell = row.querySelector(".js-total-crs");
+                const northCell = row.querySelector(".js-north-crs");
+                const westCell = row.querySelector(".js-west-crs");
+                const eastCell = row.querySelector(".js-east-crs");
+                const southCell = row.querySelector(".js-south-crs");
+
+                const src = (taskId === 1) ? countsAll : countsPlanned;
+
+                if (totalCell) totalCell.textContent = src.total_crs ?? 0;
+                if (northCell) northCell.textContent = src.north_crs ?? 0;
+                if (westCell) westCell.textContent = src.west_crs ?? 0;
+                if (eastCell) eastCell.textContent = src.east_crs ?? 0;
+                if (southCell) southCell.textContent = src.south_crs ?? 0;
+            });
+
+            // Persist full per-task state
+            saveHomeSessionState(date, regions, countsAll, countsPlanned);
+        })
+        .catch(() => alert("Error fetching region CR counts."));
+});
+
+// Restore when the page loads
+restoreHomeSessionState();
+</script>
 <!-- Auth / Password / OTP overlay -->
 <div id="auth-overlay" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.6); z-index: 1050; align-items: center; justify-content: center; backdrop-filter: blur(3px);">
     <div class="auth-modal" style="background: white; padding: 20px; border-radius: 8px; box-shadow: 0 10px 25px rgba(0,0,0,0.2); position: relative; width: 450px; max-width: 90%;">
@@ -69,3 +225,4 @@
     </div>
 </div>
 {% endblock %}
+

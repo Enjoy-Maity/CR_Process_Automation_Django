@@ -22,7 +22,7 @@ os.environ["PLAYWRIGHT_BROWSERS_PATH"]=os.path.join(str(root), "pw-browsers")
 #     r"C:\Users\username\Desktop\my_files"
 # )
 
-os.environ["RAW_REPORT_DOWNLOAD_FOLDER"]=os.path.join(settings.HOST_DOWNLOAD_DIR, "Raw_Report_to_Template", "Raw_Reports", datetime.now().strftime("%d-%b-%y"))
+os.environ["RAW_REPORT_DOWNLOAD_FOLDER"]=os.path.join(settings.HOST_DOWNLOAD_DIR, "Raw_Report_to_Template", "Raw_Reports", "{}")
 
 if not os.path.exists(os.path.join(settings.HOST_DOWNLOAD_DIR, "Planning_Sheet",)):
     Path(os.path.join(settings.HOST_DOWNLOAD_DIR, "Planning_Sheet")).mkdir(parents=True)

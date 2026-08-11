@@ -10,7 +10,6 @@ class TwoFactorAuthForm(forms.Form):
     )
     task_id = forms.CharField(widget=forms.HiddenInput(), required=True)
 
-
 class PasswordAuthForm(forms.Form):
     password = forms.CharField(
         max_length=128,
@@ -23,3 +22,8 @@ class PasswordAuthForm(forms.Form):
         label="Password"
     )
     task_id = forms.CharField(widget=forms.HiddenInput(), required=True)
+
+
+class LoginForm(forms.Form):
+    username = forms.CharField(max_length=150)
+    password = forms.CharField(widget=forms.PasswordInput)

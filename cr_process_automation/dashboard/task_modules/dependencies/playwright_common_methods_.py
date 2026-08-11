@@ -2,8 +2,6 @@ import os
 import traceback
 import pythoncom
 import rootutils
-import threading
-from pathlib import Path
 from dashboard.views import _timestamp
 from django.conf import settings
 from playwright.sync_api import (
@@ -18,11 +16,13 @@ from playwright.sync_api import (
     FrameLocator,
     Locator,
 )
-from typing import Union, Tuple
 from collections.abc import Callable
 from datetime import datetime, timedelta, date
 from dateutil import parser
-
+from pathlib import Path
+from typing import Union, Tuple
+import threading
+import  dateutil.parser as dp
 
 def request_password_from_user(runtime, task, logs, timestamp_fn, timeout=300):
     """
@@ -143,7 +143,9 @@ def raw_report_downloader(
         date_2 = f"{(date_ + timedelta(days=1)).replace(hour=8, minute=0, second=0).strftime('%m/%d/%Y %H:%M:%S')}"
 
 
-    folder = str(os.getenv("RAW_REPORT_DOWNLOAD_FOLDER"))
+    folder_date = (dp.parse(date_1)).strftime("%d-%b-%y")
+
+    folder = str(os.getenv("RAW_REPORT_DOWNLOAD_FOLDER")).format(folder_date)
     
     page.wait_for_load_state("domcontentloaded")
     page.wait_for_timeout(1000)
@@ -232,15 +234,17 @@ def raw_report_downloader(
     runtime["status"]="Dowloading the Raw Report"
 
     logs.append(f"{task_name}: [{timestamp_fn}] :: Downloading the Raw Report")
-    
+
+    report_file_date = (dp.parse(date_1))
+
     if os.path.exists(
-        os.path.join(folder, f"PS_Core_Raw_Report_{datetime.now().strftime('%Y-%m-%d')}.csv")
+        os.path.join(folder, f"PS_Core_Raw_Report_{report_file_date.strftime('%Y-%m-%d')}.csv")
     ):
         os.remove(
-            os.path.join(folder, f"PS_Core_Raw_Report_{datetime.now().strftime('%Y-%m-%d')}.csv")
+            os.path.join(folder, f"PS_Core_Raw_Report_{report_file_date.strftime('%Y-%m-%d')}.csv")
         )
     download.save_as(
-        os.path.join(folder, f"PS_Core_Raw_Report_{datetime.now().strftime('%Y-%m-%d')}.csv")
+        os.path.join(folder, f"PS_Core_Raw_Report_{report_file_date.strftime('%Y-%m-%d')}.csv")
     )
 
     # time.sleep(2)
@@ -253,7 +257,7 @@ def raw_report_downloader(
 
 
 def login_to_itsm(
-    page: Page, logs: list, runtime: dict, task: dict, timestamp_fn: Callable
+    page: Page, logs: list, runtime: dict, task: dict, timestamp_fn: Callable, user_email: str = None
 ):
     # if folder is None:
     #     folder = str(Path(__file__).parent.parent)
@@ -271,10 +275,13 @@ def login_to_itsm(
     # clicking the logon button
     # page.locator("//a[@id='loginBtn']", has_text="Log On").click()
 
-    username = str(os.getenv("EMAIL_USERNAME"))
+    resolved_user_email = user_email or str(os.getenv('EMAIL_USERNAME'))
+    
+    if not user_email:
+        logs.append(f"Warning: no user email provided, falling back to EMAIL_USERNAME env var ---- {timestamp_fn()}")
 
     # Filling the user name
-    page.locator('//div/input[@id="i0116"]').fill(username)
+    page.locator('//div/input[@id="i0116"]').fill(resolved_user_email)
     page.locator('//div/input[@id="idSIButton9"]').click()
     
     page.wait_for_load_state("load", timeout=60000)
@@ -523,7 +530,8 @@ def itsm_logger(
     headless_arg: bool, 
     task: dict, 
     runtime:dict|None=None, 
-    timestamp_fn:Callable|None=None) -> Tuple[Browser|None, BrowserContext | None, Page | None, list]:
+    timestamp_fn:Callable|None=None,
+    user_email: str = None) -> Tuple[Browser|None, BrowserContext | None, Page | None, list]:
     
     # print("inside itsm logger")
 
@@ -563,7 +571,7 @@ def itsm_logger(
         logs.append(f"{task['name']}: opening {str(os.getenv('ITSM_URL'))} ---- {_timestamp()}")
         page.goto( str(os.getenv("ITSM_URL")), wait_until="load")
 
-        password = login_to_itsm(page, logs, runtime, task, timestamp_fn)
+        password = login_to_itsm(page, logs, runtime, task, timestamp_fn, user_email)
         # password = str(os.getenv("PASSWORD"))
 
         # Ask the user for their password instead of hardcoding it

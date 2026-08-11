@@ -1,0 +1,191 @@
+{% extends 'dashboard/base_module.html' %}
+{% block module_content %}
+<div class="region-crs-page">
+  <div class="region-cr-panel">
+    <div class="region-filter-panel">
+      <h2 class="module-page-title compact-module-title">CR Wise Status (PAN-INDIA)</h2>
+
+      <div class="region-filter-row">
+        <label for="status-cr-date" class="region-date-label">Date</label>
+        <input type="date" id="status-cr-date" name="statuscrdate">
+
+        <button type="button" id="fetch-status-cr-btn" class="action-btn compact-btn apply-filter-btn">
+          Fetch CRs
+        </button>
+      </div>
+    </div>
+
+    <div class="region-cr-data-panel">
+      <div class="region-cr-status-bar hidden" id="status-cr-status-bar"></div>
+
+      <div class="region-cr-table-meta" id="status-cr-table-meta">
+        Select a date and click Fetch CRs to load data.
+      </div>
+
+      <div class="region-cr-scroll-wrap" id="status-cr-table-wrap">
+        <table class="region-cr-table" id="status-cr-table">
+          <thead>
+            <tr id="status-cr-table-head"></tr>
+          </thead>
+          <tbody id="status-cr-table-body">
+            <tr>
+              <td colspan="20" class="region-cr-empty-cell">
+                {% comment %} Select a date and click Fetch CRs to load data. {% endcomment %}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const STATUS_HIGHLIGHT_COLUMNS = [
+    "CR_Hygiene_Checks",
+    "Install_Test_Plan_Downloads",
+    "MOP_Attachment",
+    "CR_Approvals",
+    "NIAM_Ticket",
+];
+
+let STATUS_ALL_ROWS = [];
+let STATUS_TIMEOUT = null;
+
+function setStatusMeta(message) {
+    document.getElementById('status-cr-table-meta').textContent = message;
+}
+
+function showStatusMsg(message, type = 'info') {
+    const bar = document.getElementById('status-cr-status-bar');
+    bar.textContent = message;
+    bar.className = `region-cr-status-bar status-${type}`;
+
+    if (STATUS_TIMEOUT) {
+        clearTimeout(STATUS_TIMEOUT);
+        STATUS_TIMEOUT = null;
+    }
+
+    if (!message) {
+        bar.classList.add('hidden');
+        return;
+    }
+
+    if (type === 'success' || type === 'error') {
+        STATUS_TIMEOUT = setTimeout(() => clearStatusMsg(), 4000);
+    }
+}
+
+function clearStatusMsg() {
+    const bar = document.getElementById('status-cr-status-bar');
+    bar.textContent = '';
+    bar.className = 'region-cr-status-bar hidden';
+
+    if (STATUS_TIMEOUT) {
+        clearTimeout(STATUS_TIMEOUT);
+        STATUS_TIMEOUT = null;
+    }
+}
+
+function setStatusTableMessage(message, colspan = 20) {
+    document.getElementById('status-cr-table-head').innerHTML = '';
+    document.getElementById('status-cr-table-body').innerHTML =
+        `<tr><td colspan="${colspan}" class="region-cr-empty-cell">${message}</td></tr>`;
+}
+
+function escapeHtml(value) {
+    return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+}
+
+function formatHeaderLabel(col) {
+    if (col === 'sno') return 'S.No';
+    return col
+        .split('_')
+        .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+        .join(' ');
+}
+
+function getStatusCellClass(column, value) {
+    if (!STATUS_HIGHLIGHT_COLUMNS.includes(column)) return '';
+    const normalized = String(value ?? '').trim().toLowerCase();
+
+    if (normalized === 'successful') return 'status-cell-success';
+    if (normalized === 'unsuccessful') return 'status-cell-unsuccessful';
+    if (normalized === 'pending') return 'status-cell-pending';
+    if (!normalized) return '';
+    return 'status-cell-unsuccessful';
+}
+
+function renderStatusTable(rows) {
+    const head = document.getElementById('status-cr-table-head');
+    const body = document.getElementById('status-cr-table-body');
+
+    head.innerHTML = '';
+    body.innerHTML = '';
+
+    if (!rows || !rows.length) {
+        setStatusTableMessage('No entries found.', 20);
+        return;
+    }
+
+    const rawColumns = Object.keys(rows[0]);
+    const columns = rawColumns.filter(col => col !== 'id');
+
+    head.innerHTML = columns.map(col => `<th>${escapeHtml(formatHeaderLabel(col))}</th>`).join('');
+
+    body.innerHTML = rows.map((row, index) => `
+        <tr>
+            ${columns.map(col => {
+                if (col === 'sno') {
+                    return `<td>${index + 1}</td>`;
+                }
+                const cellClass = getStatusCellClass(col, row[col]);
+                return `<td class="${cellClass}">${escapeHtml(row[col] ?? '')}</td>`;
+            }).join('')}
+        </tr>
+    `).join('');
+}
+
+function fetchStatusCRs() {
+    const date = document.getElementById('status-cr-date').value;
+
+    if (!date) {
+        clearStatusMsg();
+        setStatusMeta('Please select a date.');
+        setStatusTableMessage('Select a date and click Fetch CRs to load data.', 20);
+        return;
+    }
+
+    clearStatusMsg();
+    setStatusMeta('Loading CR status...');
+    setStatusTableMessage('Loading data...', 20);
+
+    fetch(`{% url 'fetch_cr_wise_status' %}?${new URLSearchParams({ date }).toString()}`)
+        .then(res => res.json())
+        .then(data => {
+            if (!data.ok) {
+                STATUS_ALL_ROWS = [];
+                setStatusMeta(data.message || 'Failed to fetch CR status.');
+                setStatusTableMessage(data.message || 'Failed to fetch CR status.', 20);
+                return;
+            }
+
+            STATUS_ALL_ROWS = data.rows || [];
+            renderStatusTable(STATUS_ALL_ROWS);
+            setStatusMeta(`Showing ${STATUS_ALL_ROWS.length} record(s) on ${date}.`);
+        })
+        .catch(() => {
+            STATUS_ALL_ROWS = [];
+            setStatusMeta('Error fetching CR status.');
+            setStatusTableMessage('Error fetching CR status.', 20);
+        });
+}
+
+document.getElementById('fetch-status-cr-btn').addEventListener('click', fetchStatusCRs);
+</script>
+{% endblock %}

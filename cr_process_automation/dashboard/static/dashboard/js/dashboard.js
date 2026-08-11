@@ -51,6 +51,12 @@ function updateStatusCell(row, status) {
 }
 
 function updateCountCells(row, task) {
+    const body = document.body;
+    const selectedOption = body ? body.dataset.selectedOption : null;
+    if (selectedOption === 'cr_planning') {
+        return;
+    }
+    
     const mappings = {
         '.js-total-crs': task.total_crs,
         '.js-north-crs': task.north_crs,
@@ -145,15 +151,31 @@ async function refreshTaskPanels() {
 }
 
 async function startTask(taskId, row) {
+    const dateInput = document.getElementById('cr_filter_date');
+    const selectedDate = dateInput ? dateInput.value : '';
+
+    if (String(taskId) === '1' && !selectedDate) {
+        showMessage('Please select a Date before starting this task.');
+        const btn = document.querySelector(`button[data-task-id="${taskId}"]`);
+        if (btn) {
+            btn.disabled = false;
+            btn.textContent = 'Start';
+        }
+        return;
+    }
+
+    const formData = new FormData();
+    formData.append('date', selectedDate);
+
     const response = await fetch(`/api/task/start/${taskId}/`, {
         method: 'POST',
-        headers: { 'X-CSRFToken': getCookie('csrftoken') }
+        headers: { 'X-CSRFToken': getCookie('csrftoken') },
+        body: formData,
     });
     const data = await response.json();
     if (!response.ok || !data.ok) {
         showMessage(data.message || 'Task start failed.');
 
-        // IMPORTANT: Re-enable the button immediately so the user can try again later
         const btn = document.querySelector(`button[data-task-id="${taskId}"]`);
         if (btn) {
             btn.disabled = false;
@@ -163,8 +185,6 @@ async function startTask(taskId, row) {
         return;
     }
 
-    // Instead of showing a blocking alert for successful task completion here,
-    // we let the status cells and logs do the talking while polling handles the updates.
     if (row) {
         updateStatusCell(row, data.status || 'Running');
     }
