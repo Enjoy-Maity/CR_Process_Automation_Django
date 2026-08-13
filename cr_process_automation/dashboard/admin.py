@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import AutomationTask, TaskRun, TaskLog, MasterCRDatabase, CRWiseStatus
+from .models import AutomationTask, TaskRun, TaskLog, MasterCRDatabase, CRWiseStatus, SelectedDateTable
 
 from django.contrib.auth.admin import UserAdmin
 from .models import UserManagement
@@ -81,5 +81,21 @@ class CRWiseStatusAdmin(admin.ModelAdmin):
     )
     search_fields = (
         "region", "circle", "cr_no", "technical_validator"
+    )
+    ordering = ("-execution_date",)
+
+@admin.register(SelectedDateTable)
+class SelectedDateTableAdmin(admin.ModelAdmin):
+    list_display = (
+        "cr_no", "execution_date", "region", "circle", "priority",
+        "planning_status", "activity_status", "vendor", "team"
+    )
+    list_filter = (
+        "region", "circle", "priority", "planning_status", "activity_status",
+        "vendor", "team", "service_affecting", "inter_domain_activity"
+    )
+    search_fields = (
+        "cr_no", "activity_description", "node_details", "region", "circle",
+        "vendor", "team", "activity_executor", "auditor_name"
     )
     ordering = ("-execution_date",)

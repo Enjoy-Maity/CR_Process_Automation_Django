@@ -130,28 +130,116 @@ class UserManagement(AbstractUser):
     def __str__(self):
         return f"{self.username} ({self.role})"
 
+# class CRWiseStatus(models.Model):
+#     sno = models.IntegerField(null=True, blank=True)
+#     execution_date = models.DateField(null=True, blank=True)
+#     maintenance_window = models.CharField(max_length=50, null=True, blank=True)
+#     cr_no = models.CharField(max_length=50, unique=True)
+#     risk = models.CharField(max_length=100, null=True, blank=True)
+#     activity_description = models.TextField(null=True, blank=True)
+#     bpms_cr_yes_no = models.CharField(max_length=10, null=True, blank=True)
+#     circle = models.CharField(max_length=50, null=True, blank=True)
+#     region = models.CharField(max_length=50, null=True, blank=True)
+#     technical_validator = models.CharField(max_length=100, null=True, blank=True)
+#     CR_Hygiene_Checks = models.CharField(max_length=100, null=True, blank=True)
+#     Install_Test_Plan_Downloads = models.CharField(max_length=100, null=True, blank=True)
+#     MOP_Attachment = models.CharField(max_length=100, null=True, blank=True)
+#     CR_Approvals = models.CharField(max_length=100, null=True, blank=True)
+#     NIAM_Ticket = models.CharField(max_length=100, null=True, blank=True)
+
+#     class Meta:
+#             db_table = "cr_wise_status"
+    
+#     def __str__(self):
+#         return self.cr_no
+
+
 class CRWiseStatus(models.Model):
     sno = models.IntegerField(null=True, blank=True)
     execution_date = models.DateField(null=True, blank=True)
     maintenance_window = models.CharField(max_length=50, null=True, blank=True)
-    cr_no = models.CharField(max_length=50, unique=True)
+    
+    # Critical: Unique constraint prevents duplicate CRs at DB level
+    cr_no = models.CharField(max_length=50, unique=True) 
+    
     risk = models.CharField(max_length=100, null=True, blank=True)
     activity_description = models.TextField(null=True, blank=True)
     bpms_cr_yes_no = models.CharField(max_length=10, null=True, blank=True)
     circle = models.CharField(max_length=50, null=True, blank=True)
     region = models.CharField(max_length=50, null=True, blank=True)
     technical_validator = models.CharField(max_length=100, null=True, blank=True)
+    
+    # Status Flags
     CR_Hygiene_Checks = models.CharField(max_length=100, null=True, blank=True)
     Install_Test_Plan_Downloads = models.CharField(max_length=100, null=True, blank=True)
     MOP_Attachment = models.CharField(max_length=100, null=True, blank=True)
     CR_Approvals = models.CharField(max_length=100, null=True, blank=True)
     NIAM_Ticket = models.CharField(max_length=100, null=True, blank=True)
 
+    # Optional: Add version field for optimistic locking if needed
+    version = models.IntegerField(default=0) 
+
     class Meta:
-            db_table = "cr_wise_status"
+        db_table = "cr_wise_status"
+        # Ensure DB-level uniqueness
+        constraints = [
+            models.UniqueConstraint(fields=['cr_no'], name='unique_cr_no')
+        ]
     
     def __str__(self):
         return self.cr_no
 
 
+class FlagTable(models.Model):
+    source_id = models.CharField(max_length=50, unique=True)
+    status = models.BooleanField(default=False)
+    version = models.IntegerField(default=0) # Optimistic locking helper
+
+
+class SelectedDateTable(models.Model):
+    sno = models.IntegerField(null=True, blank=True)
+    ms_project = models.CharField(max_length=100, null=True, blank=True)
+    execution_date = models.DateField(null=True, blank=True)
+    maintenance_window = models.CharField(max_length=50, null=True, blank=True)
+    cr_no = models.CharField(max_length=50, unique=True)
+    priority = models.CharField(max_length=50, null=True, blank=True)
+    risk = models.CharField(max_length=100, null=True, blank=True)
+    region = models.CharField(max_length=50, null=True, blank=True)
+    circle = models.CharField(max_length=50, null=True, blank=True)
+    node_details = models.TextField(null=True, blank=True)
+    node_count = models.IntegerField(null=True, blank=True)
+    activity_description = models.TextField(null=True, blank=True)
+    bpms_cr_yes_no = models.CharField(max_length=10, null=True, blank=True)
+    planning_status = models.CharField(max_length=50, null=True, blank=True)
+    activity_executor = models.CharField(max_length=100, null=True, blank=True)
+    auditor_name = models.CharField(max_length=100, null=True, blank=True)
+    activity_status = models.CharField(max_length=100, null=True, blank=True)
+    reason_for_rollback_cancel = models.TextField(null=True, blank=True)
+    technical_validator = models.CharField(max_length=100, null=True, blank=True)
+    service_affecting = models.CharField(max_length=10, null=True, blank=True)
+    impact = models.TextField(null=True, blank=True)
+    test_cases = models.TextField(null=True, blank=True)
+    kpi_name = models.TextField(null=True, blank=True)
+    kpi_spoc_night = models.CharField(max_length=100, null=True, blank=True)
+    kpi_spoc_morning = models.CharField(max_length=100, null=True, blank=True)
+    inter_domain_activity = models.CharField(max_length=10, null=True, blank=True)
+    inter_domain_kpi_required = models.CharField(max_length=10, null=True, blank=True)
+    inter_domain_measuring_kpis = models.TextField(null=True, blank=True)
+    activity_type = models.CharField(max_length=200, null=True, blank=True)
+    vendor = models.CharField(max_length=50, null=True, blank=True)
+    protocol = models.CharField(max_length=100, null=True, blank=True)
+    execution_type = models.CharField(max_length=50, null=True, blank=True)
+    cli_availability = models.CharField(max_length=10, null=True, blank=True)
+    team = models.CharField(max_length=100, null=True, blank=True)
+    scheduled_start_date = models.DateTimeField(null=True, blank=True)
+    scheduled_end_date = models.DateTimeField(null=True, blank=True)
+    niam_ticket_required = models.CharField(max_length=10, null=True, blank=True)
+    niam_node_type = models.CharField(max_length=100, null=True, blank=True)
+    additional_info = models.TextField(null=True, blank=True)
+
+    class Meta:
+        db_table = "selected_date_table"
+
+    def __str__(self):
+        return self.cr_no
     

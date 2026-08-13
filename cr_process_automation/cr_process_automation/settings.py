@@ -54,11 +54,39 @@ TEMPLATES = [
 WSGI_APPLICATION = 'cr_process_automation.wsgi.application'
 
 DATABASES = {
-    'default': {
+    'default': { # Master Database
         'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+        'NAME': BASE_DIR / 'db.master.sqlite3',
+        'OPTIONS': {
+            'timeout' : 60,
+            'transaction_mode': 'IMMEDIATE',
+            'init_command': "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;",
+        },
+    },
+    'replica' :{
+        "ENGINE": "django.db.backends.sqlite3",
+        "NAME": BASE_DIR / "db.replica.sqlite3",
+        "OPTIONS": {
+            "timeout": 30,
+            "init_command": "PRAGMA journal_mode=WAL;",
+        },
     }
 }
+
+DATABASE_ROUTERS = ['cr_process_automation.routers.CoWRouter',]
+
+
+LOGGING = {
+    'version': 1,
+    'handlers': {'console': {'class': 'logging.StreamHandler'}},
+    'loggers': {
+        'django.db.backends': {
+            'handlers': ['console'],
+            'level': 'DEBUG',
+        },
+    },
+}
+
 
 AUTH_PASSWORD_VALIDATORS = [
     {'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator'},
@@ -108,3 +136,14 @@ HOST_DOWNLOAD_DIR = os.environ.get(
     'DJANGO_DOWNLOAD_DIR', 
     os.path.join(os.path.abspath(os.sep), "Automation", "PS_Core_Automation", "Task_Wise_Automation")
 )
+
+CR_WISE_STATUS_FIELDS = [
+    "id", "sno", "execution_date", "cr_no", "activity_description", "region", "circle",
+    "CR_Hygiene_Checks", "Install_Test_Plan_Downloads",
+    "MOP_Attachment", "CR_Approvals", "NIAM_Ticket",
+]
+
+SELECTED_DATE_TABLE_FIELDS = [
+    "id", "cr_no", "execution_date", "region", "circle", "priority",
+    "planning_status", "activity_status", "vendor", "team", "service_affecting", "inter_domain_activity",
+]

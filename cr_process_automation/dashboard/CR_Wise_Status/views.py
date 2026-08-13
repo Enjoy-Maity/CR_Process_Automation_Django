@@ -23,12 +23,7 @@ from datetime import datetime, timedelta
 from io import BytesIO
 from django.utils import timezone
 from dashboard.models import CRWiseStatus
-
-CR_WISE_STATUS_FIELDS = [
-    "id", "sno", "execution_date", "cr_no", "activity_description", "region", "circle",
-    "CR_Hygiene_Checks", "Install_Test_Plan_Downloads",
-    "MOP_Attachment", "CR_Approvals", "NIAM_Ticket",
-]
+from django.conf import settings
 
 @require_GET
 @login_required(login_url="login")
@@ -44,13 +39,14 @@ def fetch_cr_wise_status(request):
         return JsonResponse({"ok": False, "message": "Invalid date format."}, status=400)
 
     result = list(
-        CRWiseStatus.objects.filter(execution_date=parsed_date).values(*CR_WISE_STATUS_FIELDS)
+        CRWiseStatus.objects.filter(execution_date=parsed_date).values(*settings.CR_WISE_STATUS_FIELDS)
     )
+    print(result)
 
     return JsonResponse({
         "ok": True,
         "date": date_str,
-        "fields": CR_WISE_STATUS_FIELDS,
+        "fields": settings.CR_WISE_STATUS_FIELDS,
         "rows": result,
     }, encoder=DjangoJSONEncoder)
 
@@ -59,3 +55,4 @@ def cr_wise_status(request):
     ctx = _common_context(request)
     ctx["selected_option"] = "cr_wise_status"
     return render(request, "dashboard/cr_wise_status.html", ctx)
+
