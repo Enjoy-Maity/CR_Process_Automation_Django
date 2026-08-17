@@ -45,6 +45,7 @@ class MasterCRDatabaseAdmin(admin.ModelAdmin):
         "planning_status", "activity_status", "vendor", "team"
     )
     list_filter = (
+        "is_active",
         "region", "circle", "priority", "planning_status", "activity_status",
         "vendor", "team", "service_affecting", "inter_domain_activity"
     )
@@ -53,6 +54,12 @@ class MasterCRDatabaseAdmin(admin.ModelAdmin):
         "vendor", "team", "activity_executor", "auditor_name"
     )
     ordering = ("-execution_date",)
+
+    def get_queryset(self, request):
+        # Optional: Uncomment the line below if you want admins to ONLY see active records by default
+        # qs = super().get_queryset(request)
+        # return qs.filter(is_active=True)
+        return super().get_queryset(request) # Shows all history by default
 
 @admin.register(UserManagement)
 class UserManagementAdmin(UserAdmin):
@@ -76,6 +83,7 @@ class CRWiseStatusAdmin(admin.ModelAdmin):
         "CR_Hygiene_Checks", "Install_Test_Plan_Downloads", "MOP_Attachment", "CR_Approvals", "NIAM_Ticket"
     )
     list_filter = (
+        "is_active",
         "region", "circle", "cr_no", "technical_validator", 
         "CR_Hygiene_Checks", "Install_Test_Plan_Downloads", "MOP_Attachment", "CR_Approvals", "NIAM_Ticket"
     )
@@ -83,6 +91,12 @@ class CRWiseStatusAdmin(admin.ModelAdmin):
         "region", "circle", "cr_no", "technical_validator"
     )
     ordering = ("-execution_date",)
+
+    def get_queryset(self, request):
+        # Optional: Uncomment the line below if you want admins to ONLY see active records by default
+        # qs = super().get_queryset(request)
+        # return qs.filter(is_active=True)
+        return super().get_queryset(request) # Shows all history by default
 
 @admin.register(SelectedDateTable)
 class SelectedDateTableAdmin(admin.ModelAdmin):

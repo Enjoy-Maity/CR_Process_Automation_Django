@@ -9,6 +9,8 @@ from django.conf import settings
 
 # print("\n\n\n\n", os.path.dirname(os.path.dirname(__file__)), "\n\n\n\n\n\n")
 
+default_app_config = "dashboard.DashboardConfig"
+
 # This finds the root, sets PROJECT_ROOT env var, loads .env, and adds root to PYTHONPATH
 root = rootutils.setup_root(__file__, indicator=".project-root", pythonpath=True, dotenv=True)
 

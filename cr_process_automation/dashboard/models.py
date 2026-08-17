@@ -1,6 +1,7 @@
 from django.conf import settings
 from django.db import models
 from django.contrib.auth.models import AbstractUser
+from django.db.models import Q, UniqueConstraint
 
 
 class AutomationTask(models.Model):
@@ -67,7 +68,7 @@ class MasterCRDatabase(models.Model):
     ms_project = models.CharField(max_length=100, null=True, blank=True)
     execution_date = models.DateField(null=True, blank=True)
     maintenance_window = models.CharField(max_length=50, null=True, blank=True)
-    cr_no = models.CharField(max_length=50, unique=True)
+    cr_no = models.CharField(max_length=50,)
     priority = models.CharField(max_length=50, null=True, blank=True)
     risk = models.CharField(max_length=100, null=True, blank=True)
     region = models.CharField(max_length=50, null=True, blank=True)
@@ -103,11 +104,42 @@ class MasterCRDatabase(models.Model):
     niam_node_type = models.CharField(max_length=100, null=True, blank=True)
     additional_info = models.TextField(null=True, blank=True)
 
+    # --- Copy-on-Write (CoW) Architecture Fields ---
+    is_active = models.BooleanField(default=True, help_text="Indicates the current active version")
+    version = models.IntegerField(default=1, help_text="Version number of this record")
+    parent_reference = models.ForeignKey(
+        'self', 
+        on_delete=models.SET_NULL, 
+        null=True, 
+        blank=True, 
+        related_name='historical_versions',
+        help_text="Links to the previous version of this record"
+    )
+
     class Meta:
         db_table = "master_cr_database"
+        # Enforce that only ONE active record can exist per cr_no (historical rows ignored)
+        constraints = [
+            UniqueConstraint(
+                fields=['cr_no'], 
+                condition=Q(is_active=True), 
+                name='unique_active_master_cr_no'
+            )
+        ]
+
+    def save(self, *args, **kwargs):
+        # CoW Save Override: Turn updates into insertions of a new active row
+        if self.pk is not None:
+            old_instance = MasterCRDatabase.objects.get(pk=self.pk)
+            MasterCRDatabase.objects.filter(pk=self.pk).update(is_active=False)
+            self.parent_reference_id = old_instance.pk
+            self.version = old_instance.version + 1
+            self.pk = None 
+            self.is_active = True
+        super().save(*args, **kwargs)
 
     def __str__(self):
-        return self.cr_no
+        return f"{self.cr_no} (v{self.version})"
 
 class UserManagement(AbstractUser):
     ROLE_ADMIN = "Admin"
@@ -160,7 +192,7 @@ class CRWiseStatus(models.Model):
     maintenance_window = models.CharField(max_length=50, null=True, blank=True)
     
     # Critical: Unique constraint prevents duplicate CRs at DB level
-    cr_no = models.CharField(max_length=50, unique=True) 
+    cr_no = models.CharField(max_length=50,) 
     
     risk = models.CharField(max_length=100, null=True, blank=True)
     activity_description = models.TextField(null=True, blank=True)
@@ -176,18 +208,42 @@ class CRWiseStatus(models.Model):
     CR_Approvals = models.CharField(max_length=100, null=True, blank=True)
     NIAM_Ticket = models.CharField(max_length=100, null=True, blank=True)
 
-    # Optional: Add version field for optimistic locking if needed
-    version = models.IntegerField(default=0) 
+    # --- Copy-on-Write (CoW) Architecture Fields ---
+    is_active = models.BooleanField(default=True, help_text="Indicates the current active version")
+    version = models.IntegerField(default=1, help_text="Version number of this record")
+    parent_reference = models.ForeignKey(
+        'self', 
+        on_delete=models.SET_NULL, 
+        null=True, 
+        blank=True, 
+        related_name='historical_versions',
+        help_text="Links to the previous version of this record"
+    )
 
     class Meta:
         db_table = "cr_wise_status"
-        # Ensure DB-level uniqueness
+        # Enforce that only ONE active status record can exist per cr_no
         constraints = [
-            models.UniqueConstraint(fields=['cr_no'], name='unique_cr_no')
+            UniqueConstraint(
+                fields=['cr_no'], 
+                condition=Q(is_active=True), 
+                name='unique_active_cr_wise_status_no'
+            )
         ]
+
+    def save(self, *args, **kwargs):
+        # CoW Save Override
+        if self.pk is not None:
+            old_instance = CRWiseStatus.objects.get(pk=self.pk)
+            CRWiseStatus.objects.filter(pk=self.pk).update(is_active=False)
+            self.parent_reference_id = old_instance.pk
+            self.version = old_instance.version + 1
+            self.pk = None 
+            self.is_active = True
+        super().save(*args, **kwargs)
     
     def __str__(self):
-        return self.cr_no
+        return f"{self.cr_no} (v{self.version})"
 
 
 class FlagTable(models.Model):

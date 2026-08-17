@@ -245,4 +245,22 @@ document.addEventListener('DOMContentLoaded', refreshTaskPanels);
 
 // POLL THE SERVER EVERY 3 SECONDS  (required so the iframe auto-opens on
 // password_required / otp_required)
+
+async function waitForReplicaSync(syncId) {
+    while (true) {
+        const resp = await fetch(`/api/replica-sync-status/${syncId}/`);
+        const data = await resp.json();
+        
+        if (data.status === 'complete') {
+            console.log('Replica is ready!');
+            break;
+        } else if (data.status.startsWith('failed')) {
+            console.error('Replica sync failed:', data.status);
+            break;
+        }
+        
+        await new Promise(resolve => setTimeout(resolve, 500));  // Poll every 500ms
+    }
+}
+
 setInterval(refreshTaskPanels, 3000);

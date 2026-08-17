@@ -7,6 +7,7 @@ import traceback
 import threading
 from importlib import import_module
 import pandas as pd
+# from django.core.cache import cache
 from django.db import connection
 from django.conf import settings
 from django.contrib import messages
@@ -682,4 +683,13 @@ def update_hygiene_check(request, cr_no):
         return {"status": "success"}
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
+
+def check_replica_sync_status(request, sync_id):
+    # status = cache.get(f'replica_sync_{sync_id}_status', 'unknown')
+    return JsonResponse({
+        'sync_id': sync_id,
+        'status': status,
+        'ready': status == 'complete'
+    })
 

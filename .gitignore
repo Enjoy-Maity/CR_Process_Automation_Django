@@ -16,3 +16,4 @@ Session_store_files/
 *.dll
 *.exe
 /cr_process_automation/pw-browsers/
+migrations/

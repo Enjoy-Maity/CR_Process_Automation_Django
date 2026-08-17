@@ -1,4 +1,5 @@
 import os
+import uuid
 import platform
 import ctypes
 import traceback
@@ -7,6 +8,8 @@ import numpy as np
 import charset_normalizer as cn
 import pandas as pd
 from datetime import datetime, timedelta
+from django.core.management import call_command
+# from celery import shared_task
 from playwright.sync_api import sync_playwright
 from dashboard.views import _timestamp
 from dashboard.task_modules.dependencies.extra_dependencies import CustomThread
@@ -16,6 +19,7 @@ from pandas import DataFrame
 from os import PathLike
 import  dateutil.parser as dp
 from django.db import transaction
+# from django.core.cache import cache
 from dashboard.models import MasterCRDatabase, CRWiseStatus
 
 def check_admin_status():
@@ -57,35 +61,12 @@ def chrome_path_returner() -> str:
 def raw_report_to_planning_sheet_converter(
     raw_report_file_content: DataFrame, workbook: str | PathLike, logs:List[AnyStr], runtime:dict, selected_date=None, user_name: str = "") -> None:
     
-
-    # Process the raw report data to create a planning sheet
-    # ...
     runtime["status"] = "Creating Planning Sheet"
     try:
         raw_report_file_content["Scheduled Start Date+"] = pd.to_datetime(
             raw_report_file_content["Scheduled Start Date+"],
             format="%m/%d/%Y %I:%M:%S %p",
         )
-        # date1 = pd.Timestamp(
-        #     datetime.now()
-        #     .replace(hour=20, minute=0, second=0)
-        #     .strftime("%Y-%m-%d %H:%M:%S")
-        # )
-        # date2 = pd.Timestamp(
-        #     (
-        #         (datetime.now() + timedelta(days=1)).replace(hour=8, minute=0, second=0)
-        #     ).strftime("%Y-%m-%d %H:%M:%S")
-        # )
-        # # print(f"{date1 = } , {date2 = }")
-        # # print(raw_report_file_content["Scheduled Start Date+"])
-
-        # outside_date_df = raw_report_file_content.loc[
-        #     ~raw_report_file_content["Scheduled Start Date+"].between(date1, date2)
-        #     | raw_report_file_content["Scheduled Start Date+"].isna()
-        # ]
-
-
-        # if outside_date_df.empty or outside_date_df.shape[0] == 0:
 
         new_temp_df = pd.DataFrame()
         new_temp_df.insert(loc=0, column="S.No.", value="")
@@ -124,7 +105,6 @@ def raw_report_to_planning_sheet_converter(
         new_temp_df.insert(loc=33, column="Team", value="")
         new_temp_df.insert(loc=34, column="Scheduled Start Date+", value="")
         new_temp_df.insert(loc=35, column="Scheduled End Date+", value="")
-        # new_temp_df.insert(loc=36, column="Additional Info", value="")
 
         temp_df = raw_report_file_content.copy()
 
@@ -132,11 +112,6 @@ def raw_report_to_planning_sheet_converter(
 
         new_temp_df["S.No."] = range(1, len(new_temp_df) + 1)
         
-        # new_temp_df["Execution Date"] = pd.to_datetime(
-        #     temp_df["Scheduled Start Date+"]
-        # ).dt.date
-        
-        # new_temp_df["Execution Date"] = datetime.now().strftime("%d-%m-%Y") 
         selected_date = dp.parse(selected_date)           
         new_temp_df["Execution Date"] = (selected_date + timedelta(days=1)).strftime("%d-%m-%Y")
 
@@ -197,8 +172,6 @@ def raw_report_to_planning_sheet_converter(
         new_temp_df.to_excel(writer, sheet_name="Planning_Sheet", index=False)
         writer.close()
         del writer
-
-            # runtime["status"]=""
 
     except Exception as e:
         logs.append(
@@ -277,100 +250,158 @@ def _prepare_master_fields_from_planning_sheet(planning_df: DataFrame) -> DataFr
 
     return df
 
+
 def sync_cr_databases(planning_workbook_df: DataFrame, logs: List[AnyStr], runtime: dict) -> List[AnyStr]:
     runtime["status"] = "Syncing CR Databases"
     try:
         mapped_df = _prepare_master_fields_from_planning_sheet(planning_workbook_df)
-
         print(f"Mapped dataframe: {mapped_df}")
 
-        total_inserted_master = 0
-        total_inserted_status = 0
+        total_inserted = 0
+        total_updated_cow = 0
 
         unique_exec_dates = sorted(mapped_df["execution_date"].dropna().unique())
-
         print(f"Unique Execution Date: {unique_exec_dates}")
 
+        if not unique_exec_dates:
+            logs.append("No execution dates found; nothing to sync.")
+            return logs
+
+        last_index = len(unique_exec_dates) - 1
+        # one sync_id to track the whole run
+        # sync_id = str(uuid.uuid4())
+        # cache_key = f'replica_sync_{sync_id}_status'
+        # cache.set(cache_key, 'in_progress', None)
+
+        # Iterate through the dates and rows to apply CoW insertions manually targeting master DB ('default')
         for exec_date in unique_exec_dates:
             date_group_df = mapped_df[mapped_df["execution_date"] == exec_date]
-            incoming_cr_set = set(date_group_df["cr_no"].astype(str))
 
-            print(f"Incoming CR List: {incoming_cr_set}")
+            # Explicitly wrap transaction on the master database connection
+            with transaction.atomic(using='default'):
+                for row in date_group_df.itertuples(index=False):
+                    cr_number = str(row.cr_no)
 
-            existing_cr_set = set(
-                MasterCRDatabase.objects.filter(execution_date=exec_date).values_list("cr_no", flat=True)
-                )
-            
-            print(f"Existing CR List: {existing_cr_set}")
+                    # Explicitly use .using('default') for queries during write/sync phases
+                    active_master = MasterCRDatabase.objects.using('default').filter(cr_no=cr_number, is_active=True).first()
+                    active_status = CRWiseStatus.objects.using('default').filter(cr_no=cr_number, is_active=True).first()
 
-            if existing_cr_set:
-                new_cr_numbers = incoming_cr_set - existing_cr_set
-                logs.append(f"{len(new_cr_numbers)} new CR(s) found via set difference for execution date {exec_date}.")
-            else:
-                new_cr_numbers = incoming_cr_set
-                logs.append(f"No existing entries for execution date {exec_date}; all {len(new_cr_numbers)} CR(s) will be inserted.")
+                    if active_master:
+                        # 1. Deactivate old records on master database
+                        MasterCRDatabase.objects.using('default').filter(pk=active_master.pk).update(is_active=False)
+                        if active_status:
+                            CRWiseStatus.objects.using('default').filter(pk=active_status.pk).update(is_active=False)
 
-            print(f"New CR Numbers: {new_cr_numbers}")
-            if not new_cr_numbers:
-                logs.append(f"No new CR entries to update for execution date {exec_date}.")
-                continue
+                        # 2. Insert new CoW versions explicitly into master database
+                        MasterCRDatabase.objects.using('default').create(
+                            sno=row.sno if pd.notna(row.sno) else None,
+                            ms_project=row.ms_project, execution_date=row.execution_date,
+                            maintenance_window=row.maintenance_window, cr_no=row.cr_no, priority=row.priority,
+                            risk=row.risk, region=row.region, circle=row.circle, node_details=row.node_details,
+                            node_count=row.node_count if pd.notna(row.node_count) else None,
+                            activity_description=row.activity_description, bpms_cr_yes_no=row.bpms_cr_yes_no,
+                            planning_status=row.planning_status, activity_executor=row.activity_executor,
+                            auditor_name=row.auditor_name, activity_status=row.activity_status,
+                            reason_for_rollback_cancel=row.reason_for_rollback_cancel,
+                            technical_validator=row.technical_validator, service_affecting=row.service_affecting,
+                            impact=row.impact, test_cases=row.test_cases, kpi_name=row.kpi_name,
+                            kpi_spoc_night=row.kpi_spoc_night, kpi_spoc_morning=row.kpi_spoc_morning,
+                            inter_domain_activity=row.inter_domain_activity,
+                            inter_domain_kpi_required=row.inter_domain_kpi_required,
+                            inter_domain_measuring_kpis=row.inter_domain_measuring_kpis,
+                            activity_type=row.activity_type, vendor=row.vendor, protocol=row.protocol,
+                            execution_type=row.execution_type, cli_availability=row.cli_availability, team=row.team,
+                            scheduled_start_date=row.scheduled_start_date if pd.notna(row.scheduled_start_date) else None,
+                            scheduled_end_date=row.scheduled_end_date if pd.notna(row.scheduled_end_date) else None,
+                            niam_ticket_required=row.niam_ticket_required, niam_node_type=row.niam_node_type,
+                            additional_info=row.additional_info,
+                            # CoW Fields
+                            is_active=True,
+                            version=active_master.version + 1,
+                            parent_reference_id=active_master.pk
+                        )
 
-            rows_to_insert = date_group_df[date_group_df["cr_no"].isin(new_cr_numbers)]
+                        CRWiseStatus.objects.using('default').create(
+                            sno=row.sno if pd.notna(row.sno) else None,
+                            execution_date=row.execution_date, maintenance_window=row.maintenance_window,
+                            cr_no=row.cr_no, risk=row.risk, activity_description=row.activity_description,
+                            bpms_cr_yes_no=row.bpms_cr_yes_no, circle=row.circle, region=row.region,
+                            technical_validator=row.technical_validator,
+                            CR_Hygiene_Checks="Pending", Install_Test_Plan_Downloads="Pending",
+                            MOP_Attachment="Pending", CR_Approvals="Pending", NIAM_Ticket=" ",
+                            # CoW Fields
+                            is_active=True,
+                            version=(active_status.version + 1) if active_status else 1,
+                            parent_reference_id=active_status.pk if active_status else None
+                        )
+                        total_updated_cow += 1
 
-            print(rows_to_insert)
+                    else:
+                        # 3. Handle brand new insertions explicitly on master database
+                        MasterCRDatabase.objects.using('default').create(
+                            sno=row.sno if pd.notna(row.sno) else None,
+                            ms_project=row.ms_project, execution_date=row.execution_date,
+                            maintenance_window=row.maintenance_window, cr_no=row.cr_no, priority=row.priority,
+                            risk=row.risk, region=row.region, circle=row.circle, node_details=row.node_details,
+                            node_count=row.node_count if pd.notna(row.node_count) else None,
+                            activity_description=row.activity_description, bpms_cr_yes_no=row.bpms_cr_yes_no,
+                            planning_status=row.planning_status, activity_executor=row.activity_executor,
+                            auditor_name=row.auditor_name, activity_status=row.activity_status,
+                            reason_for_rollback_cancel=row.reason_for_rollback_cancel,
+                            technical_validator=row.technical_validator, service_affecting=row.service_affecting,
+                            impact=row.impact, test_cases=row.test_cases, kpi_name=row.kpi_name,
+                            kpi_spoc_night=row.kpi_spoc_night, kpi_spoc_morning=row.kpi_spoc_morning,
+                            inter_domain_activity=row.inter_domain_activity,
+                            inter_domain_kpi_required=row.inter_domain_kpi_required,
+                            inter_domain_measuring_kpis=row.inter_domain_measuring_kpis,
+                            activity_type=row.activity_type, vendor=row.vendor, protocol=row.protocol,
+                            execution_type=row.execution_type, cli_availability=row.cli_availability, team=row.team,
+                            scheduled_start_date=row.scheduled_start_date if pd.notna(row.scheduled_start_date) else None,
+                            scheduled_end_date=row.scheduled_end_date if pd.notna(row.scheduled_end_date) else None,
+                            niam_ticket_required=row.niam_ticket_required, niam_node_type=row.niam_node_type,
+                            additional_info=row.additional_info,
+                            is_active=True,
+                            version=1
+                        )
 
-            with transaction.atomic():
-                master_objs = [
-                    MasterCRDatabase(
-                        sno=row.sno if pd.notna(row.sno) else None,
-                        ms_project=row.ms_project, execution_date=row.execution_date,
-                        maintenance_window=row.maintenance_window, cr_no=row.cr_no, priority=row.priority,
-                        risk=row.risk, region=row.region, circle=row.circle, node_details=row.node_details,
-                        node_count=row.node_count if pd.notna(row.node_count) else None,
-                        activity_description=row.activity_description, bpms_cr_yes_no=row.bpms_cr_yes_no,
-                        planning_status=row.planning_status, activity_executor=row.activity_executor,
-                        auditor_name=row.auditor_name, activity_status=row.activity_status,
-                        reason_for_rollback_cancel=row.reason_for_rollback_cancel,
-                        technical_validator=row.technical_validator, service_affecting=row.service_affecting,
-                        impact=row.impact, test_cases=row.test_cases, kpi_name=row.kpi_name,
-                        kpi_spoc_night=row.kpi_spoc_night, kpi_spoc_morning=row.kpi_spoc_morning,
-                        inter_domain_activity=row.inter_domain_activity,
-                        inter_domain_kpi_required=row.inter_domain_kpi_required,
-                        inter_domain_measuring_kpis=row.inter_domain_measuring_kpis,
-                        activity_type=row.activity_type, vendor=row.vendor, protocol=row.protocol,
-                        execution_type=row.execution_type, cli_availability=row.cli_availability, team=row.team,
-                        scheduled_start_date=row.scheduled_start_date if pd.notna(row.scheduled_start_date) else None,
-                        scheduled_end_date=row.scheduled_end_date if pd.notna(row.scheduled_end_date) else None,
-                        niam_ticket_required=row.niam_ticket_required, niam_node_type=row.niam_node_type,
-                        additional_info=row.additional_info,
-                    )
-                    for row in rows_to_insert.itertuples(index=False)
-                ]
-                MasterCRDatabase.objects.bulk_create(master_objs, ignore_conflicts=True)
-                total_inserted_master += len(master_objs)
+                        CRWiseStatus.objects.using('default').create(
+                            sno=row.sno if pd.notna(row.sno) else None,
+                            execution_date=row.execution_date, maintenance_window=row.maintenance_window,
+                            cr_no=row.cr_no, risk=row.risk, activity_description=row.activity_description,
+                            bpms_cr_yes_no=row.bpms_cr_yes_no, circle=row.circle, region=row.region,
+                            technical_validator=row.technical_validator,
+                            CR_Hygiene_Checks="Pending", Install_Test_Plan_Downloads="Pending",
+                            MOP_Attachment="Pending", CR_Approvals="Pending", NIAM_Ticket=" ",
+                            is_active=True,
+                            version=1
+                        )
+                        total_inserted += 1
 
-                status_objs = [
-                    CRWiseStatus(
-                        sno=row.sno if pd.notna(row.sno) else None,
-                        execution_date=row.execution_date, maintenance_window=row.maintenance_window,
-                        cr_no=row.cr_no, risk=row.risk, activity_description=row.activity_description,
-                        bpms_cr_yes_no=row.bpms_cr_yes_no, circle=row.circle, region=row.region,
-                        technical_validator=row.technical_validator,
-                        CR_Hygiene_Checks="Pending", Install_Test_Plan_Downloads="Pending",
-                        MOP_Attachment="Pending", CR_Approvals="Pending", NIAM_Ticket=" ",
-                    )
-                    for row in rows_to_insert.itertuples(index=False)
-                ]
-                CRWiseStatus.objects.bulk_create(status_objs, ignore_conflicts=True)
-                total_inserted_status += len(status_objs)
+                # Register the replica sync to run only after the DB transaction commits
+                transaction.on_commit(lambda: sync_replica_task(), using='default')
 
-        logs.append(f"Sync complete: {total_inserted_master} total row(s) inserted into master_cr_database, {total_inserted_status} into cr_wise_status.")
+        logs.append(f"Sync complete: {total_inserted} new CR(s) inserted, {total_updated_cow} existing CR(s) updated to new versions.")
 
     except Exception as e:
+        # cache.set(f'replica_sync_{sync_id}_status', 'failed', None)
         logs.append(f"Exception: {e.__class__.__name__}\n{traceback.format_exc()}\n{e}")
+        runtime["status"] = "Failed"
         raise
 
     return logs
+
+
+# @shared_task(bind=True)
+# def sync_replica_task(self):
+def sync_replica_task():
+    # self.update_state(state='RUNNING')
+    # sync_id = self.request.id
+    try:
+        call_command('sync_replica')
+        # cache.set(f'replica_sync_{sync_id}_status', 'complete', None)
+    except Exception as e:
+        # cache.set(f'replica_sync_{sync_id}_status', 'failed', None)
+        raise
 
 
 def run_task(request, task, runtime, GLOBAL_LOGS=None, timestamp_fn=None, selected_date=None, user_email=None, user_name=None):
@@ -390,71 +421,12 @@ def run_task(request, task, runtime, GLOBAL_LOGS=None, timestamp_fn=None, select
     runtime["otp"] = None
     runtime["otp_event"] = threading.Event()
 
-    # chrome_path = chrome_path_returner()
-
-    # with sync_playwright() as p:
-    #     browser = p.chromium.launch(
-    #         executable_path=chrome_path if chrome_path else None,
-    #         headless=False,
-    #     )
-    #     context = browser.new_context()
-    #     page = context.new_page()
-
-        # url = "https://ticketing-in.managed-services.prod.sdt.ericsson.net/arsys/"
-        # GLOBAL_LOGS.append(f"{task['name']}: opening {url} ---- {timestamp_fn()}")
-        # page.goto(url, wait_until="load")
-
-        # # TODO: adjust these steps to your actual login/2FA flow.
-        # # Example: wait until the OTP page / OTP input becomes visible.
-        # runtime["status"] = "Waiting for OTP"
-        # runtime["otp_required"] = True
-        # GLOBAL_LOGS.append(f"{task['name']}: waiting for OTP ---- {timestamp_fn()}")
-
-        # otp_event = runtime.get("otp_event")
-        # if otp_event:
-        #     otp_event.wait(timeout=300)
-
-        # otp = runtime.get("otp")
-        # if not otp:
-        #     runtime["status"] = "Failed" 
-        #     msg = "OTP not received in time."
-        #     GLOBAL_LOGS.append(f"{task['name']}: {msg} ---- {timestamp_fn()}")
-        #     browser.close()
-        #     return {
-        #         "status": "Failed",
-        #         "message": msg,
-        #         "download_ready": False,
-        #         "download_name": runtime.get("download_name", ""),
-        #         "counts": {},
-        #     }
-
-        # # Replace selector with the real OTP field on your page.
-        # page.fill("input[name='otp']", otp)
-        # page.click("button[type='submit']")
-        # page.wait_for_load_state("networkidle")
-
-        # runtime["status"] = "Completed"
-        # GLOBAL_LOGS.append(f"{task['name']}: completed successfully ---- {timestamp_fn()}")
-
-        # browser.close()
-
-    # GLOBAL_LOGS = pcm.session_maker(
-    #     GLOBAL_LOGS, 
-    #     task, 
-    #     False,
-    #     runtime, 
-    #     timestamp_fn)
-    # print("inside run task function")
-    # import time
-    # time.sleep(10)
-
     playwright = None
     browser=None
     context = None
     page = None
 
     with sync_playwright() as playwright:
-        # pcm.session_breaker()
         try:
             browser, context, page, GLOBAL_LOGS = pcm.itsm_logger(
                 GLOBAL_LOGS,
@@ -512,18 +484,12 @@ def run_task(request, task, runtime, GLOBAL_LOGS=None, timestamp_fn=None, select
     folder_date = (dp.parse(selected_date)).strftime("%d-%b-%y")
     report_file_date = (dp.parse(selected_date))
 
-    # print(f"Folder Date = {folder_date}")
-
     report_file = os.path.join(str(os.getenv("RAW_REPORT_DOWNLOAD_FOLDER").format(folder_date)), f"PS_Core_Raw_Report_{report_file_date.strftime('%Y-%m-%d')}.csv")
     encoding_thread = CustomThread(target=encoding_fetcher, args=(report_file,))
-    # encoding_thread.daemon = True
     encoding_thread.start()
     encoding = encoding_thread.join()
 
     report_df = pd.read_csv(report_file, encoding=encoding)
-
-    # search_status = ["Request For Authorization", "Scheduled For Approval"]
-    # regex_pattern = '|'.join(search_status)
 
     report_df_filtered = report_df[report_df["Status*"].str.contains("Request For Authorization", case=False)]
     valid_status= "|".join(["Request For Authorization", "Scheduled For Approval", "Request For Change"])
@@ -536,12 +502,7 @@ def run_task(request, task, runtime, GLOBAL_LOGS=None, timestamp_fn=None, select
             report_df_filtered, planning_workbook, GLOBAL_LOGS, runtime, selected_date = selected_date, user_name = user_name
             )
 
-        # print(f"Planning Workbook path: {planning_workbook}")
-
         planning_workbook_df = pd.read_excel(planning_workbook)
-
-        # print(f"Planning Sheet Dataframe: {planning_workbook_df}")
-
         GLOBAL_LOGS = sync_cr_databases(planning_workbook_df, GLOBAL_LOGS, runtime)
 
     else:

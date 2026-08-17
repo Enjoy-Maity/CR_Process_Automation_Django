@@ -19,13 +19,22 @@ from dashboard.models import MasterCRDatabase
 from dashboard.views import _common_context
 from django.db import transaction
 from django.views.decorators.csrf import csrf_exempt
+from django.core.management import call_command
 import json
 from datetime import datetime, timedelta
 from io import BytesIO
 from django.utils import timezone
 from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
 
-# Add near other imports
+# ─────────────────────────────────────────────
+# Database Alias Constants
+# ─────────────────────────────────────────────
+DB_MASTER  = 'default'   # All writes go here
+DB_REPLICA = 'replica'   # All reads go here
+
+# ─────────────────────────────────────────────
+# Field Definitions
+# ─────────────────────────────────────────────
 MASTER_CR_FIELDS = [
     "id", "sno", "ms_project", "execution_date", "maintenance_window", "cr_no",
     "priority", "risk", "region", "circle", "activity_description", "node_details", "node_count",
@@ -36,6 +45,8 @@ MASTER_CR_FIELDS = [
     "inter_domain_measuring_kpis", "activity_type", "vendor", "protocol",
     "execution_type", "cli_availability", "team", "scheduled_start_date",
     "scheduled_end_date", "niam_ticket_required", "niam_node_type", "additional_info",
+    # CoW metadata fields for context
+    "is_active", "version", "parent_reference_id",
 ]
 
 EDITABLE_REGION_CR_FIELDS = [
@@ -87,9 +98,9 @@ CR_HISTORY_EXPORT_FIELDS = [
     "kpi_name",
     "kpi_spoc_night",
     "kpi_spoc_morning",
-    "inter_domain_activity", 
+    "inter_domain_activity",
     "inter_domain_kpi_required",
-    "inter_domain_measuring_kpis",  
+    "inter_domain_measuring_kpis",
     "activity_type",
     "vendor",
     "protocol",
@@ -101,10 +112,32 @@ CR_HISTORY_EXPORT_FIELDS = [
     "niam_ticket_required",
     "niam_node_type",
     "additional_info",
+    # CoW metadata fields included in export for audit trail
+    "version",
+    "parent_reference_id",
 ]
 
 ALLOWED_REGION_CR_EDIT_ROLES = {"Admin", "Validator", "Night-SPOC"}
 
+
+# ─────────────────────────────────────────────
+# Helper: Sync replica after master commit
+# ─────────────────────────────────────────────
+def _trigger_replica_sync_on_commit():
+    """
+    Registers a post-commit hook to sync the master DB
+    to the replica after the current transaction commits.
+    No Redis or Celery required: runs synchronously via call_command.
+    """
+    transaction.on_commit(
+        lambda: call_command('sync_replica'),
+        using=DB_MASTER
+    )
+
+
+# ─────────────────────────────────────────────
+# Views: Render Pages
+# ─────────────────────────────────────────────
 @login_required(login_url="login")
 def region_crs_view(request):
     ctx = _common_context(request)
@@ -114,17 +147,21 @@ def region_crs_view(request):
     ctx["can_edit_region_crs"] = getattr(request.user, "role", "") in ALLOWED_REGION_CR_EDIT_ROLES
     return render(request, "dashboard/region_crs.html", ctx)
 
+
 @login_required(login_url="login")
 def cr_history_view(request):
     ctx = _common_context(request)
     ctx["selected_option"] = "cr_history"
     return render(request, "dashboard/cr_history.html", ctx)
 
+
+# ─────────────────────────────────────────────
+# View: Fetch Region CR Details (READ → replica)
+# ─────────────────────────────────────────────
 @require_GET
 @login_required(login_url="login")
 def fetch_region_cr_details(request):
     date_str = request.GET.get("date", "").strip()
-
     if not date_str:
         return JsonResponse({"ok": False, "message": "Date is required."}, status=400)
 
@@ -133,23 +170,21 @@ def fetch_region_cr_details(request):
     except ValueError:
         return JsonResponse({"ok": False, "message": "Invalid date format."}, status=400)
 
+    # Read explicitly from replica and only return active (latest CoW) records
     result = list(
-        MasterCRDatabase.objects.filter(execution_date=parsed_date).values(*MASTER_CR_FIELDS)
+        MasterCRDatabase.objects
+        .using(DB_REPLICA)
+        .filter(execution_date=parsed_date, is_active=True)
+        .values(*MASTER_CR_FIELDS)
     )
 
     for row in result:
         if row.get("execution_date"):
             row["execution_date"] = row["execution_date"].strftime("%d-%m-%Y")
-
         if row.get("scheduled_start_date"):
-            row["scheduled_start_date"] = timezone.localtime(
-                row["scheduled_start_date"]
-            ).strftime("%d-%m-%Y %H:%M:%S")
-
+            row["scheduled_start_date"] = timezone.localtime(row["scheduled_start_date"]).strftime("%d-%m-%Y %H:%M:%S")
         if row.get("scheduled_end_date"):
-            row["scheduled_end_date"] = timezone.localtime(
-                row["scheduled_end_date"]
-            ).strftime("%d-%m-%Y %H:%M:%S")
+            row["scheduled_end_date"] = timezone.localtime(row["scheduled_end_date"]).strftime("%d-%m-%Y %H:%M:%S")
 
     return JsonResponse({
         "ok": True,
@@ -158,6 +193,10 @@ def fetch_region_cr_details(request):
         "rows": result,
     })
 
+
+# ─────────────────────────────────────────────
+# View: Save Region CR Details (WRITE → CoW on master)
+# ─────────────────────────────────────────────
 @require_POST
 @login_required(login_url="login")
 def save_region_cr_details(request):
@@ -185,8 +224,9 @@ def save_region_cr_details(request):
 
     updated_rows = []
     errors = []
+    did_write = False
 
-    with transaction.atomic():
+    with transaction.atomic(using=DB_MASTER):
         for item in changes:
             row_id = item.get("id")
             field_values = item.get("fields", {})
@@ -208,21 +248,20 @@ def save_region_cr_details(request):
                 continue
 
             try:
-                obj = MasterCRDatabase.objects.get(id=row_id)
+                active_obj = MasterCRDatabase.objects.using(DB_MASTER).get(id=row_id, is_active=True)
             except MasterCRDatabase.DoesNotExist:
-                errors.append({"id": row_id, "message": "Record not found."})
+                errors.append({"id": row_id, "message": "Active record not found. It may have already been updated."})
                 continue
 
-            row_updated_fields = []
-
+            # sanitise and validate input values (same handling as views1.py)
+            sanitised_fields = {}
+            field_error = None
             for field_name, raw_value in field_values.items():
                 value = raw_value
-
                 if isinstance(value, str):
                     value = value.strip()
                     if value.lower() in {"nan", "na", "n/a", "n.a.", "n.a", "none", "null", "nat"}:
                         value = ""
-
                 if field_name == "node_count":
                     if value in ("", None):
                         value = None
@@ -230,25 +269,68 @@ def save_region_cr_details(request):
                         try:
                             value = int(value)
                         except (TypeError, ValueError):
-                            errors.append({
-                                "id": row_id,
-                                "message": "node_count must be a valid integer."
-                            })
-                            row_updated_fields = []
+                            field_error = {"id": row_id, "message": "node_count must be a valid integer."}
                             break
+                sanitised_fields[field_name] = value
 
-                setattr(obj, field_name, value)
-                row_updated_fields.append(field_name)
-
-            if not row_updated_fields:
+            if field_error:
+                errors.append(field_error)
                 continue
 
-            obj.save(update_fields=row_updated_fields)
+            if not sanitised_fields:
+                continue
+
+            # CoW step: deactivate current active record
+            MasterCRDatabase.objects.using(DB_MASTER).filter(pk=active_obj.pk).update(is_active=False)
+
+            # Build new record dictionary by copying fields from the active object
+            new_record_data = {}
+            for field in active_obj._meta.get_fields():
+                # skip reverse relations and non-concrete fields
+                if getattr(field, "many_to_many", False):
+                    continue
+                if not getattr(field, "concrete", True):
+                    continue
+                fname = field.name
+                if fname == "id":
+                    continue
+                new_record_data[fname] = getattr(active_obj, fname)
+
+            # Apply incoming changes
+            new_record_data.update(sanitised_fields)
+
+            # Set CoW metadata
+            new_record_data["is_active"] = True
+            new_record_data["version"] = (active_obj.version or 0) + 1
+            new_record_data["parent_reference_id"] = active_obj.pk
+
+            # Create new instance using setattr pattern (so behaviour mirrors views1.py)
+            new_obj = MasterCRDatabase()
+            row_updated_fields = []
+            for k, v in new_record_data.items():
+                # skip id if present
+                if k == "id":
+                    continue
+                setattr(new_obj, k, v)
+                # record which user-submitted editable fields changed
+                if k in sanitised_fields:
+                    row_updated_fields.append(k)
+
+            # Save new version to master
+            new_obj.save(using=DB_MASTER)
+
             updated_rows.append({
-                "id": obj.id,
-                "cr_no": obj.cr_no,
+                "old_id": active_obj.pk,
+                "new_id": new_obj.pk,
+                "cr_no": new_obj.cr_no,
+                "new_version": new_obj.version,
                 "updated_fields": row_updated_fields,
             })
+            did_write = True
+
+        # Register master->replica sync after commit (runs synchronously here)
+        if did_write:
+            _trigger_replica_sync_on_commit()
 
     if errors and not updated_rows:
         return JsonResponse({
@@ -259,11 +341,15 @@ def save_region_cr_details(request):
 
     return JsonResponse({
         "ok": True,
-        "message": f"{len(updated_rows)} record(s) updated successfully.",
+        "message": f"{len(updated_rows)} record(s) updated successfully (new CoW versions created).",
         "updated_rows": updated_rows,
         "errors": errors,
     })
 
+
+# ─────────────────────────────────────────────
+# Helpers: CR History Querysets (READ → replica)
+# ─────────────────────────────────────────────
 def _get_history_start_date(range_key):
     today = timezone.localdate()
 
@@ -280,32 +366,49 @@ def _get_history_start_date(range_key):
 
 
 def _get_cr_history_queryset(date_str=None, range_key=None):
+    """
+    Returns queryset routed to replica.
+    Only returns is_active=True records (latest CoW versions).
+    """
     if date_str:
         try:
             selected_date = datetime.strptime(date_str, "%Y-%m-%d").date()
         except ValueError:
             return None, None, None, "Invalid date format."
 
-        qs = MasterCRDatabase.objects.filter(
-            execution_date=selected_date
-        ).order_by("cr_no")
+        qs = (
+            MasterCRDatabase.objects
+            .using(DB_REPLICA)
+            .filter(execution_date=selected_date, is_active=True)
+            .order_by("cr_no")
+        )
         return qs, selected_date, selected_date, None
 
     start_date, end_date = _get_history_start_date(range_key)
     if not start_date:
         return None, None, None, "Invalid history period selected."
 
-    qs = MasterCRDatabase.objects.filter(
-        execution_date__isnull=False,
-        execution_date__gte=start_date,
-        execution_date__lte=end_date,
-    ).order_by("-execution_date", "cr_no")
+    qs = (
+        MasterCRDatabase.objects
+        .using(DB_REPLICA)
+        .filter(
+            execution_date__isnull=False,
+            execution_date__gte=start_date,
+            execution_date__lte=end_date,
+            is_active=True,     # Only show latest CoW versions
+        )
+        .order_by("-execution_date", "cr_no")
+    )
     return qs, start_date, end_date, None
 
+
+# ─────────────────────────────────────────────
+# View: Fetch CR History (READ → replica)
+# ─────────────────────────────────────────────
 @require_GET
 @login_required(login_url="login")
 def fetch_cr_history(request):
-    date_str = request.GET.get("date", "").strip()
+    date_str  = request.GET.get("date", "").strip()
     range_key = request.GET.get("range", "").strip()
 
     qs, start_date, end_date, err = _get_cr_history_queryset(date_str, range_key)
@@ -319,10 +422,14 @@ def fetch_cr_history(request):
             row["execution_date"] = row["execution_date"].strftime("%d-%m-%Y")
 
         if row.get("scheduled_start_date"):
-            row["scheduled_start_date"] = timezone.localtime(row["scheduled_start_date"]).strftime("%d-%m-%Y %H:%M:%S")
+            row["scheduled_start_date"] = timezone.localtime(
+                row["scheduled_start_date"]
+            ).strftime("%d-%m-%Y %H:%M:%S")
 
         if row.get("scheduled_end_date"):
-            row["scheduled_end_date"] = timezone.localtime(row["scheduled_end_date"]).strftime("%d-%m-%Y %H:%M:%S")
+            row["scheduled_end_date"] = timezone.localtime(
+                row["scheduled_end_date"]
+            ).strftime("%d-%m-%Y %H:%M:%S")
 
     numbered_rows = []
     for idx, row in enumerate(rows, start=1):
@@ -331,12 +438,15 @@ def fetch_cr_history(request):
         numbered_rows.append(numbered_row)
 
     if date_str:
-        message = f"Showing {len(numbered_rows)} record(s) for {start_date.strftime('%d-%m-%Y')}."
+        message = (
+            f"Showing {len(numbered_rows)} record(s) "
+            f"for {start_date.strftime('%d-%m-%Y')}."
+        )
     else:
         range_label_map = {
-            "1m": "Last Month CR",
-            "3m": "Last 3-Months CR",
-            "6m": "Last 6-Months CR",
+            "1m":  "Last Month CR",
+            "3m":  "Last 3-Months CR",
+            "6m":  "Last 6-Months CR",
             "12m": "Last Year CR",
         }
         message = (
@@ -352,10 +462,13 @@ def fetch_cr_history(request):
     })
 
 
+# ─────────────────────────────────────────────
+# View: Download CR History (READ → replica)
+# ─────────────────────────────────────────────
 @require_GET
 @login_required(login_url="login")
 def download_cr_history(request):
-    date_str = request.GET.get("date", "").strip()
+    date_str  = request.GET.get("date", "").strip()
     range_key = request.GET.get("range", "").strip()
 
     qs, start_date, end_date, err = _get_cr_history_queryset(date_str, range_key)
@@ -373,66 +486,75 @@ def download_cr_history(request):
     df = pd.DataFrame(numbered_rows)
 
     if not df.empty and "execution_date" in df.columns:
-        df["execution_date"] = pd.to_datetime(df["execution_date"]).dt.strftime("%d-%m-%Y")
+        df["execution_date"] = pd.to_datetime(
+            df["execution_date"]
+        ).dt.strftime("%d-%m-%Y")
 
     if not df.empty and "scheduled_start_date" in df.columns:
-        df["scheduled_start_date"] = pd.to_datetime(
-                                        df["scheduled_start_date"], utc=True, errors="coerce"
-                                        ).dt.tz_convert(timezone.get_current_timezone()).dt.strftime("%d-%m-%Y %H:%M:%S")
+        df["scheduled_start_date"] = (
+            pd.to_datetime(df["scheduled_start_date"], utc=True, errors="coerce")
+            .dt.tz_convert(timezone.get_current_timezone())
+            .dt.strftime("%d-%m-%Y %H:%M:%S")
+        )
 
     if not df.empty and "scheduled_end_date" in df.columns:
-        df["scheduled_end_date"] = pd.to_datetime(
-                                        df["scheduled_end_date"], utc=True, errors="coerce"
-                                        ).dt.tz_convert(timezone.get_current_timezone()).dt.strftime("%d-%m-%Y %H:%M:%S")
+        df["scheduled_end_date"] = (
+            pd.to_datetime(df["scheduled_end_date"], utc=True, errors="coerce")
+            .dt.tz_convert(timezone.get_current_timezone())
+            .dt.strftime("%d-%m-%Y %H:%M:%S")
+        )
 
     header_label_map = {
-        "sno": "S.No",
-        "cr_no": "CR No",
-        "ms_project": "MS Project",
-        "execution_date": "Execution Date",
-        "maintenance_window": "Maintenance Window",
-        "region": "Region",
-        "circle": "Circle",
-        "priority": "Priority",
-        "risk": "Risk",
-        "planning_status": "Planning Status",
-        "activity_status": "Activity Status",
-        "vendor": "Vendor",
-        "team": "Team",
-        "activity_description": "Activity Description",
-        "node_details": "Node Details",
-        "node_count": "Node Count",
-        "bpms_cr_yes_no": "BPMS CR (Yes/No)",
-        "activity_executor": "Activity Executor",
-        "auditor_name": "Auditor Name",
-        "reason_for_rollback_cancel": "Reason For Rollback/Cancel",
-        "technical_validator": "Technical Validator",
-        "service_affecting": "Service Affecting",
-        "impact": "Impact",
-        "test_cases": "Test Cases",
-        "kpi_name": "KPI Name",
-        "kpi_spoc_night": "KPI SPOC Night",
-        "kpi_spoc_morning": "KPI SPOC Morning",
-        "inter_domain_activity": "Inter Domain Activity",
-        "inter_domain_kpi_required": "Inter Domain KPI Required",
-        "inter_domain_measuring_kpis": "Inter Domain Measuring KPIs",
-        "activity_type": "Activity Type",
-        "scheduled_start_date": "Scheduled Start Date",
-        "scheduled_end_date": "Scheduled End Date",
-        "protocol": "Protocol",
-        "execution_type": "Execution Type",
-        "cli_availability": "CLI Availability",
-        "niam_ticket_required": "NIAM Ticket Required",
-        "niam_node_type": "NIAM Node Type",
-        "additional_info": "Additional Info",
+        "sno":                          "S.No",
+        "cr_no":                        "CR No",
+        "ms_project":                   "MS Project",
+        "execution_date":               "Execution Date",
+        "maintenance_window":           "Maintenance Window",
+        "region":                       "Region",
+        "circle":                       "Circle",
+        "priority":                     "Priority",
+        "risk":                         "Risk",
+        "planning_status":              "Planning Status",
+        "activity_status":              "Activity Status",
+        "vendor":                       "Vendor",
+        "team":                         "Team",
+        "activity_description":         "Activity Description",
+        "node_details":                 "Node Details",
+        "node_count":                   "Node Count",
+        "bpms_cr_yes_no":               "BPMS CR (Yes/No)",
+        "activity_executor":            "Activity Executor",
+        "auditor_name":                 "Auditor Name",
+        "reason_for_rollback_cancel":   "Reason For Rollback/Cancel",
+        "technical_validator":          "Technical Validator",
+        "service_affecting":            "Service Affecting",
+        "impact":                       "Impact",
+        "test_cases":                   "Test Cases",
+        "kpi_name":                     "KPI Name",
+        "kpi_spoc_night":               "KPI SPOC Night",
+        "kpi_spoc_morning":             "KPI SPOC Morning",
+        "inter_domain_activity":        "Inter Domain Activity",
+        "inter_domain_kpi_required":    "Inter Domain KPI Required",
+        "inter_domain_measuring_kpis":  "Inter Domain Measuring KPIs",
+        "activity_type":                "Activity Type",
+        "scheduled_start_date":         "Scheduled Start Date",
+        "scheduled_end_date":           "Scheduled End Date",
+        "protocol":                     "Protocol",
+        "execution_type":               "Execution Type",
+        "cli_availability":             "CLI Availability",
+        "niam_ticket_required":         "NIAM Ticket Required",
+        "niam_node_type":               "NIAM Node Type",
+        "additional_info":              "Additional Info",
+        # CoW metadata columns in export
+        "version":                      "Version",
+        "parent_reference_id":          "Parent Reference ID",
     }
 
     df = df.rename(columns=header_label_map)
 
     range_label_map = {
-        "1m": "last_month",
-        "3m": "last_3_months",
-        "6m": "last_6_months",
+        "1m":  "last_month",
+        "3m":  "last_3_months",
+        "6m":  "last_6_months",
         "12m": "last_year",
     }
 
@@ -441,27 +563,34 @@ def download_cr_history(request):
         df.to_excel(writer, index=False, sheet_name="CR History")
         worksheet = writer.sheets["CR History"]
 
-        thin_side = Side(style="thin", color="000000")
-        cell_border = Border(left=thin_side, right=thin_side, top=thin_side, bottom=thin_side)
+        thin_side   = Side(style="thin", color="000000")
+        cell_border = Border(
+            left=thin_side, right=thin_side,
+            top=thin_side, bottom=thin_side
+        )
         header_font = Font(bold=True, color="FFFFFF")
-        header_fill = PatternFill(start_color="0A5EA8", end_color="0A5EA8", fill_type="solid")
-        center_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        header_fill = PatternFill(
+            start_color="0A5EA8", end_color="0A5EA8", fill_type="solid"
+        )
+        center_align = Alignment(
+            horizontal="center", vertical="center", wrap_text=True
+        )
 
         max_col = worksheet.max_column
         max_row = worksheet.max_row
 
         for col_idx in range(1, max_col + 1):
             header_cell = worksheet.cell(row=1, column=col_idx)
-            header_cell.font = header_font
-            header_cell.fill = header_fill
+            header_cell.font      = header_font
+            header_cell.fill      = header_fill
             header_cell.alignment = center_align
-            header_cell.border = cell_border
+            header_cell.border    = cell_border
 
         for row_idx in range(2, max_row + 1):
             for col_idx in range(1, max_col + 1):
                 body_cell = worksheet.cell(row=row_idx, column=col_idx)
                 body_cell.alignment = center_align
-                body_cell.border = cell_border
+                body_cell.border    = cell_border
 
         for col_idx in range(1, max_col + 1):
             column_letter = worksheet.cell(row=1, column=col_idx).column_letter
@@ -469,7 +598,9 @@ def download_cr_history(request):
                 len(str(worksheet.cell(row=r, column=col_idx).value or ""))
                 for r in range(1, max_row + 1)
             )
-            worksheet.column_dimensions[column_letter].width = min(max(max_length + 4, 12), 40)
+            worksheet.column_dimensions[column_letter].width = min(
+                max(max_length + 4, 12), 40
+            )
 
         worksheet.freeze_panes = "A2"
 
@@ -478,7 +609,10 @@ def download_cr_history(request):
     if date_str:
         filename = f"Final_Planning_Sheet_{start_date.strftime('%Y%m%d')}.xlsx"
     else:
-        filename = f"cr_history_{range_label_map.get(range_key, 'history')}_{timezone.localdate().strftime('%Y%m%d')}.xlsx"
+        filename = (
+            f"cr_history_{range_label_map.get(range_key, 'history')}"
+            f"_{timezone.localdate().strftime('%Y%m%d')}.xlsx"
+        )
 
     return FileResponse(
         output,
