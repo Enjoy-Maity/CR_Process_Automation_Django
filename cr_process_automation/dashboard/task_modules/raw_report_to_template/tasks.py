@@ -9,18 +9,20 @@ import charset_normalizer as cn
 import pandas as pd
 from datetime import datetime, timedelta
 from django.core.management import call_command
+from django.utils import timezone
 # from celery import shared_task
 from playwright.sync_api import sync_playwright
 from dashboard.views import _timestamp
 from dashboard.task_modules.dependencies.extra_dependencies import CustomThread
 import dashboard.task_modules.dependencies.playwright_common_methods_ as pcm
+from dashboard.task_modules.dependencies.extra_dependencies import _ts_or_none
 from typing import List, AnyStr
 from pandas import DataFrame
 from os import PathLike
-import  dateutil.parser as dp
+import dateutil.parser as dp
 from django.db import transaction
 # from django.core.cache import cache
-from dashboard.models import MasterCRDatabase, CRWiseStatus
+from dashboard.models import MasterCRDatabase, CRWiseStatus, SelectedDateTable
 
 def check_admin_status():
     try:
@@ -211,6 +213,75 @@ def _clean_nan_like_values(df: DataFrame) -> DataFrame:
 
     return cleaned_df
 
+# def _prepare_master_fields_from_planning_sheet(planning_df: DataFrame) -> DataFrame:
+#     column_map = {
+#         "S.No.": "sno", "MS/Project": "ms_project", "Execution Date": "execution_date",
+#         "Maintainence Window": "maintenance_window", "CR No": "cr_no", "Priority": "priority",
+#         "Risk": "risk", "Region": "region", "Circle": "circle", "Node Details": "node_details",
+#         "Node Count": "node_count", "Activity Description": "activity_description",
+#         "BPMS CR (Yes/No)": "bpms_cr_yes_no", "Planning Status": "planning_status",
+#         "Activity Executor": "activity_executor", "Auditor Name": "auditor_name",
+#         "Activity Status": "activity_status", "Reason For Rollback/Cancel": "reason_for_rollback_cancel",
+#         "Technical Validator": "technical_validator", "Service Affecting": "service_affecting",
+#         "Impact": "impact", "Test Cases": "test_cases", "KPI Name": "kpi_name",
+#         "KPI SPOC (Night)": "kpi_spoc_night", "KPI SPOC (Morning)": "kpi_spoc_morning",
+#         "Inter-Domain Activity": "inter_domain_activity",
+#         "Inter-Domain KPI Required": "inter_domain_kpi_required",
+#         "Inter-Domain Measuring KPIs": "inter_domain_measuring_kpis",
+#         "Activity Type": "activity_type", "Vendor": "vendor", "Protocol": "protocol",
+#         "Execution Type": "execution_type", "CLI Availability": "cli_availability", "Team": "team",
+#         "Scheduled Start Date+": "scheduled_start_date", "Scheduled End Date+": "scheduled_end_date",
+#         "NIAM Ticket Required (Yes/No)": "niam_ticket_required", "NIAM Node Type": "niam_node_type",
+#         "Additional Info": "additional_info",
+#     }
+
+#     df = planning_df.rename(columns=column_map)
+#     df = df[[c for c in column_map.values() if c in df.columns]].copy()
+#     df = _clean_nan_like_values(df)
+
+#     df["cr_no"] = df["cr_no"].fillna("").replace("nan", "").replace("NaN", "")
+#     df["cr_no"] = df["cr_no"].astype(str).str.strip()
+
+#     df["execution_date"] = pd.to_datetime(df["execution_date"], format="%d-%m-%Y", errors="coerce").dt.date
+#     df["scheduled_start_date"] = pd.to_datetime(df.get("scheduled_start_date"), errors="coerce")
+#     df["scheduled_end_date"] = pd.to_datetime(df.get("scheduled_end_date"), errors="coerce")
+#     df["sno"] = pd.to_numeric(df.get("sno"), errors="coerce")
+#     df["node_count"] = pd.to_numeric(df.get("node_count"), errors="coerce")
+
+#     df = df.drop_duplicates(subset=["cr_no"]).reset_index(drop=True)
+
+#     return df
+
+
+def _localize_series(series: pd.Series) -> pd.Series:
+    """
+    Convert a datetime Series to timezone-aware values in Django's current
+    timezone (Asia/Kolkata) so that saving with USE_TZ=True does NOT shift
+    the wall-clock time.
+
+    - Parses to datetime (coerce invalid -> NaT)
+    - If naive: localize to current tz (treat CSV values as local wall-clock)
+    - If already aware: convert to current tz
+    """
+    current_tz = timezone.get_current_timezone()
+
+    parsed = pd.to_datetime(series, errors="coerce")
+
+    # Series-level tz info; None means all naive
+    if getattr(parsed.dt, "tz", None) is None:
+        # Naive -> localize. ambiguous/nonexistent handled gracefully.
+        parsed = parsed.dt.tz_localize(
+            current_tz,
+            ambiguous="NaT",
+            nonexistent="shift_forward",
+        )
+    else:
+        # Already aware -> convert to current tz
+        parsed = parsed.dt.tz_convert(current_tz)
+
+    return parsed
+
+
 def _prepare_master_fields_from_planning_sheet(planning_df: DataFrame) -> DataFrame:
     column_map = {
         "S.No.": "sno", "MS/Project": "ms_project", "Execution Date": "execution_date",
@@ -240,9 +311,13 @@ def _prepare_master_fields_from_planning_sheet(planning_df: DataFrame) -> DataFr
     df["cr_no"] = df["cr_no"].fillna("").replace("nan", "").replace("NaN", "")
     df["cr_no"] = df["cr_no"].astype(str).str.strip()
 
+    # execution_date is a pure date (no tz concern)
     df["execution_date"] = pd.to_datetime(df["execution_date"], format="%d-%m-%Y", errors="coerce").dt.date
-    df["scheduled_start_date"] = pd.to_datetime(df.get("scheduled_start_date"), errors="coerce")
-    df["scheduled_end_date"] = pd.to_datetime(df.get("scheduled_end_date"), errors="coerce")
+
+    # Timezone-aware datetimes so Django (USE_TZ=True) stores the exact wall-clock time
+    df["scheduled_start_date"] = _localize_series(df.get("scheduled_start_date"))
+    df["scheduled_end_date"] = _localize_series(df.get("scheduled_end_date"))
+
     df["sno"] = pd.to_numeric(df.get("sno"), errors="coerce")
     df["node_count"] = pd.to_numeric(df.get("node_count"), errors="coerce")
 
@@ -311,8 +386,8 @@ def sync_cr_databases(planning_workbook_df: DataFrame, logs: List[AnyStr], runti
                             inter_domain_measuring_kpis=row.inter_domain_measuring_kpis,
                             activity_type=row.activity_type, vendor=row.vendor, protocol=row.protocol,
                             execution_type=row.execution_type, cli_availability=row.cli_availability, team=row.team,
-                            scheduled_start_date=row.scheduled_start_date if pd.notna(row.scheduled_start_date) else None,
-                            scheduled_end_date=row.scheduled_end_date if pd.notna(row.scheduled_end_date) else None,
+                            scheduled_start_date=_ts_or_none(row.scheduled_start_date),
+                            scheduled_end_date=_ts_or_none(row.scheduled_end_date),
                             niam_ticket_required=row.niam_ticket_required, niam_node_type=row.niam_node_type,
                             additional_info=row.additional_info,
                             # CoW Fields
@@ -356,8 +431,8 @@ def sync_cr_databases(planning_workbook_df: DataFrame, logs: List[AnyStr], runti
                             inter_domain_measuring_kpis=row.inter_domain_measuring_kpis,
                             activity_type=row.activity_type, vendor=row.vendor, protocol=row.protocol,
                             execution_type=row.execution_type, cli_availability=row.cli_availability, team=row.team,
-                            scheduled_start_date=row.scheduled_start_date if pd.notna(row.scheduled_start_date) else None,
-                            scheduled_end_date=row.scheduled_end_date if pd.notna(row.scheduled_end_date) else None,
+                            scheduled_start_date=_ts_or_none(row.scheduled_start_date),
+                            scheduled_end_date=_ts_or_none(row.scheduled_end_date),
                             niam_ticket_required=row.niam_ticket_required, niam_node_type=row.niam_node_type,
                             additional_info=row.additional_info,
                             is_active=True,
@@ -404,7 +479,17 @@ def sync_replica_task():
         raise
 
 
-def run_task(request, task, runtime, GLOBAL_LOGS=None, timestamp_fn=None, selected_date=None, user_email=None, user_name=None):
+def run_task(
+    request, 
+    task, 
+    runtime, 
+    GLOBAL_LOGS=None, 
+    timestamp_fn=None, 
+    selected_date=None, 
+    user_email=None, 
+    user_name=None, 
+    regions=None
+):
     GLOBAL_LOGS = GLOBAL_LOGS or []
     timestamp_fn = timestamp_fn or _timestamp
 
@@ -495,7 +580,11 @@ def run_task(request, task, runtime, GLOBAL_LOGS=None, timestamp_fn=None, select
     valid_status= "|".join(["Request For Authorization", "Scheduled For Approval", "Request For Change"])
     report_df_filtered = report_df[report_df["Status*"].str.contains(valid_status, regex= True, case= False)]
 
-    planning_workbook = str(os.getenv("PLANNING_SHEET_WORKBOOK_PATH"))
+    planning_workbook_folder = str(os.getenv("PLANNING_SHEET_DOWNLOAD_FOLDER").format(folder_date))
+    if not os.path.exists(planning_workbook_folder):
+        os.makedirs(planning_workbook_folder, exist_ok=True)
+        
+    planning_workbook = os.path.join(planning_workbook_folder, str(os.getenv("PLANNING_SHEET_WORKBOOK_NAME")))
 
     if report_df_filtered.shape[0]>0:
         GLOBAL_LOGS = raw_report_to_planning_sheet_converter(

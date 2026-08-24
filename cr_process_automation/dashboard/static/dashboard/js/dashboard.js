@@ -119,26 +119,39 @@ async function refreshTaskPanels() {
         let anyInputRequired = false;
 
         document.querySelectorAll('tr[data-task-id]').forEach(row => {
-            const taskId = parseInt(row.getAttribute('data-task-id'), 10);
-            const task = (data.tasks || []).find(item => item.id === taskId);
-            if (!task) return;
+        const taskId = parseInt(row.getAttribute('data-task-id'), 10);
+        const task = (data.tasks || []).find(item => Number(item.id) === taskId);
+        if (!task) return;
 
-            updateStatusCell(row, task.status);
-            updateDownloadArea(row, task);
-            updateCountCells(row, task);
+        updateStatusCell(row, task.status);
+        updateDownloadArea(row, task);
+        updateCountCells(row, task);
 
-            // ==========================================
-            // IFRAME TRIGGER LOGIC
-            // Password takes priority (it happens first in the login flow)
-            // ==========================================
-            if (task.password_required === true) {
-                anyInputRequired = true;
-                openAuthIframe(task.id, 'password');
-            } else if (task.otp_required === true) {
-                anyInputRequired = true;
-                openAuthIframe(task.id, 'otp');
-            }
-        });
+        const passwordNeeded =
+            task.password_required === true ||
+            task.password_required === 'true' ||
+            task.password_required === 1;
+
+        const otpNeeded =
+            task.otp_required === true ||
+            task.otp_required === 'true' ||
+            task.otp_required === 1;
+
+        // Debug (remove after confirming)
+        if (passwordNeeded || otpNeeded) {
+            console.log(`Task ${taskId} needs input:`,
+                { passwordNeeded, otpNeeded,
+                raw_pwd: task.password_required, raw_otp: task.otp_required });
+        }
+
+        if (passwordNeeded) {
+            anyInputRequired = true;
+            openAuthIframe(task.id, 'password');
+        } else if (otpNeeded) {
+            anyInputRequired = true;
+            openAuthIframe(task.id, 'otp');
+        }
+    });
 
         // If the backend cleared both flags (input submitted or timed out)
         // and an iframe is still showing, close it automatically.
@@ -153,42 +166,50 @@ async function refreshTaskPanels() {
 async function startTask(taskId, row) {
     const dateInput = document.getElementById('cr_filter_date');
     const selectedDate = dateInput ? dateInput.value : '';
-
-    if (String(taskId) === '1' && !selectedDate) {
-        showMessage('Please select a Date before starting this task.');
-        const btn = document.querySelector(`button[data-task-id="${taskId}"]`);
-        if (btn) {
-            btn.disabled = false;
-            btn.textContent = 'Start';
-        }
-        return;
-    }
+    
+    const regions = document.querySelectorAll('input[class="region-checkbox"]:checked:not(:disabled)');
+    const regionValues = Array.from(regions).map(input => input.value).join(',');
 
     const formData = new FormData();
     formData.append('date', selectedDate);
+    formData.append('region', regionValues);
 
-    const response = await fetch(`/api/task/start/${taskId}/`, {
-        method: 'POST',
-        headers: { 'X-CSRFToken': getCookie('csrftoken') },
-        body: formData,
-    });
-    const data = await response.json();
-    if (!response.ok || !data.ok) {
-        showMessage(data.message || 'Task start failed.');
-
-        const btn = document.querySelector(`button[data-task-id="${taskId}"]`);
-        if (btn) {
-            btn.disabled = false;
-            btn.textContent = 'Start';
+    try {
+        const response = await fetch(`/api/task/start/${taskId}/`, {
+            method: 'POST',
+            headers: { 'X-CSRFToken': getCookie('csrftoken') },
+            body: formData,
+        });
+        
+        const data = await response.json();
+        
+        if (!response.ok || !data.ok) {
+            // Show error with title and message
+            showErrorAlert(data.title || 'Error', data.message || 'Task start failed.');
+            const btn = document.querySelector(`button[data-task-id="${taskId}"]`);
+            if (btn) {
+                btn.disabled = false;
+                btn.textContent = 'Start';
+            }
+            return;
         }
 
-        return;
+        // Success handling
+        if (row) {
+            updateStatusCell(row, data.status || 'Running');
+        }
+        await refreshTaskPanels();
+        
+    } catch (error) {
+        console.error("Error:", error);
+        showErrorAlert('Network Error', 'Failed to communicate with server.');
     }
+}
 
-    if (row) {
-        updateStatusCell(row, data.status || 'Running');
-    }
-    await refreshTaskPanels();
+function showErrorAlert(title, message) {
+    // You can use your existing showMessage function or create a more detailed one
+    window.alert(`${title}\n\n${message}`);
+    // Or use a better UI component like Bootstrap modal, Toastr, etc.
 }
 
 document.addEventListener('click', async function (e) {

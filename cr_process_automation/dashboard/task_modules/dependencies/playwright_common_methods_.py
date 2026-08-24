@@ -1,7 +1,11 @@
 import os
+import time
+import pandas as pd
+from io import StringIO
 import traceback
 import pythoncom
 import rootutils
+from bs4 import BeautifulSoup as beautifulsoup
 from dashboard.views import _timestamp
 from django.conf import settings
 from playwright.sync_api import (
@@ -17,6 +21,7 @@ from playwright.sync_api import (
     Locator,
 )
 from collections.abc import Callable
+from django.conf import settings
 from datetime import datetime, timedelta, date
 from dateutil import parser
 from pathlib import Path
@@ -419,8 +424,19 @@ def handle_authenticator(
                 otp_input.fill(code)
 
                 # Click "Verify" / "Sign in"
+                # After clicking Verify/Continue on OTP
                 page.locator('#idSubmit_SAOTCC_Continue').click()
-                page.wait_for_load_state("load")
+
+                # Handle the "Stay signed in?" prompt that often appears after MFA
+                try:
+                    stay_signed_in = page.locator("//*[text()='Stay signed in?']")
+                    stay_signed_in.wait_for(state="visible", timeout=15000)
+                    # Click "Yes" to persist the session (important for storage_state!)
+                    page.locator('#idSIButton9').click()   # "Yes" button
+                except Exception:
+                    pass
+
+                page.wait_for_load_state("load", timeout=60000)   # not 2000
                 logs.append(f"{task_name}: 2FA code submitted ---- {timestamp_fn()}")
                 # ======================================================
 
@@ -476,8 +492,209 @@ def handle_authenticator(
         pass
 
 
+def search_for_cr(page: Page, cr: str, logs: list):
+    logs.append(f"{_timestamp()} -- Starting the Search for the CR: '{cr}'")
+    page.locator(
+        "//div[@arid='304255502']/div/div/table[@class='Toolbar']/tbody/tr/td[@class='TBGroup TBGroup1']/a[@class='newsearch btn btn3d tbbtn']/span"
+    ).click()
 
-def navigate_to_change_management(page:Page, logs:list):
+    # Adding the CR to the search field
+    page.locator(
+        "//div[@class='PageBody pbChrome']/div[@id='WIN_3_303683700']/fieldset[@class=' pnl ']/div[@arwindowid='3']/textarea[@class='text sr ' and @id= 'arid_WIN_3_1000000182']"
+    ).fill(cr)
+
+    page.locator(
+        "//div[@id='WIN_0_304255502' and @arid='304255502']/div[@id='FormApp']/div[@id='Toolbar' and @arwindowid='3']/table[@class='Toolbar']/tbody/tr/td[@class='TBGroup TBGroup0']/a[@arwindowid='3']/div[@id = 'TBsearchsavechanges' and text()='Search']"
+    ).click()
+
+    return logs
+
+
+def work_detail_table_reader(page: Page, 
+    cr: str,
+) -> Tuple[AnyStr, pd.DataFrame|None]:
+    result = None
+    
+    page.wait_for_load_state('domcontentloaded')
+    page.wait_for_load_state('load')
+    
+    wait_var = True
+    # Waiting for the table to load
+    while wait_var:
+        if (
+            page.locator(
+                "//div[@class='PageBody pbChrome']/div[@id='WIN_3_301389923']/div[@class='TableHdr']/table[@class='TableHdr']/tbody/tr/td[@class='TableHdrL']"
+            ).text_content()
+            == "Table has Not been Loaded"
+        ):
+            page.wait_for_timeout(1000)
+        else:
+            wait_var = False
+    
+    page.wait_for_load_state('domcontentloaded')
+    page.wait_for_load_state('load')
+    
+    if page.locator(
+        '//fieldset/div/div[@id="WIN_3_301389923"]/div[2]/div'
+    ).is_visible():
+        table = page.locator(
+            '//fieldset/div/div[@id="WIN_3_301389923"]/div[2]/div'
+        ).inner_html()
+        df_list = pd.read_html(StringIO(table))
+        df = df_list[0]
+        result = df
+        # writer = pd.ExcelWriter(f"C:/Users/emaienj/Downloads/Work_Details/Work Detail Table_{cr}.xlsx", engine="openpyxl")
+        # result.to_excel(writer, sheet_name="Work Detail Table")
+        # # writer.save()
+        # writer.close()
+        # del writer
+    
+    return cr, result
+
+
+def get_service_plus_list(
+    page: Page,
+) -> Tuple[str]:
+    result = []
+    non_services_plus_entry = (
+        "(2G /3G )",
+    )
+    
+    page.wait_for_load_state("domcontentloaded")
+    page.wait_for_load_state("load")
+    page.wait_for_timeout(1000)
+
+    page.locator(
+        "//fieldset/div/div/div/div/div[3]/fieldset/div/div/div/div[4]/div[16]/div/div/div[3]/fieldset/div/div/div/div/div[2]/fieldset/div/div[2]/fieldset/div[1]/a"
+    ).click()
+
+    page.wait_for_load_state("domcontentloaded")
+    page.wait_for_load_state("load")
+    
+    while len(result) == 0 or result == ('Loading...',):
+        table = page.locator(
+            "//div[@class='MenuOuter']/div[@class='MenuTableContainer']"
+        ).inner_html()
+        # print(table, "\n\n")
+        parsed_table = beautifulsoup(table, "html.parser")
+        # from pprint import pprint
+        # pprint(parsed_table)
+        # print("\n\n\n")
+
+        result = tuple(
+            [
+                str(cell.get_text())
+                for cell in parsed_table.find_all("td")
+                if len(str(cell.get_text())) > 0
+            ]
+        )
+    result = result + non_services_plus_entry
+    # print("Service Plus List")
+    # print(f"{result = }\n")
+    
+    return result
+
+
+def relationship_nodes_handler(
+    page: Page,
+    cr: str,
+    text_contents: List[str]|None = None
+) -> Tuple[AnyStr,List[AnyStr]]:
+    relationship_nodes = []
+    
+    page.wait_for_timeout(1000)
+    page.wait_for_load_state("domcontentloaded")
+    # print(f"{cr = }\n{text_contents = }\n\n")
+    
+    if text_contents is None:
+        text_contents = [
+            "2G",
+            "3G",
+            "4G",
+            "5G",
+            "IMS",
+            "(2G /3G )",
+        ]
+    
+    page.wait_for_load_state(state="domcontentloaded")
+    page.wait_for_load_state(state="load")
+    
+    page.locator(
+        "//div[@class='TabsViewPort']/div/dl[@class='OuterOuterTab']/dd[@class='OuterTab']/span[@class='Tab']/a[text()='Relationships']"
+    ).click(modifiers=["Control"], button="left", delay=1000)
+
+    page.wait_for_load_state(state="domcontentloaded")
+    page.wait_for_load_state(state="load")
+    # page.wait_for_timeout(1500)
+    
+    var = True
+    while var:
+        if page.locator(
+            "//fieldset/div/div/div/div/div[3]/fieldset/div/div/div/div[4]/div[16]/div/div/div[3]/fieldset/div/div/div/div/div[3]/fieldset/div/div/fieldset[4]/div[2]/div/div/div[2]/fieldset/div/div/div[2]/div/div[2]"
+        ).is_visible():
+            break
+        else:
+            page.wait_for_timeout(1000)
+    
+    if page.locator(
+        "//fieldset/div/div/div/div/div[3]/fieldset/div/div/div/div[4]/div[16]/div/div/div[3]/fieldset/div/div/div/div/div[3]/fieldset/div/div/fieldset[4]/div[2]/div/div/div[2]/fieldset/div/div/div[2]/div/div[2]"
+    ).is_visible():
+        elements_locator = page.locator(
+            "//fieldset/div/div/div/div/div[3]/fieldset/div/div/div/div[4]/div[16]/div/div/div[3]/fieldset/div/div/div/div/div[3]/fieldset/div/div/fieldset[4]/div[2]/div/div/div[2]/fieldset/div/div/div[2]/div/div[2]"
+        ).inner_html()
+
+        # texts = elements_locator.evaluate_all("elements => elements.map(el => el.textContent.trim())")
+        # data = elements_locator.all_inner_texts()
+        # df = pd.DataFrame(data)
+        # print(StringIO(elements_locator))
+        # print("\n\n")
+        df_list = pd.read_html(StringIO(elements_locator))
+
+        # df = pd.DataFrame(texts, columns=["Text"])
+        df = pd.DataFrame()
+
+        # print(f"{cr = },")
+        # print(f"{search_field_value = },\n")
+
+        if len(df_list) == 0:
+            _, relationship_nodes = relationship_nodes_handler(page, cr)
+        
+        elif len(df_list) > 0:
+            df = df_list[0]
+
+            if not df.empty:
+                if {"Relationship Type", "Request Type", "Request Summary"}.issubset(
+                    set(df.columns)
+                ):
+                    df = df.loc[
+                        (
+                            (
+                                df["Relationship Type"].astype(str).str.strip()
+                                == "Related to"
+                            )
+                            & (
+                                df["Request Type"].astype(str).str.strip()
+                                == "Configuration Item"
+                            )
+                        )
+                    ]
+                    
+                    df = df.loc[
+                            ~df["Request Summary"]
+                            .astype(str)
+                            .str.strip()
+                            .str.startswith(tuple(text_contents))
+                    ]
+
+                    # print(df)
+                    # print("\n\n")
+                    if df.shape[0] > 0:
+                        relationship_nodes = df["Request Summary"].astype(str).str.strip().tolist()
+    
+    return cr, relationship_nodes
+
+
+def navigate_to_change_management(page:Page):
     page.wait_for_load_state("load")
 
     page.locator(
@@ -585,12 +802,21 @@ def itsm_logger(
 
         handle_authenticator(page, password, context, playwright, logs, runtime, task, timestamp_fn)
 
+        # while not page.locator(
+        # '//div/img[@id="reg_img_304316340" and @artxt="Show Application List"]').is_visible():
+        #     page.wait_for_timeout(1000)
+        #     page.wait_for_load_state("domcontentloaded")
+
+        deadline = time.time() + 120  # 2 minutes max
         while not page.locator(
-        '//div/img[@id="reg_img_304316340" and @artxt="Show Application List"]').is_visible():
+            '//div/img[@id="reg_img_304316340" and @artxt="Show Application List"]'
+        ).is_visible():
+            if time.time() > deadline:
+                raise TimeoutError("ITSM did not reach the application list within 120s")
             page.wait_for_timeout(1000)
             page.wait_for_load_state("domcontentloaded")
 
-        navigate_to_change_management(page, logs)
+        navigate_to_change_management(page)
 
         logs.append(f"{task_name}: logged in successfully ---- {timestamp_fn()}")
         logs.append("✓ All steps completed successfully")
@@ -611,7 +837,56 @@ def itsm_logger(
     return browser, context, page, logs
 
 
-def session_maker(logs: list, task:dict, headless_arg: bool=False, runtime: dict=None, timestamp_fn:Callable=None) -> list:
+def safe_evaluate(page, script, timeout=5000):
+    try:
+        page.wait_for_load_state("domcontentloaded", timeout=timeout)
+        page.evaluate(script)
+    except TimeoutError:
+        # Page never stabilized
+        pass
+    except Exception:
+        # Execution context was destroyed or page closed
+        pass
+
+
+def new_page_opener(context: BrowserContext, logs: list) -> Tuple[Page|None, List[AnyStr]]:
+    result = None
+    try:
+        page = context.new_page()
+        page.goto(
+            str(os.getenv("LOGGED_ITSM_URL")),
+            wait_until="load",
+        )
+
+        page.wait_for_load_state("domcontentloaded")
+        page.wait_for_load_state("load")
+        page.on("dialog", lambda dialog: dialog.dismiss())
+        # attach_iframe_popup_watcher(page)
+        # page.on(
+        #     "frameattached",
+        #     on_frame_attached,
+        # )
+        # page = context.new_page()
+
+        safe_evaluate(page, settings.BMC_REMEDY_IFRAME_MODAL_WATCHER_JS)
+
+        navigate_to_change_management(page)
+
+        result = page
+    
+    except Exception as e:
+        print(f"✗ Exception in new_page_opener: {type(e).__name__}: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        logs.append(f"{_timestamp()} --- Exception in new_page_opener: {type(e).__name__}: {traceback.format_exc()}\n{str(e)}")
+    
+    return result, logs
+
+
+
+def session_maker(logs: list, task:dict, headless_arg: bool=False, runtime: dict=None, timestamp_fn:Callable=None, user_email: str="") -> Tuple[bool, list]:
+    assert runtime is not None, "runtime must be passed through unchanged"
+    print(f"🔎 [session_maker] runtime id = {id(runtime)}")
     print(f"🔬 [session_maker] runtime is None? {runtime is None}")
     if runtime is not None:
         print(f"🔬 [session_maker] runtime id = {id(runtime)}")
@@ -620,13 +895,15 @@ def session_maker(logs: list, task:dict, headless_arg: bool=False, runtime: dict
     main_context = None
     login_page = None
     playwright = None
+    session_made = False
     try:
         with sync_playwright() as playwright:
             # print("inside try block session maker")
             browser, main_context, login_page, logs = itsm_logger(
-                logs, playwright, headless_arg, task, runtime, timestamp_fn
+                logs, playwright, headless_arg, task, runtime, timestamp_fn, user_email
             )
-            session_file = main_context.storage_state(path=get_itsm_session_file_path())
+            main_context.storage_state(path=get_itsm_session_file_path())
+            session_made = True
             # if main_context:
             #     main_context.close()
             #     del main_context
@@ -645,6 +922,8 @@ def session_maker(logs: list, task:dict, headless_arg: bool=False, runtime: dict
         import traceback
         traceback.print_exc()
         logs.append(f"Exception in session_maker: {type(e).__name__}: {str(e)}")
+        session_made = False
+        raise
 
     finally:
         for obj in (login_page, main_context, browser):
@@ -657,7 +936,7 @@ def session_maker(logs: list, task:dict, headless_arg: bool=False, runtime: dict
             playwright.stop()
         logs.append("✓ Cleanup complete")
 
-    return logs
+    return session_made, logs
 
 
 
