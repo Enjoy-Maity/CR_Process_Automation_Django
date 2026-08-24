@@ -15,5 +15,7 @@ __pycache__/
 Session_store_files/
 *.dll
 *.exe
+*.log
+logs/
 /cr_process_automation/pw-browsers/
 migrations/
