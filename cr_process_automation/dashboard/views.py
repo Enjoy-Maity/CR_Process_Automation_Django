@@ -1573,3 +1573,15 @@ def check_replica_sync_status(request, sync_id):
             'message': 'Failed to check sync status'
         }, status=500)
 
+
+import types
+
+def _make_serializable(obj):
+    if isinstance(obj, (types.GeneratorType, map, filter, zip)):
+        return list(obj)
+    if isinstance(obj, dict):
+        return {k: _make_serializable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple, set)):
+        return [_make_serializable(v) for v in obj]
+    return obj
+

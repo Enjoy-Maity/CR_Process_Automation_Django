@@ -67,8 +67,8 @@ def workbook_styling(workbook: str):
         mail_id_sheet = wb["Mail_Id"]
         mail_id_sheet_name = "Mail_Id"
     
-    if mail_id_sheet.sheet_state != 'hidden':
-        mail_id_sheet.sheet_state = 'hidden'
+        if mail_id_sheet.sheet_state != 'hidden':
+            mail_id_sheet.sheet_state = 'hidden'
     
     planning_status_list = ["Planned", "Discussed", "Swapped"]
 
@@ -121,48 +121,48 @@ def workbook_styling(workbook: str):
 
     helper_col_letter_1 = "ZZ"
 
-    range_str_1 = (
-        f"'{mail_id_sheet_name}'!$J$2:$J${get_max_row_in_column(mail_id_sheet, column_index_from_string('J'))}"
-    )
-    range_str_2 =(
-        f"'{mail_id_sheet_name}'!$M$2:$M${get_max_row_in_column(mail_id_sheet, column_index_from_string('M'))}"
-    )
-    range_str_3 = (
-        f"'{mail_id_sheet_name}'!$P$2:$P${get_max_row_in_column(mail_id_sheet, column_index_from_string('P'))}"
-    )
+    # range_str_1 = (
+    #     f"'{mail_id_sheet_name}'!$J$2:$J${get_max_row_in_column(mail_id_sheet, column_index_from_string('J'))}"
+    # )
+    # range_str_2 =(
+    #     f"'{mail_id_sheet_name}'!$M$2:$M${get_max_row_in_column(mail_id_sheet, column_index_from_string('M'))}"
+    # )
+    # range_str_3 = (
+    #     f"'{mail_id_sheet_name}'!$P$2:$P${get_max_row_in_column(mail_id_sheet, column_index_from_string('P'))}"
+    # )
     
     
     
-    dv_1 = DataValidation(
-        type="list",
-        formula1=range_str_1,
-        allow_blank=True,
-        error="Select from list only",
-        errorTitle="Invalid Executor",
-    )
-    dv_2 = DataValidation(
-        type="list",
-        formula1=range_str_2,
-        allow_blank=True,
-        error="Select from list only",
-        errorTitle="Invalid KPI SPOC",
-    )
-    dv_3 = DataValidation(
-        type="list",
-        formula1=range_str_3,
-        allow_blank = True,
-        error="Select from list only",
-        errorTitle="Invalid Activity Status"
-    )
-    ws.add_data_validation(dv_1)
-    ws.add_data_validation(dv_2)
-    ws.add_data_validation(dv_3)
+    # dv_1 = DataValidation(
+    #     type="list",
+    #     formula1=range_str_1,
+    #     allow_blank=True,
+    #     error="Select from list only",
+    #     errorTitle="Invalid Executor",
+    # )
+    # dv_2 = DataValidation(
+    #     type="list",
+    #     formula1=range_str_2,
+    #     allow_blank=True,
+    #     error="Select from list only",
+    #     errorTitle="Invalid KPI SPOC",
+    # )
+    # dv_3 = DataValidation(
+    #     type="list",
+    #     formula1=range_str_3,
+    #     allow_blank = True,
+    #     error="Select from list only",
+    #     errorTitle="Invalid Activity Status"
+    # )
+    # ws.add_data_validation(dv_1)
+    # ws.add_data_validation(dv_2)
+    # ws.add_data_validation(dv_3)
 
     max_row = ws.max_row
-    dv_1.add(f"O2:O{max_row}")
-    dv_2.add(f"Y2:Y{max_row}")
-    dv_2.add(f"X2:X{max_row}")
-    dv_3.add(f"Q2:Q{max_row}")
+    # dv_1.add(f"O2:O{max_row}")
+    # dv_2.add(f"Y2:Y{max_row}")
+    # dv_2.add(f"X2:X{max_row}")
+    # dv_3.add(f"Q2:Q{max_row}")
     
     formula_string_for_planning_status = f'\"{", ".join(planning_status_list)}\"'
 

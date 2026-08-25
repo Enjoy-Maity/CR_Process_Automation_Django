@@ -6,6 +6,7 @@ import dateutil.parser as dp
 import dashboard.task_modules.dependencies.playwright_common_methods_ as pcm
 import dashboard.task_modules.dependencies.extra_dependencies as ed
 from dashboard.task_modules.dependencies.excel_modifier import ExcelModifier
+from dashboard.views import _make_serializable
 from queue import Queue
 from threading import Thread
 from typing import List, Callable, AnyStr, Dict
@@ -40,7 +41,7 @@ def cr_wise_status_modifier_update_func(
     status: str = "Success"
 ):
     with transaction.atomic(using='default'):
-        cr_wise_status = CRWiseStatus.objects.using('default').get(cr_no=cr)
+        cr_wise_status = CRWiseStatus.objects.using('default').get(cr_no=cr, is_active=True)
         cr_wise_status.CR_Hygiene_Checks = status
         cr_wise_status.save()
         transaction.on_commit(lambda: sync_replica_task(), using='default')
@@ -486,9 +487,9 @@ def itsm_thread_task(cr_batch: List[AnyStr]):
                 )
         
                 i += 1
-            glogs.put(
-                element for element in logs
-            )
+            
+            for element in logs:
+                glogs.put(_make_serializable(element))
 
         except Exception as e:
             glogs.put(
