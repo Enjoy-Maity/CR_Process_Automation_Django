@@ -31,6 +31,7 @@ os.environ["RAW_REPORT_DOWNLOAD_FOLDER"]=os.path.join(settings.HOST_DOWNLOAD_DIR
 os.environ["PLANNING_SHEET_DOWNLOAD_FOLDER"]=os.path.join(settings.HOST_DOWNLOAD_DIR, "{}", "Planning_Sheet")
 os.environ["CR_HYGIENE_CHECKS_FILE"]=os.path.join(settings.HOST_DOWNLOAD_DIR, "{}", "CR_Hygiene_Checks", "CR_Hygiene_Checks.xlsx")
 os.environ["BPMS_CR_HYGIENE_CHECKS_FILE"]=os.path.join(settings.HOST_DOWNLOAD_DIR, "{}", "BPMS_CR_Hygiene_Checks", "BPMS_CR_Hygiene_Checks.xlsx")
+os.environ["BPMS_DB"]=os.path.join(setting.HOST_DOWNLOAD_DIR, "BPMS_DB", "BPMS DATA.xlsx")
 
 os.environ["PLANNING_SHEET_WORKBOOK_NAME"]= "Standard_Planning_Sheet.xlsx"
 # Load variables from .env into the system environment

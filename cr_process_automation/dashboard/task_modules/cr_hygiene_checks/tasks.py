@@ -708,7 +708,7 @@ def file_reader_and_checker(
         #     raw_planning_sheet_df["Planning Status"].astype(str).str.strip().str.lower().isin(['planned'])
         # ]
         
-        print(f"{raw_planning_sheet_df = }")
+        # print(f"{raw_planning_sheet_df = }")
 
         start_datetime = pd.Timestamp(selected_date.replace(hour=21, minute=0, second=0, microsecond=0))
         end_datetime = pd.Timestamp((selected_date + timedelta(days=1)).replace(hour=6, minute=0, second=0, microsecond=0))
@@ -718,7 +718,7 @@ def file_reader_and_checker(
             ~raw_planning_sheet_df.apply(lambda row: datetime_check(row, start_datetime, end_datetime), axis=1)
         ]
 
-        print(f"{df_with_datatime_problem =}")
+        # print(f"{df_with_datatime_problem =}")
         
         cr_array_with_problem = np.array([], dtype=str)
         

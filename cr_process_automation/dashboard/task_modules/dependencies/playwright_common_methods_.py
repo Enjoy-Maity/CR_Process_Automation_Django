@@ -25,7 +25,7 @@ from django.conf import settings
 from datetime import datetime, timedelta, date
 from dateutil import parser
 from pathlib import Path
-from typing import Union, Tuple
+from typing import Union, Tuple, List
 import threading
 import  dateutil.parser as dp
 
@@ -117,6 +117,984 @@ def get_itsm_session_file_path() -> str:
     return os.path.join(str(os.environ["PROJECT_ROOT"]) , str(os.getenv("ITSM_SESSION_FILE")))
 
 
+def call_with_modal_ack(page, func, *args, max_retries=3, **kwargs):
+    """
+    Calls a function that may trigger a popup iframe.
+    Detects popup, mutates args, retries, and returns updated args.
+    """
+    sig = inspect.signature(func)
+    bound = sig.bind(*args, **kwargs)
+    bound.apply_defaults()
+    earlier_value_of_token_for_locking = bound.arguments["token_for_locking"]
+
+    for attempt in range(1, max_retries + 1):
+        result = func(*bound.args, **bound.kwargs)
+
+        # allow iframe watcher to act
+        # page.wait_for_timeout(300)
+
+        # popup = read_and_reset_popup_state(page)
+
+        # if not popup["handled"]:
+        #     return result, dict(bound.arguments)["token_for_locking"]
+
+        # print(f"⚠️ Popup handled ({popup['type']}) in {func.__name__}, retry {attempt}")
+
+        # # 🔁 mutate arguments ONLY when required
+        # if popup["type"] == "confirm_save":
+        #     if "token_for_locking" in bound.arguments:
+        #         bound.arguments["token_for_locking"] = False
+        #         print("🔁 token_for_locking → False")
+
+        # retry with mutated args
+        result_value_for_locking = result[1]
+        # print(f"{attempt =}")
+        if result_value_for_locking != earlier_value_of_token_for_locking:
+            # print("increasing the value attempt variable")
+            attempt += 1
+            continue
+            
+    return result, dict(bound.arguments)["token_for_locking"]
+
+
+
+def backout_plan_downloader(
+    page: Page,
+    folder_location: str,
+    cr: str,
+    cr_circle: str,
+    token_for_locking: bool,
+    date_: datetime,
+    logs: logs
+) -> Tuple[List[str], bool, List[str]]:
+    try:
+        test_plan_download_folder = os.path.join(
+            folder_location,
+            "Install_and_Backout_Plan_Files",
+            f"{date_.strftime('%d-%b-%Y')}",
+            f"{cr}_{cr_circle}",
+            "Backout Plans",
+        )
+
+        text_attachment_locators = [
+            "//fieldset[@id='WIN_3_303868700']/div[@id='WIN_3_304196500']/div/div/div[3]/fieldset/div/div[4]/textarea",
+            "//fieldset[@id='WIN_3_303868700']/div[@id='WIN_3_304196500']/div/div/div[4]/fieldset/div/div[1]/textarea",
+            "//fieldset[@id='WIN_3_303868700']/div[@id='WIN_3_304196500']/div/div/div[4]/fieldset/div/div[2]/textarea",
+        ]
+
+        Path.mkdir(Path(test_plan_download_folder), parents=True, exist_ok=True)
+
+        wait_var = True
+        # Waiting for the table to load
+        while wait_var:
+            if (
+                page.locator(
+                    "//div[@class='PageBody pbChrome']/div[@id='WIN_3_301389923']/div[@class='TableHdr']/table[@class='TableHdr']/tbody/tr/td[@class='TableHdrL']"
+                ).text_content()
+                == "Table has Not been Loaded"
+            ):
+                page.wait_for_timeout(1000)
+            else:
+                wait_var = False
+
+        page.wait_for_load_state("load")
+        page.wait_for_load_state("domcontentloaded")
+        # page.wait_for_load_state('networkidle')
+        page.wait_for_timeout(1000)
+        
+        logs.append(
+            f"Downloading and locking the Backout plans for cr: {cr}"
+        )
+
+        cr_wise_test_plan_availability_list = []
+
+        if page.locator(
+            "//div[@arid='301389923']/div[@class='TableInner']/div[@class='BaseTableOuter']/div[@class='BaseTableInner']/table[@id='T301389923']/tbody/tr/td/nobr/span[text() = 'Backout Plan']"
+        ).first.is_visible():
+            try:
+                # Searching for the CR Test Plan details
+                page.locator(
+                    "//div[@arid='301389923']/div[@class='TableInner']/div[@class='BaseTableOuter']/div[@class='BaseTableInner']/table[@id='T301389923']/tbody/tr/td/nobr/span[text() = 'Backout Plan']"
+                ).first.dblclick()
+
+            except Exception as e:
+                page.locator(
+                    "//div[@arid='301389923']/div[@class='TableInner']/div[@class='BaseTableOuter']/div[@class='BaseTableInner']/table[@id='T301389923']/tbody/tr/td/nobr/span[text() = 'Backout Plan']"
+                ).nth(0).dblclick()
+
+            # page.wait_for_timeout(1000)
+            if (
+                page.locator(
+                    "//div[@arid='301389923']/div[@class='TableInner']/div[@class='BaseTableOuter']/div[@class='BaseTableInner']/table[@id='T301389923']/tbody/tr/td/nobr/span[text() = 'Backout Plan']"
+                )
+                .nth(0)
+                .is_visible()
+            ):
+                page.locator(
+                    "//div[@arid='301389923']/div[@class='TableInner']/div[@class='BaseTableOuter']/div[@class='BaseTableInner']/table[@id='T301389923']/tbody/tr/td/nobr/span[text() = 'Backout Plan']"
+                ).nth(0).dblclick()
+            # Checking if Test Plan is attached or not
+            # text_attachment = page.locator(
+            #     "//fieldset/div/div[@class='PageHolderStackViewResizable']/div[@class='PageHolderStackViewFixedCV']/div[@arid='304247060']/fieldset[@class='PageBodyVertical']/div[@class='PageBody pbChrome' ]/div[@arid='304247090']/textarea[@class='text sr ']"
+            # ).input_value()
+            # # print(f"CR: {text_attachment}")
+            # if text_attachment == "<File Name>":
+            #     cr_wise_test_plan_availability_list = [
+            #         "Not Available",
+            #         "Not Available",
+            #     ]
+
+            # else:
+            #     # Downloading the attachment
+            #     with page.expect_download() as neo_neo_popup_info:
+            #         page.locator(
+            #             "//fieldset/div/div[@class='PageHolderStackViewResizable']/div[@class='PageHolderStackViewFixedCV']/div[@arid='304247060']/fieldset[@class='PageBodyVertical']/div[@class='PageBody pbChrome' ]/a/div[@class='btnimgdiv']/img[@id='reg_img_304252650']"
+            #         ).click(timeout=5000)
+
+            #     # page.wait_for_timeout(5000)
+
+            #     download = neo_neo_popup_info.value
+
+            #     if not os.path.exists(test_plan_download_folder):
+            #         os.mkdir(test_plan_download_folder)
+
+            #     cr_wise_test_plan_availability_list = [
+            #         "Available",
+            #         f"{text_attachment}",
+            #     ]
+
+            #     # print(f"downloading {text_attachment}")
+            #     if os.path.exists(
+            #         os.path.join(
+            #             test_plan_download_folder,
+            #             f"{text_attachment}",
+            #         )
+            #     ):
+            #         os.remove(
+            #             os.path.join(
+            #                 test_plan_download_folder,
+            #                 f"{text_attachment}",
+            #             )
+            #         )
+            #     download.save_as(
+            #         os.path.join(
+            #             test_plan_download_folder,
+            #             f"{text_attachment}",
+            #         )
+            #     )
+            j = 0
+            while j < len(text_attachment_locators):
+                # print(f"value of iterator value {j = }")
+                # text_attachment = page.locator(
+                #     "//fieldset/div/div[@class='PageHolderStackViewResizable']/div[@class='PageHolderStackViewFixedCV']/div[@arid='304247060']/fieldset[@class='PageBodyVertical']/div[@class='PageBody pbChrome' ]/div[@arid='304247090']/textarea[@class='text sr ']"
+                # ).input_value()
+                text_attachment = page.locator(text_attachment_locators[j]).input_value()
+                # print(f"got the text attachment value {text_attachment}")
+                if text_attachment == "<File Name>":
+                    j += 1
+                    continue
+
+                else:
+                    # Downloading the attachment
+                    test_plan_found_attached = True
+                    with page.expect_download() as neo_neo_popup_info:
+                        page.locator(
+                            "//fieldset/div/div[@class='PageHolderStackViewResizable']/div[@class='PageHolderStackViewFixedCV']/div[@arid='304247060']/fieldset[@class='PageBodyVertical']/div[@class='PageBody pbChrome' ]/a/div[@class='btnimgdiv']/img[@id='reg_img_304252650']"
+                        ).click()
+
+                    # page.wait_for_timeout(5000)
+
+                    download = neo_neo_popup_info.value
+
+                    if not os.path.exists(test_plan_download_folder):
+                        os.mkdir(test_plan_download_folder)
+
+                    cr_wise_test_plan_availability_list = [
+                        "Available",
+                        f"{text_attachment}",
+                    ]
+
+                    # print(f"downloading {text_attachment}")
+                    if os.path.exists(
+                        os.path.join(
+                            test_plan_download_folder,
+                            f"{text_attachment}",
+                        )
+                    ):
+                        os.remove(
+                            os.path.join(
+                                test_plan_download_folder,
+                                f"{text_attachment}",
+                            )
+                        )
+                    download.save_as(
+                        os.path.join(
+                            test_plan_download_folder,
+                            f"{text_attachment}",
+                        )
+                    )
+                    # print("test_plan downloaded")
+                    # # Locking the test plan
+                # print(f"{j = }")
+                # print(f"{test_plan_found_attached =}")
+                j += 1
+                # # Locking the test plan
+
+        else:
+            cr_wise_test_plan_availability_list = [
+                "Not Available (Backout Plan Entry Not Available)",
+                "KPI Not Required",
+            ]
+
+        if token_for_locking:
+            test_plan_to_be_locked = False
+            test_plan_lock_button = page.locator(
+                "//div[@arid='304247260']/fieldset[@class='fieldSetRadio']/div/span/input[@value='0']"
+            ).all()
+            i = 0
+            while i < len(test_plan_lock_button):
+                if (
+                    page.locator(
+                        "//div[@arid='304247260']/fieldset[@class='fieldSetRadio']/div/span/input[@value='0']"
+                    )
+                    .nth(i)
+                    .is_visible()
+                ):
+                    # CRQ000004668101
+                    # print(
+                    #     "{} page.locator(\"//div[@arid='304247260']/fieldset[@class='fieldSetRadio']/div/span/input[@value='0']\").is_disabled(){}".format(cr, page.locator("//div[@arid='304247260']/fieldset[@class='fieldSetRadio']/div/span/input[@value='0']").is_disabled())
+                    # )
+                    if (
+                        not page.locator(
+                            "//div[@arid='304247260']/fieldset[@class='fieldSetRadio']/div/span/input[@value='0']"
+                        )
+                        .nth(i)
+                        .is_disabled()
+                    ):
+                        test_plan_to_be_locked = True
+                        
+                        # Locking the Backout Plan
+                        # page.locator(
+                        #     "//div[@arid='304247260']/fieldset[@class='fieldSetRadio']/div/span/input[@value='0']"
+                        # ).nth(i).click(timeout=60000)
+                        break
+                i += 1
+
+            # Saving the test plan
+            if (
+                test_plan_to_be_locked
+                and page.locator(
+                    "//div[@arid='301389923']/div[@class='TableInner']/div[@class='BaseTableOuter']/div[@class='BaseTableInner']/table[@id='T301389923']/tbody/tr/td/nobr/span[text() = 'Backout Plan']"
+                ).first.is_visible()
+            ):
+                # print(f"cr test_plan_to_be_locked : {cr}")
+                save_button_locators_for_test_plan = page.locator(
+                    "//div/fieldset/div[@class='PageBody pbChrome']/a[@arid='301402700']/div[@class='btntextdiv']/div[@class='f1' and text()='Save']"
+                ).all()
+                i = 0
+                while i < len(save_button_locators_for_test_plan):
+                    if (
+                        page.locator(
+                            "//div/fieldset/div[@class='PageBody pbChrome']/a[@arid='301402700']/div[@class='btntextdiv']/div[@class='f1' and text()='Save']"
+                        )
+                        .nth(i)
+                        .is_visible()
+                    ):
+                        # Saving the changes
+                        # page.locator(
+                        #     "//div/fieldset/div[@class='PageBody pbChrome']/a[@arid='301402700']/div[@class='btntextdiv']/div[@class='f1' and text()='Save']"
+                        # ).nth(i).click(timeout=60000)
+                        token_for_locking = iframe_message_handler(
+                            page, token_for_locking
+                        )
+                        break
+                    i += 1
+
+    except Exception as e:
+        logs.append(
+            f"{str(e.__class__.__name__)}\n{traceback.format_exc()}\n\n{e}"
+        )
+
+    
+    return cr_wise_test_plan_availability_list, token_for_locking, logs
+
+
+def test_plan_downloader(
+    page: Page,
+    folder_location: str,
+    cr: str,
+    cr_circle: str,
+    token_for_locking: bool,
+    date_: datetime,
+    logs:list
+) -> Tuple[List[AnyStr], bool, list]:
+    try:
+        test_plan_download_folder = os.path.join(
+            folder_location,
+            "Install_and_Backout_Plan_Files",
+            f"{datetime.now().strftime('%d-%b-%Y')}",
+            f"{cr}_{cr_circle}",
+            "Test Plans",
+        )
+
+        text_attachment_locators = [
+            "//fieldset[@id='WIN_3_303868700']/div[@id='WIN_3_304196500']/div/div/div[3]/fieldset/div/div[4]/textarea",
+            "//fieldset[@id='WIN_3_303868700']/div[@id='WIN_3_304196500']/div/div/div[4]/fieldset/div/div[1]/textarea",
+            "//fieldset[@id='WIN_3_303868700']/div[@id='WIN_3_304196500']/div/div/div[4]/fieldset/div/div[2]/textarea",
+        ]
+
+        Path.mkdir(Path(test_plan_download_folder), parents=True, exist_ok=True)
+
+        wait_var = True
+        # Waiting for the table to load
+        while wait_var:
+            if (
+                page.locator(
+                    "//div[@class='PageBody pbChrome']/div[@id='WIN_3_301389923']/div[@class='TableHdr']/table[@class='TableHdr']/tbody/tr/td[@class='TableHdrL']"
+                ).text_content()
+                == "Table has Not been Loaded"
+            ):
+                page.wait_for_timeout(1000)
+            else:
+                wait_var = False
+
+        page.wait_for_load_state("load")
+        page.wait_for_load_state("domcontentloaded")
+        # page.wait_for_load_state('networkidle')
+        page.wait_for_timeout(1000)
+        
+        logs.append(
+            f"Downloading and locking the Test plans for cr: {cr}"
+        )
+
+        cr_wise_test_plan_availability_list = []
+
+        if page.locator(
+            "//div[@arid='301389923']/div[@class='TableInner']/div[@class='BaseTableOuter']/div[@class='BaseTableInner']/table[@id='T301389923']/tbody/tr/td/nobr/span[text() = 'Test Plan']"
+        ).first.is_visible():
+            try:
+                # Searching for the CR Test Plan details
+                page.locator(
+                    "//div[@arid='301389923']/div[@class='TableInner']/div[@class='BaseTableOuter']/div[@class='BaseTableInner']/table[@id='T301389923']/tbody/tr/td/nobr/span[text() = 'Test Plan']"
+                ).first.dblclick()
+
+            except Exception as e:
+                page.locator(
+                    "//div[@arid='301389923']/div[@class='TableInner']/div[@class='BaseTableOuter']/div[@class='BaseTableInner']/table[@id='T301389923']/tbody/tr/td/nobr/span[text() = 'Test Plan']"
+                ).nth(0).dblclick()
+
+            page.wait_for_timeout(1000)
+            if (
+                page.locator(
+                    "//div[@arid='301389923']/div[@class='TableInner']/div[@class='BaseTableOuter']/div[@class='BaseTableInner']/table[@id='T301389923']/tbody/tr/td/nobr/span[text() = 'Test Plan']"
+                )
+                .nth(0)
+                .is_visible()
+            ):
+                page.locator(
+                    "//div[@arid='301389923']/div[@class='TableInner']/div[@class='BaseTableOuter']/div[@class='BaseTableInner']/table[@id='T301389923']/tbody/tr/td/nobr/span[text() = 'Test Plan']"
+                ).nth(0).dblclick()
+            
+            # print("Line 2170")
+            # Checking if Test Plan is attached or not
+            test_plan_found_attached = False
+            j = 0
+            while j < len(text_attachment_locators):
+                # print(f"value of iterator value {j = }")
+                # text_attachment = page.locator(
+                #     "//fieldset/div/div[@class='PageHolderStackViewResizable']/div[@class='PageHolderStackViewFixedCV']/div[@arid='304247060']/fieldset[@class='PageBodyVertical']/div[@class='PageBody pbChrome' ]/div[@arid='304247090']/textarea[@class='text sr ']"
+                # ).input_value()
+                text_attachment = page.locator(text_attachment_locators[j]).input_value()
+                # print(f"got the text attachment value {text_attachment}")
+                if text_attachment == "<File Name>":
+                    j += 1
+                    continue
+
+                else:
+                    # Downloading the attachment
+                    test_plan_found_attached = True
+                    with page.expect_download() as neo_neo_popup_info:
+                        page.locator(
+                            "//fieldset/div/div[@class='PageHolderStackViewResizable']/div[@class='PageHolderStackViewFixedCV']/div[@arid='304247060']/fieldset[@class='PageBodyVertical']/div[@class='PageBody pbChrome' ]/a/div[@class='btnimgdiv']/img[@id='reg_img_304252650']"
+                        ).click()
+
+                    # page.wait_for_timeout(5000)
+
+                    download = neo_neo_popup_info.value
+
+                    if not os.path.exists(test_plan_download_folder):
+                        os.mkdir(test_plan_download_folder)
+
+                    cr_wise_test_plan_availability_list = [
+                        "Available",
+                        f"{text_attachment}",
+                    ]
+
+                    # print(f"downloading {text_attachment}")
+                    if os.path.exists(
+                        os.path.join(
+                            test_plan_download_folder,
+                            f"{text_attachment}",
+                        )
+                    ):
+                        os.remove(
+                            os.path.join(
+                                test_plan_download_folder,
+                                f"{text_attachment}",
+                            )
+                        )
+                    download.save_as(
+                        os.path.join(
+                            test_plan_download_folder,
+                            f"{text_attachment}",
+                        )
+                    )
+                    # print("test_plan downloaded")
+                    # # Locking the test plan
+                # print(f"{j = }")
+                # print(f"{test_plan_found_attached =}")
+                j += 1
+                # print(f"incrememnted value of {j = }")
+
+            if not test_plan_found_attached:
+                cr_wise_test_plan_availability_list = [
+                        "Not Available",
+                        "Not Available",
+                    ]
+            # print("broke the loop")
+        else:
+            cr_wise_test_plan_availability_list = [
+                "Not Available (Test Plan Entry Not Available)",
+                "KPI Not Required",
+            ]
+
+        if token_for_locking:
+            test_plan_to_be_locked = False
+            test_plan_lock_button = page.locator(
+                "//div[@arid='304247260']/fieldset[@class='fieldSetRadio']/div/span/input[@value='0']"
+            ).all()
+            i = 0
+            while i < len(test_plan_lock_button):
+                if (
+                    page.locator(
+                        "//div[@arid='304247260']/fieldset[@class='fieldSetRadio']/div/span/input[@value='0']"
+                    )
+                    .nth(i)
+                    .is_visible()
+                ):
+                    # CRQ000004668101
+                    # print(
+                    #     "{} page.locator(\"//div[@arid='304247260']/fieldset[@class='fieldSetRadio']/div/span/input[@value='0']\").is_disabled(){}".format(cr, page.locator("//div[@arid='304247260']/fieldset[@class='fieldSetRadio']/div/span/input[@value='0']").is_disabled())
+                    # )
+                    if (
+                        not page.locator(
+                            "//div[@arid='304247260']/fieldset[@class='fieldSetRadio']/div/span/input[@value='0']"
+                        )
+                        .nth(i)
+                        .is_disabled()
+                    ):
+                        test_plan_to_be_locked = True
+                        # page.locator(
+                        #     "//div[@arid='304247260']/fieldset[@class='fieldSetRadio']/div/span/input[@value='0']"
+                        # ).nth(i).click(timeout=60000)
+                        break
+                i += 1
+
+            # Saving the test plan
+            if (
+                test_plan_to_be_locked
+                and page.locator(
+                    "//div[@arid='301389923']/div[@class='TableInner']/div[@class='BaseTableOuter']/div[@class='BaseTableInner']/table[@id='T301389923']/tbody/tr/td/nobr/span[text() = 'Test Plan']"
+                ).first.is_visible()
+            ):
+                # print(f"cr test_plan_to_be_locked : {cr}")
+                save_button_locators_for_test_plan = page.locator(
+                    "//div/fieldset/div[@class='PageBody pbChrome']/a[@arid='301402700']/div[@class='btntextdiv']/div[@class='f1' and text()='Save']"
+                ).all()
+                i = 0
+                while i < len(save_button_locators_for_test_plan):
+                    if (
+                        page.locator(
+                            "//div/fieldset/div[@class='PageBody pbChrome']/a[@arid='301402700']/div[@class='btntextdiv']/div[@class='f1' and text()='Save']"
+                        )
+                        .nth(i)
+                        .is_visible()
+                    ):
+                        # page.locator(
+                        #     "//div/fieldset/div[@class='PageBody pbChrome']/a[@arid='301402700']/div[@class='btntextdiv']/div[@class='f1' and text()='Save']"
+                        # ).nth(i).click(timeout=60000)
+                        token_for_locking = iframe_message_handler(
+                            page, token_for_locking
+                        )
+                        break
+                    i += 1
+
+    except Exception as e:
+        logs.append(
+            f"{str(e.__class__.__name__)}\n{traceback.format_exc()}\n\n{e}"
+        )
+
+    
+    # print(f"returning values =>{cr_wise_test_plan_availability_list = }, {token_for_locking = }")
+    return cr_wise_test_plan_availability_list, token_for_locking, logs
+
+def bpms_tasks_tab_getter(
+    cr: str, 
+    page: Page, 
+) -> Tuple[AnyStr, pd.DataFrame]:
+    page.wait_for_timeout(1000)
+    page.wait_for_load_state("domcontentloaded")
+    
+    first_table_df = pd.DataFrame()
+    
+    page.locator(
+        "//div[@class='TabsViewPort']/div/dl[@class='OuterOuterTab']/dd[@class='OuterTab']/span[@class='Tab']/a[text()='Tasks']"
+    ).click(modifiers=["Control"], button="left", delay=1000)
+    
+    page.wait_for_load_state(state="domcontentloaded")
+    page.wait_for_load_state(state="load")
+    
+    # first_table_xpath = "//fieldset[@arwindowid='3']/div[@arwindowid='3']/div/div/div[@arwindowid='3']/fieldset/div/div[@arid='301389923']/div[@class='TableInner']/div[@class='BaseTableOuter']"
+    # first_table_xpath = "//fieldset/div/div/div/div/fieldset/div/div/div[@class='TableInner']/div[@class='BaseTableOuter']"
+    # first_table_xpath = "//fieldset/div/div/div/div/div[3]/fieldset/div/div/fieldset[1]/div[2]/div/div/div[2]/fieldset/div/div/div[2]/div"
+    lld_locator = "//fieldset/div/div/div/div/fieldset/div/div/div[@class='TableInner']/div[@class='BaseTableOuter']/div[@class='BaseTableInner']/table/tbody/tr/td/nobr/span[contains(.,'LLD Automation')]"
+    # logs.append(
+    #     f"Getting the bpms technical design attachment name for cr: {cr}"
+    # )
+    
+    page.wait_for_load_state(state="domcontentloaded")
+    page.wait_for_load_state(state="load")
+    
+    count = 0
+    while count < 3:
+        # if page.locator(first_table_xpath).is_visible():
+        if page.locator(lld_locator).is_visible():
+            break
+        else:
+            page.wait_for_timeout(1000)
+        count += 1
+    
+    # print(f"{page.locator(first_table_xpath).first.is_visible() = }")
+    # if page.locator(first_table_xpath).is_visible():
+    if page.locator(lld_locator).is_visible():
+        elements_locator = page.locator(
+            lld_locator
+        ).locator("xpath=../..").locator("xpath=../..").locator("xpath=../..").locator("xpath=..").inner_html()
+        
+        df_list = pd.read_html(StringIO(elements_locator))
+        # pprint(df_list)
+        first_table_df = df_list[0]
+        
+        if len(df_list) == 0:
+            _, first_table_df = bpms_tasks_tab_getter(cr, page)
+            
+        elif len(df_list) > 0:
+            first_table_df = df_list[0]
+        
+    return cr, first_table_df
+
+
+def bpms_auto_crs_tasks_lld_automation_handler(
+    cr: str,
+    page: Page,
+    folder_location: str,
+    cr_circle: str,
+    date_: datetime,
+    logs: list
+) -> Tuple[AnyStr, AnyStr, list]:
+    
+    page.wait_for_timeout(1000)
+    page.wait_for_load_state("domcontentloaded")
+    
+    page.locator(
+        "//div[@class='TabsViewPort']/div/dl[@class='OuterOuterTab']/dd[@class='OuterTab']/span[@class='Tab']/a[text()='Tasks']"
+    ).click(modifiers=["Control"], button="left", delay=1000)
+    
+    page.wait_for_load_state(state="domcontentloaded")
+    page.wait_for_load_state(state="load")
+    
+    page.wait_for_load_state('domcontentloaded')
+    page.wait_for_load_state('load')
+    page.wait_for_timeout(1000)
+    attachment_ = ""
+    lld_locator = "//fieldset/div/div/div/div/fieldset/div/div/div[@class='TableInner']/div[@class='BaseTableOuter']/div[@class='BaseTableInner']/table/tbody/tr/td/nobr/span[contains(.,'LLD Automation')]"
+
+    lld_design_download_path = os.path.join(
+        folder_location,
+        "Install_and_Backout_Plan_Files",
+        f"{date_.strftime('%d-%b-%Y')}",
+        f"{cr}_{cr_circle}",
+        "Auto_Technical_Design"
+    )
+
+    Path(lld_design_download_path).mkdir(parents=True, exist_ok=True)
+    
+    if page.locator(lld_locator).first.is_visible():
+        # print("locator_found")
+        page.locator(lld_locator).first.hover()
+        page.locator(lld_locator).first.click()
+        # page.locator(lld_locator).first.click(modifiers=['Control'], button='left', delay=1000)
+        # page.wait_for_timeout(1000)
+        # general_information_entries_locator = "//fieldset[3]/div/div/div/div[4]/fieldset[@class='PageBodyVertical']/div[@class='PageBody pbChrome']/div/div[@class='TableInner']/div[@class='BaseTableOuter']/div[@class='BaseTableInner']/table/tbody/tr/td[@title='General Information']/nobr/span[normalize-space()='General Information']"
+        general_information_entries_locator = "//fieldset[3]/div[2]/div/div/div[4]/fieldset/div/div/div[2]/div/div[2]/table/tbody/tr/td[1]/nobr/span[text()='General Information']"
+        
+        # page.wait_for_load_state('load')
+        # page.wait_for_load_state('domcontentloaded')
+        # page.wait_for_timeout(1000)
+        # all_general_insurance_entries = page.locator(general_information_entries_locator).all()
+        # print("Line 806")
+        # print(page.locator(general_information_entries_locator).count())
+        
+        target_entries = page.locator(general_information_entries_locator)
+    
+        # 2. THE FIX: Wait specifically for the first element to attach to the DOM.
+        # It will poll the DOM dynamically and proceed the millisecond it appears.
+        # try:
+        #     target_entries.first.wait_for(state="attached", timeout=10000) # Waits up to 10 seconds
+        # except Exception as e:
+        #     print(f"Failed to find elements within 10 seconds. Error: {e}")
+        
+        # print(page.locator(general_information_entries_locator).count())
+        # page.locator(general_information_entries_locator).last.hover()
+        
+        if page.locator(general_information_entries_locator).last.is_visible():
+            # print("Line Number 821")
+            page.locator(general_information_entries_locator).last.dblclick()
+            
+            # iframe_element = page.wait_for_selector("//iframe[@src='/arsys/forms/helixitsm-01/TMS%3AWorkInfo/Default+User+View/?cacheid=43b69c09&format=html']")
+            page.wait_for_selector("//table[@id='DivTable']//iframe")
+            frame = page.frame_locator("//table[@id='DivTable']//iframe")
+            
+            
+            # frame = iframe_element.content_frame()
+            locator_for_attachment = "//div[1]/div[5]/div[11]/div[2]/div/div[2]/table/tbody/tr[2]/td[1]/nobr/span"
+            
+            count = 0
+            while count < 3:
+                if frame.locator(locator_for_attachment).is_visible():
+                    break
+                else:
+                    try:
+                        page.wait_for_timeout(1000)
+                    except:
+                        count+= 1
+                        continue
+                count += 1
+            
+            if frame.locator(locator_for_attachment).is_visible():
+                # print("Line Number 833")
+                attachment_ = frame.locator(locator_for_attachment).inner_text()
+                
+                if len(str(attachment_).strip()) > 0:
+                    # print("Line Number 837")
+                    frame.locator(locator_for_attachment).click()
+                    
+                    save_to_disk_button_locator = "//div/div/div/div/table/tbody/tr/td/a[text()='Save to Disk']"
+                    
+                    if not os.path.exists(lld_design_download_path):
+                        os.makedirs(lld_design_download_path, exist_ok=True)
+                    
+                    if frame.locator(save_to_disk_button_locator).is_visible():
+                        with page.expect_download(timeout=60000) as download_info:
+                            # frame.bring_to_front()
+                            frame.locator(save_to_disk_button_locator).click()
+                        download = download_info.value
+                        
+                        if os.path.exists(
+                            os.path.join(
+                                lld_design_download_path,
+                                f"{attachment_}"
+                            )
+                        ):
+                            os.remove(
+                                os.path.join(
+                                    lld_design_download_path,
+                                    f"{attachment_}"
+                                )
+                            )
+                        download.save_as(
+                            os.path.join(
+                                lld_design_download_path,
+                                f"{attachment_}"
+                            )
+                        )
+                            
+            if frame is not None:
+                frame.locator("//div/div/a/div/div[normalize-space()='Close']").click()
+                            
+    return cr, attachment_
+
+
+def bpms_crs_attachment_name_getter(
+    cr: str,
+    page: Page,
+    logs:list
+) -> Tuple[AnyStr, AnyStr, list]:
+    attachment_name = ""
+    try:
+        page.wait_for_load_state('domcontentloaded')
+        page.wait_for_load_state('load')
+        
+        list_of_downloads_button = [
+                "//fieldset/div/div/fieldset[1]/div[2]/div/div/div[3]/fieldset/div/a[2]/div[@class='btnimgdiv']",
+                # "//fieldset/div/div/fieldset[1]/div[2]/div/div/div[4]/fieldset/div/a[2]/div[@class='btnimgdiv']",
+                # "//fieldset/div/div/fieldset[1]/div[2]/div/div/div[4]/fieldset/div/a[5]/div[@class='btnimgdiv']",
+            ]
+        
+        text_attachment_locators = [
+            "//fieldset[@id='WIN_3_303868700']/div[@id='WIN_3_304196500']/div/div/div[3]/fieldset/div/div[4]/textarea",
+            # "//fieldset[@id='WIN_3_303868700']/div[@id='WIN_3_304196500']/div/div/div[4]/fieldset/div/div[1]/textarea",
+            # "//fieldset[@id='WIN_3_303868700']/div[@id='WIN_3_304196500']/div/div/div[4]/fieldset/div/div[2]/textarea",
+        ]
+        
+        logs.append(
+            f"Getting the bpms technical design attachment name for cr: {cr}"
+        )
+        
+        page.locator(
+                "//div[@id='WIN_3_301389923' and @arid='301389923']/div[@class='TableInner']/div[@class='BaseTableOuter']/div[@class='BaseTableInner']/table[@id='T301389923']/tbody/tr/td/nobr/span[text() = 'Technical Design']"
+            ).first.dblclick()
+        
+        j = 0
+        while j < len(text_attachment_locators):
+            if page.locator(text_attachment_locators[j]).is_visible():
+                text_attachment = page.locator(
+                    text_attachment_locators[j]
+                ).input_value()
+                if text_attachment != "<File Name>":
+                    attachment_name = text_attachment
+            j += 1
+    
+    except Exception as e:
+        logs.append(
+            f"{str(e.__class__.__name__)}\n{traceback.format_exc()}\n\n{e}"
+        )
+    
+    return cr, attachment_name, logs
+            
+
+def bpms_manual_crs_attachment_downloader(
+    cr: str,
+    folder_location: str,
+    cr_circle: str,
+    page: Page,
+    date_:datetime, 
+    logs:list
+) -> Tuple[AnyStr, AnyStr, list]:
+    attachment_name = ""
+    try:
+        page.wait_for_load_state('domcontentloaded')
+        page.wait_for_load_state('load')
+        
+        lld_design_download_path = os.path.join(
+            folder_location,
+            "Install_and_Backout_Plan_Files",
+            f"{date_.strftime('%d-%b-%Y')}",
+            f"{cr}_{cr_circle}",
+            "Manual_Technical_Design"
+        )
+
+        Path(lld_design_download_path).mkdir(parents=True, exist_ok=True)
+        
+        list_of_downloads_button = [
+                "//fieldset/div/div/fieldset[1]/div[2]/div/div/div[3]/fieldset/div/a[2]/div[@class='btnimgdiv']",
+                # "//fieldset/div/div/fieldset[1]/div[2]/div/div/div[4]/fieldset/div/a[2]/div[@class='btnimgdiv']",
+                # "//fieldset/div/div/fieldset[1]/div[2]/div/div/div[4]/fieldset/div/a[5]/div[@class='btnimgdiv']",
+            ]
+        
+        text_attachment_locators = [
+            "//fieldset[@id='WIN_3_303868700']/div[@id='WIN_3_304196500']/div/div/div[3]/fieldset/div/div[4]/textarea",
+            # "//fieldset[@id='WIN_3_303868700']/div[@id='WIN_3_304196500']/div/div/div[4]/fieldset/div/div[1]/textarea",
+            # "//fieldset[@id='WIN_3_303868700']/div[@id='WIN_3_304196500']/div/div/div[4]/fieldset/div/div[2]/textarea",
+        ]
+        
+        logs.append(
+            f"Getting the bpms technical design attachment name for cr: {cr}"
+        )
+        
+        page.locator(
+                "//div[@id='WIN_3_301389923' and @arid='301389923']/div[@class='TableInner']/div[@class='BaseTableOuter']/div[@class='BaseTableInner']/table[@id='T301389923']/tbody/tr/td/nobr/span[text() = 'Technical Design']"
+            ).first.dblclick()
+        
+        j = 0
+        while j < len(text_attachment_locators):
+            # if page.locator("//fieldset[@id='WIN_3_303868700']/div[@id='WIN_3_304196500']/div[@class='PageHolderStackViewResizable']/div[@class='PageHolderStackViewFixedCV']/div[@id='WIN_3_304247060' and @arid='304247060']/fieldset[@class='PageBodyVertical']/div[@class='PageBody pbChrome' ]/div[@id='WIN_3_304247090' and @arid='304247090']/textarea[@class='text sr ']").nth(l).is_visible():
+            if page.locator(text_attachment_locators[j]).is_visible(timeout=10000):
+                # text_attachment = page.locator("//fieldset[@id='WIN_3_303868700']/div[@id='WIN_3_304196500']/div[@class='PageHolderStackViewResizable']/div[@class='PageHolderStackViewFixedCV']/div[@id='WIN_3_304247060' and @arid='304247060']/fieldset[@class='PageBodyVertical']/div[@class='PageBody pbChrome' ]/div[@id='WIN_3_304247090' and @arid='304247090']/textarea[@class='text sr ']").nth(l).input_value()
+                text_attachment = page.locator(
+                    text_attachment_locators[j]
+                ).input_value()
+                
+                if text_attachment != "<File Name>":
+                    attachment_name = text_attachment
+                    with page.expect_download(timeout=60000) as download_info:
+                        page.bring_to_front()
+                        page.locator(list_of_downloads_button[j]).click()
+                        
+                    download = download_info.value
+                    
+                    if not os.path.exists(lld_design_download_path):
+                        os.makedirs(lld_design_download_path, exist_ok=True)
+                    
+                    # print(f"{os.path.exists(lld_design_download_path) =}")
+                    
+                    if os.path.exists(
+                        os.path.join(
+                            lld_design_download_path,
+                            f"{text_attachment}",
+                        )
+                    ):
+                        os.remove(
+                            os.path.join(
+                                lld_design_download_path,
+                                f"{text_attachment}",
+                            )
+                        )
+
+                    download.save_as(
+                        os.path.join(
+                            lld_design_download_path,
+                            f"{text_attachment}",
+                        )
+                    )
+            j += 1
+
+        
+    except Exception as e:
+        logs.append(
+            f"{str(e.__class__.__name__)}\n{traceback.format_exc()}\n\n{e}"
+        )
+    
+    return cr, attachment_name, logs
+
+
+def bpms_file_correction_file_upload(
+    cr: str, 
+    corrected_file_path: str,
+    page: Page,
+    runtime: dict,
+    logs: list
+) -> Tuple[AnyStr, AnyStr, list]:
+    result = "Failure"
+    page.wait_for_timeout(1000)
+    page.wait_for_load_state("domcontentloaded")
+    
+    runtime["status"] = "Starting to upload the corrected file"
+    logs.append(
+        f"Starting to upload the corrected file for cr: {cr}"
+    )
+    logs.extend(search_for_cr(cr, page, logs))
+
+    try:
+        wait_var = True
+
+        # Waiting for the table to load
+        while wait_var:
+            if (
+                page.locator(
+                    "//div[@class='PageBody pbChrome']/div[@id='WIN_3_301389923']/div[@class='TableHdr']/table[@class='TableHdr']/tbody/tr/td[@class='TableHdrL']"
+                ).text_content()
+                == "Table has Not been Loaded"
+            ):
+                page.wait_for_timeout(1000)
+            else:
+                wait_var = False
+
+        # Clicking on More Info
+        page.wait_for_selector('//textarea[@id="arid_WIN_3_304247080"]')
+        
+        page.locator(
+            '//textarea[@id="arid_WIN_3_304247080"]'
+        ).fill('Updated Manual DLD/Design')
+        
+        # page.wait_for_selector(
+        #     '//div/a[@id="WIN_3_304247100"]/div'
+        # )
+        
+        page.wait_for_selector(
+            '//img[@id="reg_img_304247100"]'
+        )
+        
+        page.locator(
+            '//img[@id="reg_img_304247100"]'
+        ).click()
+        
+        page.wait_for_selector("//table[@id='DivTable']//iframe")
+        frame = page.frame_locator("//table[@id='DivTable']//iframe")
+        locator_for_choosing_the_file = '//table/tbody/tr/td/form/table/tbody/tr/td[2]/input[@id="PopupAttInput"]'
+        
+        ok_button_locator = '//div[@id="PopupAttFooter"]/a[text()="OK"]'
+        
+        count = 0
+        while count < 3:
+            if frame.locator(locator_for_choosing_the_file).is_visible():
+                break
+            else:
+                try:
+                    page.wait_for_timeout(1000)
+                except:
+                    count+= 1
+                    continue
+            count += 1
+        # print(f"\n{frame.locator(locator_for_choosing_the_file).is_visible() = }\n")
+        if frame.locator(locator_for_choosing_the_file).is_visible():
+            # print(f"\n{frame.locator(locator_for_choosing_the_file) = }")
+            # with page.expect_file_chooser(timeout=60000) as fc_info:
+            #     frame.locator(locator_for_choosing_the_file).hover()
+            #     frame.locator(locator_for_choosing_the_file).click(button='left', click_count=2, force=True)
+            # print("Line 1153")
+            # file_chooser = fc_info.value
+            # file_chooser.set_files(corrected_file_path)
+            frame.locator(locator_for_choosing_the_file).set_input_files(corrected_file_path)
+        
+        if frame is not None:
+            frame.locator(ok_button_locator).click()
+        
+        result = "Success"
+
+        # Clicking on More Info
+        page.locator(
+            "//div/fieldset[@class='PageBodyHorizontal']/div[@class='PageBody pbChrome']/div/fieldset/div[@arid='304196500']/div/div/div/div/a[@class='pagebtn ']/span[@class='Twisty Tsize']"
+        ).click()
+
+        # Selecting Info
+        page.locator(
+            "//div/fieldset/div[@class='PageBody pbChrome']/div[@arid='304247210']/div[@class='selection']/a[@class='btn btn3d selectionbtn']"
+        ).click()
+        
+        page.wait_for_selector(
+            "//div[@class='MenuOuter']/div[@class='MenuTableContainer']/table[@class='MenuTable']/tbody/tr/td"
+        )
+        page.locator(
+            "//div[@class='MenuOuter']/div[@class='MenuTableContainer']/table[@class='MenuTable']/tbody/tr/td",
+            has_text="Technical Design",
+        ).click()
+        
+        # Locking the Design
+        # page.locator(
+        #     "//div[@arid='304247260']/fieldset[@class='fieldSetRadio']/div/span/input[@value='0']"
+        # ).click()
+        
+        # Setting View Access Public
+        page.locator(
+            '//fieldset/div/div/fieldset/div[@class="radio "]/span[2]/input[@value="1" and @id="WIN_3_rc1id1000000761"]'
+        ).click()
+        
+        # Clicking on 'Add' button
+        page.locator(
+            "//div/fieldset[@class='PageBodyVertical']/div[@class='PageBody pbChrome']/a[@arid='304247110']/div[@class='btntextdiv']"
+        ).click()
+    
+    except Exception as e:
+        result = "Failure"
+        # print(f"Error occurred while filling MOP attachment for CR {cr}: {e}")
+        logs.append(
+            f"{str(e.__class__.__name__)}\n{traceback.format_exc()}\n\n{e}"
+        )
+        raise
+    return cr, result, logs
+
+
 def raw_report_downloader(
     context: BrowserContext,
     page: Page,
@@ -132,7 +1110,7 @@ def raw_report_downloader(
     task_name = task["name"] if task else "Task"
     
     if date_ is None:
-        print(datetime.now())
+        # print(datetime.now())
         date_1 = f"{((datetime.now()).replace(hour=20, minute=0, second=0)).strftime('%m/%d/%Y %H:%M:%S')}"
         date_2 = f"{((datetime.now() + timedelta(days=1)).replace(hour=8, minute=0, second=0)).strftime('%m/%d/%Y %H:%M:%S')}"
 
@@ -298,6 +1276,48 @@ def login_to_itsm(
     return request_password_from_user(runtime, task, logs, timestamp_fn)
 
 
+def iframe_message_handler(
+    page: Page,
+    token_for_locking: bool,
+) -> bool:
+    result = token_for_locking
+    try:
+        page.wait_for_load_state("domcontentloaded")
+        page.wait_for_load_state("load")
+
+        # print("\n\n Inside Iframe Handler")
+        page_iframe = page.frame_locator(
+            "iframe[src='https://ticketing-in.managed-services.prod.sdt.ericsson.net/arsys/resources/html/MessagePopup.html']"
+        )
+        if page_iframe is not None:
+            if page_iframe.locator(
+                "//a[contains(@class,'PopupBtn') and normalize-space()='No']|//a[contains(@class,'PopupBtn') and normalize-space()='OK']|//a[contains(@class,'PopupBtn') and normalize-space()='Ok']"
+            ).is_visible():
+                if page_iframe.locator(
+                    "//a[@class='btn btn3d PopupBtn' and normalize-space()='No']"
+                ).is_visible():
+                    # print("Found No Button in Popup")
+                    page_iframe.locator(
+                        "//a[@class='btn btn3d PopupBtn' and text()='No']"
+                    ).click(timeout=15000)
+                elif page_iframe.locator(
+                    "//a[@class='btn btn3d PopupBtn' and normalize-space()='Ok']"
+                ).is_visible():
+                    page_iframe.locator(
+                        "//a[@class='btn btn3d PopupBtn' and normalize-space()='Ok']"
+                    ).click(timeout=15000)
+                    if live_feed:
+                        live_feed.emit(red_text("Can't Lock the plan"))
+
+                elif page_iframe.locator(
+                    "//a[contains(@class,'PopupBtn') and normalize-space()='Ok']"
+                ).is_visible():
+                    result = False
+
+    except TimeoutError:
+        result = False
+
+    return result
 
 def handle_authenticator(
     page: Page,
@@ -748,7 +1768,8 @@ def itsm_logger(
     task: dict, 
     runtime:dict|None=None, 
     timestamp_fn:Callable|None=None,
-    user_email: str = None) -> Tuple[Browser|None, BrowserContext | None, Page | None, list]:
+    user_email: str = None
+) -> Tuple[Browser|None, BrowserContext | None, Page | None, list]:
     
     # print("inside itsm logger")
 
@@ -884,7 +1905,14 @@ def new_page_opener(context: BrowserContext, logs: list) -> Tuple[Page|None, Lis
 
 
 
-def session_maker(logs: list, task:dict, headless_arg: bool=False, runtime: dict=None, timestamp_fn:Callable=None, user_email: str="") -> Tuple[bool, list]:
+def session_maker(
+    logs: list, 
+    task:dict, 
+    headless_arg: bool=False, 
+    runtime: dict=None, 
+    timestamp_fn:Callable=None, 
+    user_email: str=""
+) -> Tuple[bool, list]:
     assert runtime is not None, "runtime must be passed through unchanged"
     print(f"🔎 [session_maker] runtime id = {id(runtime)}")
     print(f"🔬 [session_maker] runtime is None? {runtime is None}")
