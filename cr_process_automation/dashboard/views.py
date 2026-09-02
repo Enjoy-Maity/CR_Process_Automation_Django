@@ -762,7 +762,7 @@ TASKS = [
     {"id": 7, "sequence_no": 7, "name": "NIAM Ticket Generation", "download_required": False},
 ]
 
-TASKS_REQUIRING_AUTH = {1, 2, 3, 5}
+TASKS_REQUIRING_AUTH = {1, 2, 3, 4, 5, 7}
 
 def _requires_auth(task_id):
     """Check if a task requires authentication."""

@@ -1,5 +1,5 @@
 import os
-import regex as re
+# import regex as re
 import traceback
 import pandas as pd
 import numpy as np
@@ -8,7 +8,9 @@ import dateutil.parser as dp
 import dashboard.task_modules.dependencies.batch_methods as bm
 import dashboard.task_modules.dependencies.playwright_common_methods_ as pcm
 from pathlib import Path
-from dashboard.task_modules.dependencies.extra_dependencies import workbook_styling, ExcelModifier
+from dashboard.task_modules.dependencies.extra_dependencies import workbook_styling, cr_wise_status_df_maker
+from dashboard.task_modules.dependencies.excel_modifier import ExcelModifier
+from dashboard.exceptions import CustomException
 from playwright.sync_api import sync_playwright, Page
 from typing import AnyStr, List, Tuple, Literal, Callable
 from numpy.typing import ArrayLike
@@ -20,9 +22,14 @@ from threading import Thread
 from collections import defaultdict
 from dashboard.views import _make_serializable
 from dashboard.models import MasterCRDatabase, SelectedDateTable, CRWiseStatus
+from django.http import JsonResponse
+from django.conf import settings
+from django.core.management import call_command
+from django.db import transaction
 from dashboard.task_modules.cr_hygiene_checks.tasks import (
     validation_file_colorizer,
-    file_reader_and_checker
+    file_reader_and_checker,
+    selected_date_df_maker
 )
 
 
@@ -78,7 +85,7 @@ def bpms_manual_cr_design_handler(cr: str, page: Page, date_: datetime, logs: li
     folder = os.path.dirname(os.getenv("BPMS_CR_HYGIENE_CHECKS_FILE").format(date_.strftime('%d-%b-%y')))
     # print(f"{folder=}")
     
-    _, attachment_name = pcm.bpms_crs_attachment_name_getter(cr, page, logs)
+    _, attachment_name, logs = pcm.bpms_crs_attachment_name_getter(cr, page, logs)
     manual_crs_attachment_dict[cr] = attachment_name
     
     _, attachment_name, logs = pcm.bpms_manual_crs_attachment_downloader(cr, folder, cr_to_circle_dict[cr], page, date_, logs)
@@ -123,16 +130,23 @@ def first_download_itsm_thread_task(cr_batch: List[AnyStr], date_: datetime):
             token_for_locking = True
             # workbook_parent = os.path.dirname(str(workbook_file_path))
             workbook_parent = os.path.dirname(str(os.getenv("BPMS_CR_HYGIENE_CHECKS_FILE")).format(date_.strftime("%d-%b-%y")))
+            os.makedirs(workbook_parent, exist_ok=True)
+            print(f"\n\n{workbook_parent=}")
+            print(f"{os.path.exists(workbook_parent)=}")
             i = 0
             while i < len(cr_batch):
                 cr = cr_batch[i]
-                logs = pcm.search_for_cr(cr, thread_page, logs)
-                _, work_details_table = pcm.work_detail_table_reader(thread_page, cr, manager, live_feed)
-                
+                print(f"\n\n{cr=}")
+                logs = pcm.search_for_cr(thread_page, cr, logs)
+                _, work_details_table = pcm.work_detail_table_reader(thread_page, cr)
+                # print(f"{work_details_table=}\n")
                 work_details_table["Files"] = pd.to_numeric(work_details_table["Files"], errors="coerce").fillna(0).astype(int)
+                # print(f"{work_details_table['Files']=}\n")
                 work_details_table["Notes"] = work_details_table["Notes"].fillna("").astype(str) # NA, N/A, NaN, naN, etc.
+                # print(f"{work_details_table['Notes']=}\n")
                 type_values = work_details_table["Type"].astype(str).str.strip().values.tolist()
-                
+                # print(f"{type_values=}\n")
+                print(f'{work_details_table=}\n\n')
                 work_detail_queue.put((cr, work_details_table))
                 
                 backout_plan_found = False
@@ -141,15 +155,17 @@ def first_download_itsm_thread_task(cr_batch: List[AnyStr], date_: datetime):
                     (work_details_table['Type'].astype(str).str.strip() == 'Backout Plan')
                     ]
 
+                print(f"{backout_plan_df=}\n")
+
                 if not backout_plan_df.empty:
                     backout_plan_found = True if backout_plan_df.iloc[0]['Files'] > 0 else False
                 
+                print(f"{backout_plan_found=}\n")
                 backout_plan_availability_list = ["Not Available", "Not Available"]
                 if backout_plan_found:
                     # ---Backout plan (may trigger modal) ---
                     backout_plan_availability_list, token_for_locking, logs = (
                         pcm.call_with_modal_ack(
-                            thread_page,
                             pcm.backout_plan_downloader,
                             thread_page,
                             workbook_parent,
@@ -176,7 +192,6 @@ def first_download_itsm_thread_task(cr_batch: List[AnyStr], date_: datetime):
                     # --- Test plan (may trigger modal) ---
                     test_plan_availability_list, token_for_locking, logs = (
                         pcm.call_with_modal_ack(
-                            thread_page,
                             pcm.test_plan_downloader,
                             thread_page,
                             workbook_parent,
@@ -188,7 +203,7 @@ def first_download_itsm_thread_task(cr_batch: List[AnyStr], date_: datetime):
                             max_retries=2,
                         )
                     )
-                    # print(f"{cr = }, test_plan_downloaded = {test_plan_availability_list}")
+                    print(f"{cr = }, test_plan_downloaded = {test_plan_availability_list}")
                 
                 if queue_:
                         queue_.put(
@@ -225,18 +240,18 @@ def first_download_itsm_thread_task(cr_batch: List[AnyStr], date_: datetime):
                 
                 
                 i += 1
-
+        
+        except Exception as e:
+            logs.append(
+                f"{str(e.__class__.__name__)}\n{traceback.format_exc()}\n\n{e}"
+            )
+            raise
+                
+        finally:
             if glogs:
                 for element in logs:
                     glogs.put(_make_serializable(element))
-        
-        except Exception as e:
-            if glogs:
-                glogs.put(
-                    f"{str(e.__class__.__name__)}\n{traceback.format_exc()}\n\n{e}"
-                )
-                
-        finally:
+
             if thread_page:
                 thread_page.close()
                 del thread_page
@@ -265,7 +280,7 @@ def second_cr_hygiene_itsm_thread_task(cr_batch: List[AnyStr], logs: list):
     with sync_playwright() as thread_playwright_instance:
         browser = thread_playwright_instance.chromium.launch(
             headless=False,
-            executable_path=extra.common_paths_for_browser_method()
+            executable_path=pcm.get_browser()
         )
         thread_context = browser.new_context(storage_state=os.getenv("ITSM_SESSION_FILE"))
         logs = []
@@ -277,10 +292,10 @@ def second_cr_hygiene_itsm_thread_task(cr_batch: List[AnyStr], logs: list):
             i = 0
             while i < len(cr_batch):
                 cr = cr_batch[i]
-                logs = pcm.search_for_cr(cr, thread_page, logs)
+                logs = pcm.search_for_cr(thread_page, cr, logs)
                 
                 relationship_nodes_queue.put(
-                    pcm.relationship_nodes_handler(thread_page, cr, text_contents, manager, live_feed)
+                    pcm.relationship_nodes_handler(thread_page, cr, text_contents)
                 )
                 
                 tasks_queue.put(
@@ -333,7 +348,8 @@ def first_itsm_job_starter(
     
     if unique_crs_in_df.size > 0:
         batch_creation_success, batches, logs = bm.main_method(
-                unique_crs_in_df.tolist()
+                unique_crs_in_df.tolist(),
+                logs
             )
 
         if batch_creation_success:
@@ -364,7 +380,7 @@ def first_itsm_job_starter(
                 for future in futures:
                     future.result()
             
-            pcm.session_breaker()
+            # pcm.session_breaker()
 
             if glogs:
                 while not glogs.empty():
@@ -397,16 +413,17 @@ def second_itsm_job_starter(
             )
         
             session_created = None
-        
-            while not session_created:
-                session_created, logs = pcm.session_maker(
-                    logs,
-                    task,
-                    False,
-                    runtime,
-                    timestamp_fn,
-                    user_email
-                )
+            if not os.path.exists(os.getenv("ITSM_SESSION_FILE")):
+                os.makedirs(os.path.dirname(os.getenv("ITSM_SESSION_FILE")), exist_ok=True)
+                while not session_created:
+                    session_created, logs = pcm.session_maker(
+                        logs,
+                        task,
+                        False,
+                        runtime,
+                        timestamp_fn,
+                        user_email
+                    )
                 
             with ThreadPoolExecutor(max_workers=5) as executor:
                 futures = [
@@ -418,6 +435,9 @@ def second_itsm_job_starter(
 
                 for future in futures:
                     future.result()
+            
+            if os.path.exists(os.getenv("ITSM_SESSION_FILE")):
+                pcm.session_breaker()
             
             while not glogs.empty():
                 logs.append(
@@ -473,24 +493,31 @@ def cr_pre_hygiene_dictionary_maker():
     global glogs, relationship_nodes_queue, work_detail_queue
     global cr_itsm_details_dictionary, cr_to_relationship_node_count_dictionary
     if glogs:
-        glogs.put(orange_text("Compiling Data from ITSM..."))
+        glogs.put("Compiling Data from ITSM...")
         
     relationship_nodes_list = []
     work_detail_list = []
     tasks_details_list = []
     items = []
     
-    while queue_.qsize() > 0:
+    while not queue_.empty():
         items.append(queue_.get())
     
-    while relationship_nodes_queue.qsize() > 0:
+    while not relationship_nodes_queue.empty():
         relationship_nodes_list.append(relationship_nodes_queue.get())
     
-    while work_detail_queue.qsize() > 0:
+    while not work_detail_queue.empty():
         work_detail_list.append(work_detail_queue.get())
         
-    while tasks_queue.qsize() > 0:
+    while not tasks_queue.empty():
         tasks_details_list.append(tasks_queue.get())
+
+    print(f"{relationship_nodes_list=}\n")
+    print(f"{len(relationship_nodes_list)=}\n")
+    print(f"{work_detail_list=}\n")
+    print(f"{len(work_detail_list)=}\n")
+    print(f"{tasks_details_list=}\n")
+    print(f"{len(tasks_details_list)=}\n\n")
     
     if len(relationship_nodes_list) == len(work_detail_list) == len(tasks_details_list) == len(items):
         i = 0
@@ -946,7 +973,7 @@ def node_counts_remarks_maker(cr: str):
         return "Cannot Determine"
 
 
-def validation_summary_writer_and_planning_sheet_updater(filtered_df: pd.DataFrame, logs: list) -> list:
+def validation_summary_writer_and_planning_sheet_updater(filtered_df: pd.DataFrame, logs: list, date_: datetime) -> list:
     global manual_crs
     global auto_crs
     global cr_itsm_details_dictionary
@@ -961,6 +988,7 @@ def validation_summary_writer_and_planning_sheet_updater(filtered_df: pd.DataFra
     global manual_crs_file_content_status_dict
     
     summary_excel_file_path = str(os.getenv("BPMS_CR_HYGIENE_CHECKS_FILE")).format(date_.strftime("%d-%b-%y"))
+    os.makedirs(os.path.dirname(summary_excel_file_path), exist_ok=True)
     workbook_file_path = os.path.join(os.getenv("PLANNING_SHEET_DOWNLOAD_FOLDER").format(date_.strftime('%d-%b-%y')), os.getenv("PLANNING_SHEET_WORKBOOK_NAME"))
     sheet_name = "BPMS CR Validation Summary"
     df = pd.DataFrame()
@@ -968,12 +996,22 @@ def validation_summary_writer_and_planning_sheet_updater(filtered_df: pd.DataFra
     dictionary_for_df = defaultdict(list)
 
     if os.path.exists(summary_excel_file_path):
-        excel_file = pd.ExcelWriter(
-            summary_excel_file_path,
-            engine="openpyxl",
-            mode="a",
-            if_sheet_exists="replace",
-        )
+        try:
+            excel_file = pd.ExcelWriter(
+                summary_excel_file_path,
+                engine="openpyxl",
+                mode="a",
+                if_sheet_exists="replace",
+            )
+        except zipfile.BadZipFile:
+            logs.append(f"Error: {summary_excel_file_path} is a bad zip file. Removing the file and creating a new one.")
+            os.remove(summary_excel_file_path)
+            
+            excel_file = pd.ExcelWriter(
+                summary_excel_file_path,
+                engine="openpyxl",
+                mode="w",
+            )
         
     else:
         excel_file = pd.ExcelWriter(
@@ -1168,7 +1206,6 @@ def run_task(
     global text_contents
     global tasks_queue
     global queue_
-    global work_details_cr_hygiene_dictionary
     global task_table_status_dict
     global manual_crs_file_name_status_dict
     global manual_crs_file_content_status_dict
@@ -1204,6 +1241,7 @@ def run_task(
     tasks_queue = Queue()
     queue_ = Queue()
     cr_itsm_details_dictionary = defaultdict(dict)
+    work_details_cr_hygiene_dictionary = defaultdict(dict)
     task_table_status_dict = defaultdict(str)
     cr_to_relationship_node_count_dictionary = defaultdict(int)
     cr_to_circle_checker_dictionary = defaultdict(bool)
@@ -1263,7 +1301,7 @@ def run_task(
     
     # print(selected_data_df.columns)
     
-    cr_wise_status_df = ed.cr_wise_status_df_maker(parsed_date)
+    cr_wise_status_df = cr_wise_status_df_maker(parsed_date)
     # cr_wise_status_df = cr_wise_status_df.where(~pd.notna(cr_wise_status_df["CR_Hygiene_Checks"]), "")
     cr_wise_status_df["CR_Hygiene_Checks"].fillna("", inplace=True)
     cr_wise_status_df = cr_wise_status_df.loc[
@@ -1375,12 +1413,12 @@ def run_task(
             manual_installed_file_checker_thread.start()
             manual_installed_file_checker_thread.join()
         
-        GLOBAL_LOGS = validation_summary_writer_and_planning_sheet_updater(bpms_filtered_df, GLOBAL_LOGS)
+        GLOBAL_LOGS = validation_summary_writer_and_planning_sheet_updater(bpms_filtered_df, GLOBAL_LOGS, date_)
     
     return {
         "status": "Completed",
         "message": f"{task['name']} completed successfully.",
         "download_ready": True,
-        "download_name": str(os.getenv("CR_HYGIENE_CHECKS_FILE")).format(parsed_date.strftime("%d-%b-%y")),
+        "download_name": str(os.getenv("BPMS_CR_HYGIENE_CHECKS_FILE")).format(parsed_date.strftime("%d-%b-%y")),
         "counts": {},
     }

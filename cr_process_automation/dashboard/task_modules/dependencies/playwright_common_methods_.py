@@ -5,6 +5,7 @@ from io import StringIO
 import traceback
 import pythoncom
 import rootutils
+import inspect
 from bs4 import BeautifulSoup as beautifulsoup
 from dashboard.views import _timestamp
 from django.conf import settings
@@ -25,7 +26,7 @@ from django.conf import settings
 from datetime import datetime, timedelta, date
 from dateutil import parser
 from pathlib import Path
-from typing import Union, Tuple, List
+from typing import Union, Tuple, List, Literal, AnyStr
 import threading
 import  dateutil.parser as dp
 
@@ -117,44 +118,58 @@ def get_itsm_session_file_path() -> str:
     return os.path.join(str(os.environ["PROJECT_ROOT"]) , str(os.getenv("ITSM_SESSION_FILE")))
 
 
-def call_with_modal_ack(page, func, *args, max_retries=3, **kwargs):
+def call_with_modal_ack(func, *args, max_retries=3, **kwargs):
     """
     Calls a function that may trigger a popup iframe.
     Detects popup, mutates args, retries, and returns updated args.
     """
-    sig = inspect.signature(func)
-    bound = sig.bind(*args, **kwargs)
-    bound.apply_defaults()
-    earlier_value_of_token_for_locking = bound.arguments["token_for_locking"]
+    print("inside call_with_modal_ack\n")
+    try:
+        sig = inspect.signature(func)
+        print(f"{sig =}\n\n")
+        bound = sig.bind(*args, **kwargs)
+        print(f"{bound =}\n\n")
+        bound.apply_defaults()
+    except TypeError as e:
+        print(f"BINDING FAILED: {e}")
+        raise
+    except Exception as e:
+        print(f"CALLING FAILED: {e}")
+        raise
+    else:
+        print(f"{bound.arguments=}\n")
+        earlier_value_of_token_for_locking = bound.arguments["token_for_locking"]
+        availability_list = updated_token = updated_logs = None
+        for attempt in range(1, max_retries + 1):
+            result = func(*bound.args, **bound.kwargs)
+            availability_list, updated_token, updated_logs = result
+            print(f"{result=}\n")
 
-    for attempt in range(1, max_retries + 1):
-        result = func(*bound.args, **bound.kwargs)
+            # allow iframe watcher to act
+            # page.wait_for_timeout(300)
 
-        # allow iframe watcher to act
-        # page.wait_for_timeout(300)
+            # popup = read_and_reset_popup_state(page)
 
-        # popup = read_and_reset_popup_state(page)
+            # if not popup["handled"]:
+            #     return result, dict(bound.arguments)["token_for_locking"]
 
-        # if not popup["handled"]:
-        #     return result, dict(bound.arguments)["token_for_locking"]
+            # print(f"⚠️ Popup handled ({popup['type']}) in {func.__name__}, retry {attempt}")
 
-        # print(f"⚠️ Popup handled ({popup['type']}) in {func.__name__}, retry {attempt}")
+            # # 🔁 mutate arguments ONLY when required
+            # if popup["type"] == "confirm_save":
+            #     if "token_for_locking" in bound.arguments:
+            #         bound.arguments["token_for_locking"] = False
+            #         print("🔁 token_for_locking → False")
 
-        # # 🔁 mutate arguments ONLY when required
-        # if popup["type"] == "confirm_save":
-        #     if "token_for_locking" in bound.arguments:
-        #         bound.arguments["token_for_locking"] = False
-        #         print("🔁 token_for_locking → False")
-
-        # retry with mutated args
-        result_value_for_locking = result[1]
-        # print(f"{attempt =}")
-        if result_value_for_locking != earlier_value_of_token_for_locking:
-            # print("increasing the value attempt variable")
-            attempt += 1
-            continue
-            
-    return result, dict(bound.arguments)["token_for_locking"]
+            # retry with mutated args
+            result_value_for_locking = result[1]
+            # print(f"{attempt =}")
+            if result_value_for_locking != earlier_value_of_token_for_locking:
+                # print("increasing the value attempt variable")
+                attempt += 1
+                continue
+                
+        return availability_list, updated_token, updated_logs
 
 
 
@@ -165,13 +180,12 @@ def backout_plan_downloader(
     cr_circle: str,
     token_for_locking: bool,
     date_: datetime,
-    logs: logs
+    logs: List[str],
 ) -> Tuple[List[str], bool, List[str]]:
     try:
         test_plan_download_folder = os.path.join(
             folder_location,
             "Install_and_Backout_Plan_Files",
-            f"{date_.strftime('%d-%b-%Y')}",
             f"{cr}_{cr_circle}",
             "Backout Plans",
         )
@@ -404,8 +418,8 @@ def backout_plan_downloader(
                         # page.locator(
                         #     "//div/fieldset/div[@class='PageBody pbChrome']/a[@arid='301402700']/div[@class='btntextdiv']/div[@class='f1' and text()='Save']"
                         # ).nth(i).click(timeout=60000)
-                        token_for_locking = iframe_message_handler(
-                            page, token_for_locking
+                        token_for_locking, logs = iframe_message_handler(
+                            page, token_for_locking, logs
                         )
                         break
                     i += 1
@@ -417,6 +431,174 @@ def backout_plan_downloader(
 
     
     return cr_wise_test_plan_availability_list, token_for_locking, logs
+
+
+def install_plan_downloader(
+    page: Page,
+    folder_location: str,
+    cr: str,
+    cr_circle: str,
+    need_install_plan: bool,
+    token_for_locking: bool,
+    date_: datetime,
+    logs: List[str],
+) -> Literal["Available", "Not Available"]:
+    try:
+        # print(f"Inside install_plan_downloader for cr {cr}")
+        install_plan_attached_to_cr = "Not Available"
+        page.wait_for_timeout(1000)
+        page.wait_for_load_state("domcontentloaded")
+
+        list_of_downloads_button = [
+            "//fieldset/div/div/fieldset[1]/div[2]/div/div/div[3]/fieldset/div/a[2]/div[@class='btnimgdiv']",
+            "//fieldset/div/div/fieldset[1]/div[2]/div/div/div[4]/fieldset/div/a[2]/div[@class='btnimgdiv']",
+            "//fieldset/div/div/fieldset[1]/div[2]/div/div/div[4]/fieldset/div/a[5]/div[@class='btnimgdiv']",
+        ]
+
+        install_plan_download_folder = os.path.join(
+            folder_location,
+            "Install_and_Backout_Plan_Files",
+            f"{cr}_{cr_circle}",
+            "Install Plans",
+        )
+
+        Path.mkdir(Path(install_plan_download_folder), parents=True, exist_ok=True)
+
+        """
+            Locking the install plans
+        """
+
+        # install_plan_locators = page.locator(
+        #     "//div[@id='WIN_3_301389923' and @arid='301389923']/div[@class='TableInner']/div[@class='BaseTableOuter']/div[@class='BaseTableInner']/table[@id='T301389923']/tbody/tr/td/nobr/span[text() = 'Install Plan']"
+        # ).all()
+        text_attachment_locators = [
+            "//fieldset[@id='WIN_3_303868700']/div[@id='WIN_3_304196500']/div/div/div[3]/fieldset/div/div[4]/textarea",
+            "//fieldset[@id='WIN_3_303868700']/div[@id='WIN_3_304196500']/div/div/div[4]/fieldset/div/div[1]/textarea",
+            "//fieldset[@id='WIN_3_303868700']/div[@id='WIN_3_304196500']/div/div/div[4]/fieldset/div/div[2]/textarea",
+        ]
+
+        install_plan_found = False
+
+        logs.append(
+            f"Downloading and locking the Install plans for cr: {cr}"
+        )
+
+        # print(install_plan_locators)
+
+        # i = 0
+        # while i < len(install_plan_locators):
+        #     page.locator(
+        #         "//div[@id='WIN_3_301389923' and @arid='301389923']/div[@class='TableInner']/div[@class='BaseTableOuter']/div[@class='BaseTableInner']/table[@id='T301389923']/tbody/tr/td/nobr/span[text() = 'Install Plan']"
+        #     ).nth(i).dblclick()
+            # print("Install Plan clicked")
+            # text_attachment_locators = page.locator("//fieldset[@id='WIN_3_303868700']/div[@id='WIN_3_304196500']/div[@class='PageHolderStackViewResizable']/div[@class='PageHolderStackViewFixedCV']/div[@id='WIN_3_304247060' and @arid='304247060']/fieldset[@class='PageBodyVertical']/div[@class='PageBody pbChrome' ]/div[@id='WIN_3_304247090' and @arid='304247090']/textarea[@class='text sr ']").all()
+        
+        page.locator(
+                "//div[@id='WIN_3_301389923' and @arid='301389923']/div[@class='TableInner']/div[@class='BaseTableOuter']/div[@class='BaseTableInner']/table[@id='T301389923']/tbody/tr/td/nobr/span[text() = 'Install Plan']"
+            ).first.dblclick()
+        
+        j = 0
+        while j < len(text_attachment_locators):
+            # if page.locator("//fieldset[@id='WIN_3_303868700']/div[@id='WIN_3_304196500']/div[@class='PageHolderStackViewResizable']/div[@class='PageHolderStackViewFixedCV']/div[@id='WIN_3_304247060' and @arid='304247060']/fieldset[@class='PageBodyVertical']/div[@class='PageBody pbChrome' ]/div[@id='WIN_3_304247090' and @arid='304247090']/textarea[@class='text sr ']").nth(l).is_visible():
+            if page.locator(text_attachment_locators[j]).is_visible(timeout=10000):
+                # text_attachment = page.locator("//fieldset[@id='WIN_3_303868700']/div[@id='WIN_3_304196500']/div[@class='PageHolderStackViewResizable']/div[@class='PageHolderStackViewFixedCV']/div[@id='WIN_3_304247060' and @arid='304247060']/fieldset[@class='PageBodyVertical']/div[@class='PageBody pbChrome' ]/div[@id='WIN_3_304247090' and @arid='304247090']/textarea[@class='text sr ']").nth(l).input_value()
+                text_attachment = page.locator(
+                    text_attachment_locators[j]
+                ).input_value()
+                if text_attachment != "<File Name>":
+                    install_plan_found = True
+
+                    if need_install_plan:
+                        with page.expect_download(timeout=60000) as download_info:
+                            page.bring_to_front()
+                            page.locator(list_of_downloads_button[j]).click()
+
+                        download = download_info.value
+
+                        if not os.path.exists(install_plan_download_folder):
+                            os.mkdir(install_plan_download_folder)
+
+                        if os.path.exists(
+                            os.path.join(
+                                install_plan_download_folder,
+                                f"{text_attachment}",
+                            )
+                        ):
+                            os.remove(
+                                os.path.join(
+                                    install_plan_download_folder,
+                                    f"{text_attachment}",
+                                )
+                            )
+
+                        download.save_as(
+                            os.path.join(
+                                install_plan_download_folder,
+                                f"{text_attachment}",
+                            )
+                        )
+                    install_plan_attached_to_cr = "Available"
+            j += 1
+
+        if install_plan_found and token_for_locking:
+            install_plan_lock_locators = page.locator(
+                "//div[@arid='304247260']/fieldset[@class='fieldSetRadio']/div/span/input[@value='0']"
+            ).all()
+
+            j = 0
+            while j < len(install_plan_lock_locators):
+                if (
+                    page.locator(
+                        "//div[@arid='304247260']/fieldset[@class='fieldSetRadio']/div/span/input[@value='0']"
+                    )
+                    .nth(j)
+                    .is_visible()
+                ):
+                    if (
+                        not page.locator(
+                            "//div[@arid='304247260']/fieldset[@class='fieldSetRadio']/div/span/input[@value='0']"
+                        )
+                        .nth(j)
+                        .is_disabled()
+                    ):
+                        # locking the files
+                        # page.locator(
+                        #     "//div[@arid='304247260']/fieldset[@class='fieldSetRadio']/div/span/input[@value='0']"
+                        # ).nth(j).click(timeout=60000)
+                        break
+                j += 1
+
+            save_button_locators = page.locator(
+                "//div/fieldset/div[@class='PageBody pbChrome']/a[@arid='301402700']/div[@class='btntextdiv']/div[@class='f1' and text()='Save']"
+            ).all()
+
+            j = 0
+            while j < len(save_button_locators):
+                if (
+                    page.locator(
+                        "//div/fieldset/div[@class='PageBody pbChrome']/a[@arid='301402700']/div[@class='btntextdiv']/div[@class='f1' and text()='Save']"
+                    )
+                    .nth(j)
+                    .is_visible()
+                ):
+                    # Saving the changes
+                    # page.locator(
+                    #     "//div/fieldset/div[@class='PageBody pbChrome']/a[@arid='301402700']/div[@class='btntextdiv']/div[@class='f1' and text()='Save']"
+                    # ).nth(j).click(timeout=60000)
+                    token_for_locking, logs = iframe_message_handler(
+                        page, token_for_locking, logs 
+                    )
+                    break
+                j += 1
+            # i += 1
+
+    except Exception as e:
+        logs.append(
+            f"{str(e.__class__.__name__)}\n{traceback.format_exc()}\n\n{e}"
+        )
+
+    return install_plan_attached_to_cr, token_for_locking, logs
+
 
 
 def test_plan_downloader(
@@ -432,7 +614,6 @@ def test_plan_downloader(
         test_plan_download_folder = os.path.join(
             folder_location,
             "Install_and_Backout_Plan_Files",
-            f"{datetime.now().strftime('%d-%b-%Y')}",
             f"{cr}_{cr_circle}",
             "Test Plans",
         )
@@ -623,8 +804,8 @@ def test_plan_downloader(
                         # page.locator(
                         #     "//div/fieldset/div[@class='PageBody pbChrome']/a[@arid='301402700']/div[@class='btntextdiv']/div[@class='f1' and text()='Save']"
                         # ).nth(i).click(timeout=60000)
-                        token_for_locking = iframe_message_handler(
-                            page, token_for_locking
+                        token_for_locking, logs = iframe_message_handler(
+                            page, token_for_locking, logs
                         )
                         break
                     i += 1
@@ -722,7 +903,6 @@ def bpms_auto_crs_tasks_lld_automation_handler(
     lld_design_download_path = os.path.join(
         folder_location,
         "Install_and_Backout_Plan_Files",
-        f"{date_.strftime('%d-%b-%Y')}",
         f"{cr}_{cr_circle}",
         "Auto_Technical_Design"
     )
@@ -822,7 +1002,7 @@ def bpms_auto_crs_tasks_lld_automation_handler(
             if frame is not None:
                 frame.locator("//div/div/a/div/div[normalize-space()='Close']").click()
                             
-    return cr, attachment_
+    return cr, attachment_, logs
 
 
 def bpms_crs_attachment_name_getter(
@@ -889,7 +1069,6 @@ def bpms_manual_crs_attachment_downloader(
         lld_design_download_path = os.path.join(
             folder_location,
             "Install_and_Backout_Plan_Files",
-            f"{date_.strftime('%d-%b-%Y')}",
             f"{cr}_{cr_circle}",
             "Manual_Technical_Design"
         )
@@ -983,7 +1162,7 @@ def bpms_file_correction_file_upload(
     logs.append(
         f"Starting to upload the corrected file for cr: {cr}"
     )
-    logs.extend(search_for_cr(cr, page, logs))
+    logs = search_for_cr(cr, page, logs)
 
     try:
         wait_var = True
@@ -1279,7 +1458,8 @@ def login_to_itsm(
 def iframe_message_handler(
     page: Page,
     token_for_locking: bool,
-) -> bool:
+    logs: list,
+) -> Tuple[bool, list]:
     result = token_for_locking
     try:
         page.wait_for_load_state("domcontentloaded")
@@ -1306,8 +1486,7 @@ def iframe_message_handler(
                     page_iframe.locator(
                         "//a[@class='btn btn3d PopupBtn' and normalize-space()='Ok']"
                     ).click(timeout=15000)
-                    if live_feed:
-                        live_feed.emit(red_text("Can't Lock the plan"))
+                    logs.append("Can't Lock the plan")
 
                 elif page_iframe.locator(
                     "//a[contains(@class,'PopupBtn') and normalize-space()='Ok']"
@@ -1317,7 +1496,7 @@ def iframe_message_handler(
     except TimeoutError:
         result = False
 
-    return result
+    return result, logs
 
 def handle_authenticator(
     page: Page,
@@ -1554,14 +1733,21 @@ def work_detail_table_reader(page: Page,
     page.wait_for_load_state('domcontentloaded')
     page.wait_for_load_state('load')
     
+    # print(f"\n\n{cr=}")
+    # print(f"{page.locator(
+    #     '//fieldset/div/div[@id="WIN_3_301389923"]/div[2]/div'
+    # ).is_visible() = }\n\n")
+
     if page.locator(
         '//fieldset/div/div[@id="WIN_3_301389923"]/div[2]/div'
     ).is_visible():
         table = page.locator(
             '//fieldset/div/div[@id="WIN_3_301389923"]/div[2]/div'
         ).inner_html()
+        # print(f"{table = }\n\n")
         df_list = pd.read_html(StringIO(table))
         df = df_list[0]
+        print(f"df =\n{df}\n\n")
         result = df
         # writer = pd.ExcelWriter(f"C:/Users/emaienj/Downloads/Work_Details/Work Detail Table_{cr}.xlsx", engine="openpyxl")
         # result.to_excel(writer, sheet_name="Work Detail Table")

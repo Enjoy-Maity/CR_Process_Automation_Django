@@ -39,7 +39,7 @@ def fetch_cr_wise_status(request):
         return JsonResponse({"ok": False, "message": "Invalid date format."}, status=400)
 
     result = list(
-        CRWiseStatus.objects.filter(execution_date=parsed_date).values(*settings.CR_WISE_STATUS_FIELDS)
+        CRWiseStatus.objects.filter(execution_date=parsed_date, is_active=True).values(*settings.CR_WISE_STATUS_FIELDS)
     )
     print(result)
 

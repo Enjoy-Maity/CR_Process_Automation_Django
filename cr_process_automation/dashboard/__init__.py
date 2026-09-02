@@ -15,7 +15,7 @@ default_app_config = "dashboard.DashboardConfig"
 root = rootutils.setup_root(__file__, indicator=".project-root", pythonpath=True, dotenv=True)
 
 os.environ["PROJECT_ROOT"] = str(root)
-
+os.environ["ITSM_SESSION_FILE"] = os.path.join(str(root), "dashboard", "task_modules", "dependencies", "Session_store_files", "itsm_session_file.json")
 os.environ["PLAYWRIGHT_BROWSERS_PATH"]=os.path.join(str(root), "pw-browsers")
 
 # # Adding the path for task_wise_output
@@ -31,7 +31,8 @@ os.environ["RAW_REPORT_DOWNLOAD_FOLDER"]=os.path.join(settings.HOST_DOWNLOAD_DIR
 os.environ["PLANNING_SHEET_DOWNLOAD_FOLDER"]=os.path.join(settings.HOST_DOWNLOAD_DIR, "{}", "Planning_Sheet")
 os.environ["CR_HYGIENE_CHECKS_FILE"]=os.path.join(settings.HOST_DOWNLOAD_DIR, "{}", "CR_Hygiene_Checks", "CR_Hygiene_Checks.xlsx")
 os.environ["BPMS_CR_HYGIENE_CHECKS_FILE"]=os.path.join(settings.HOST_DOWNLOAD_DIR, "{}", "BPMS_CR_Hygiene_Checks", "BPMS_CR_Hygiene_Checks.xlsx")
-os.environ["BPMS_DB"]=os.path.join(setting.HOST_DOWNLOAD_DIR, "BPMS_DB", "BPMS DATA.xlsx")
+os.environ["BPMS_DB"]=os.path.join(settings.HOST_DOWNLOAD_DIR, "BPMS_DB", "BPMS DATA.xlsx")
+os.environ["PLAN_FILES_DOWNLOAD_FOLDER"]=os.path.join(settings.HOST_DOWNLOAD_DIR, "{}", "Plan_Files_Download")
 
 os.environ["PLANNING_SHEET_WORKBOOK_NAME"]= "Standard_Planning_Sheet.xlsx"
 # Load variables from .env into the system environment
