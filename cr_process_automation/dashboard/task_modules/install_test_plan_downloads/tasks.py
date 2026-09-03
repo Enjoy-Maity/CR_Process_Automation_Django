@@ -1,9 +1,12 @@
 import os
+import shutil
 import traceback
 import pandas as pd
 import dateutil.parser as dp
 import dashboard.task_modules.dependencies.batch_methods as bm
 import dashboard.task_modules.dependencies.playwright_common_methods_ as pcm
+from pathlib import Path
+from zipfile import ZipFile, ZIP_DEFLATED
 from django.http import JsonResponse
 from django.conf import settings
 from django.core.management import call_command
@@ -46,6 +49,50 @@ def sync_replica_task():
     except Exception as e:
         # cache.set(f'replica_sync_{sync_id}_status', 'failed', None)
         raise
+
+
+def zip_maker(folder: str, logs: list, file_name: str):
+    logs.append(f"Zipping {os.path.basename(folder)}")
+
+    if os.path.exists(file_name):
+        try:
+            os.chmod(file_name, 0o777)
+            os.remove(file_name)
+        except:
+            Path(file_name).unlink(missing_ok=True)
+    try:
+        shutil.make_archive(file_name.replace('.zip', ''), 'zip', folder)
+        logs.append(f"{os.path.basename(folder)} zipped to {os.path.basename(file_name)}")
+    except:
+        exception_raised = False
+        try:
+            with ZipFile(file_name, 'w', ZIP_DEFLATED) as zipf:
+                for root, dirs, files in os.walk(folder):
+        
+                    # 1. Process and add all subfolders (including completely empty ones)
+                    for d in dirs:
+                        dir_path = os.path.join(root, d)
+                        
+                        # Create a relative path to keep the directory structure clean
+                        rel_dir_path = os.path.relpath(dir_path, start=os.path.dirname(folder))
+                        
+                        # The trailing '/' ensures the ZIP utility creates a folder entry
+                        zipf.write(dir_path, arcname=rel_dir_path + '/')
+
+                    # 2. Process and add all files within those folders
+                    for file in files:
+                        full_path = os.path.join(root, file)
+                        relative_path = os.path.relpath(full_path, start=os.path.dirname(folder))
+                        zipf.write(full_path, arcname=relative_path)
+                logs.append(f"{os.path.basename(folder)} zipped to {os.path.basename(file_name)}")
+        except:
+            exception_raised = True
+            raise
+        
+        if exception_raised:
+            logs.append(f"Failed to zip {os.path.basename(folder)} to {os.path.basename(file_name)}")
+            
+    return logs
 
 
 def page_tasks(
@@ -457,7 +504,18 @@ def run_task(
         GLOBAL_LOGS = plan_files_downloader(
             unique_crs, cr_to_circle_dict, GLOBAL_LOGS, user_email, runtime, task, timestamp_fn, date_
         )
-
+        
+        GLOBAL_LOGS = zip_maker(
+            os.path.join(
+                os.getenv("PLAN_FILES_DOWNLOAD_FOLDER").format(date_.strftime("%d-%b-%y")),
+                "Install_and_Backout_Plan_Files"
+            ), 
+            GLOBAL_LOGS,
+            str(
+                os.getenv("PLAN_FILES_ZIP_FILE")
+            ).format(date_.strftime("%d-%b-%y"), date_.strftime("%d-%B-%Y"))
+        )
+    
     except Exception as e:
         GLOBAL_LOGS.append(
             f"{traceback.format_exc()}\n{e.__class__.__name__}\n{e}"
@@ -474,6 +532,6 @@ def run_task(
             "status": "Completed",
             "message": f"{task['name']} completed successfully.",
             "download_ready": True,
-            "download_name": str(os.getenv("CR_HYGIENE_CHECKS_FILE")).format(parsed_date.strftime("%d-%b-%y")),
+            "download_name": str(os.getenv("PLAN_FILES_ZIP_FILE")).format(date_.strftime("%d-%b-%y"), date_.strftime("%d-%B-%Y")),
             "counts": {},
         }
