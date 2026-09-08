@@ -75,6 +75,12 @@ class ExcelModifier:
             self.header_row, self.header_column = self.first_row_finder_for_header()
 
     def first_row_finder_for_header(self):
+        print(f"{self.rows =}")
+        
+        if self.worksheet.calculate_dimension() == 'A1:A1' and self.worksheet['A1'].value is None:
+            print("The sheet is empty")
+            return 1,1
+
         i = 1
         j = 1
         breaker = False
@@ -146,13 +152,17 @@ class ExcelModifier:
     
     def new_column_maker(self, column_name: str, column_index: int|None = None):
         if column_index is None:
-            column_index = self.columns + 1
+            if self.worksheet.calculate_dimension() == 'A1:A1':
+                column_index = 1
+                self.columns = 1
+            else:
+                column_index = self.columns + 1
         
         # self.worksheet.insert_cols(column_index)
         if self.headers is None:
             _ = self.get_headers()
         
-        if column_name not in self.headers:
+        if (self.headers is None) or (column_name not in self.headers):
             self.worksheet.cell(row=self.header_row, column=column_index).value = column_name
             self.columns += 1
             _ = self.get_headers()
@@ -184,6 +194,12 @@ class ExcelModifier:
         for value in values.values:
             self.worksheet.append(list(value))
             self.rows += 1
+
+    @singledispatchmethod
+    def blank_column_name_delete(self, column_index: int):
+        self.worksheet.delete_cols(column_index)
+        self.columns -= 1
+        _ = self.get_headers()
     
     @singledispatchmethod
     def value_adder(self, row:int, column:int, value: AnyStr):
@@ -196,7 +212,8 @@ class ExcelModifier:
             _ = self.get_headers()
         
         # print(f"{(str(header).strip() not in self.headers) = }")
-        if str(header).strip() not in self.headers:
+        
+        if (self.headers is None) or (str(header).strip() not in self.headers):
             # print(self.headers)
             self.new_column_maker(str(header).strip())
         
@@ -215,9 +232,17 @@ class ExcelModifier:
                     self.worksheet.cell(row=row, column=self.header_column + i).value = value
                     break
                 i += 1
+        
+        for i in range(self.header_column, self.columns + 1):
+            if str(self.worksheet.cell(row=self.header_row, column=i).value).strip() in  ['None', '']:
+                self.blank_column_name_delete(i)
+            
             
     def get_headers(self):
-        self.headers = list(self.worksheet.iter_rows(
+        if self.worksheet.calculate_dimension() == 'A1:A1':
+            return None
+        else:
+            self.headers = list(self.worksheet.iter_rows(
                 min_row=self.header_row, 
                 max_row=self.header_row, 
                 min_col=self.header_column, 
@@ -358,7 +383,7 @@ class ExcelModifier:
         if not self.headers:
             self.get_headers()
         
-        if header in self.headers:
+        if (self.headers is not None) and (header in self.headers):
             i = self.header_row + 1
             while i <= self.rows:
                 all_values_in_column.append(self.worksheet.cell(i, self.column_index(header)).value)
@@ -371,7 +396,7 @@ class ExcelModifier:
         header = header.strip()
         if not self.headers:
             self.headers = self.get_headers()
-        if header in self.headers:
+        if (self.headers is not None) and (header in self.headers):
             return self.headers.index(header) + self.header_column
         return None
     

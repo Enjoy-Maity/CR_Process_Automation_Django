@@ -47,6 +47,27 @@ def cr_wise_status_modifier_update_func(
         transaction.on_commit(lambda: sync_replica_task(), using='default')
 
 
+def cr_details_update_func(
+    cr: str,
+    node_details: str,
+    impact: str,
+    test_cases: str
+):
+    with transaction.atomic(using='default'):
+        master_cr = MasterCRDatabase.objects.using('default').get(cr_no=cr, is_active=True)
+        master_cr.node_details = _make_serializable(node_details)
+        master_cr.impact = _make_serializable(impact)
+        master_cr.test_cases = _make_serializable(test_cases)
+        master_cr.save()
+
+        selected_date_table = SelectedDateTable.objects.using('default').get(cr_no=cr, is_active=True)
+        selected_date_table.node_details = _make_serializable(node_details)
+        selected_date_table.impact = _make_serializable(impact)
+        selected_date_table.test_cases = _make_serializable(test_cases)
+        selected_date_table.save()
+        transaction.on_commit(lambda: sync_replica_task(), using='default')
+
+
 def sync_replica_task():
     # self.update_state(state='RUNNING')
     # sync_id = self.request.id
@@ -284,9 +305,20 @@ def validation_summary_writer_and_planning_sheet_updater(filtered_df: pd.DataFra
         excel_modifier_obj.value_adder("Node Details", value=dictionary_for_df["Node Details"][-1], row=row)
         excel_modifier_obj.value_adder("Impact", value=dictionary_for_df["Impact"][-1], row=row)
         excel_modifier_obj.value_adder("Test Cases", value=dictionary_for_df["Test Plan Notes"][-1], row=row)
+        thread = Thread(target=cr_details_update_func, args=(
+            cr, 
+            dictionary_for_df["Node Details"][-1],
+            dictionary_for_df["Impact"][-1],
+            dictionary_for_df["Test Plan Notes"][-1],
+            )
+        )
+        thread.start()
+        thread.join()
 
         # updating the CR wise data
-        cr_wise_status_modifier_update_func(cr, "Success")
+        neo_thread = Thread(target=cr_wise_status_modifier_update_func, args=(cr, "Success"))
+        neo_thread.start()
+        neo_thread.join()
         i += 1
         
     df = pd.DataFrame(dictionary_for_df)
@@ -879,7 +911,7 @@ def run_task(
 
     filtered_df, crs_with_problem, GLOBAL_LOGS = file_reader_and_checker(selected_data_df, runtime, GLOBAL_LOGS, parsed_date)
 
-    print(f"{filtered_df = }")
+    # print(f"{filtered_df = }")
     
 
     if len(crs_with_problem) > 0:

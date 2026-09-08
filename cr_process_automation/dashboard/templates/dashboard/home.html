@@ -65,7 +65,7 @@
                     </td>
                     <td>
                         <div class="download-area">
-                            {% if task.id != 5 and task.id != 7 %}
+                            {% if task.id == 1 or task.id == 2  or task.id == 3 or task.id == 4 or task.id == 5 or task.id == 6 or task.id == 7 %}
                                 {% if task.status == 'Completed' and task.download_ready %}
                                     <a href="{% url 'download_task_output' task.id %}" class="action-btn download-btn compact-btn js-download-link auto-ready" data-task-id="{{ task.id }}">Download</a>
                                 {% else %}

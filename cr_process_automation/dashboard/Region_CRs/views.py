@@ -117,6 +117,47 @@ CR_HISTORY_EXPORT_FIELDS = [
     "parent_reference_id",
 ]
 
+CR_HISTORY_EXPORT_FIELDS_VIEW = [
+    "ms_project",
+    "execution_date",
+    "maintenance_window",
+    "cr_no",
+    "priority",
+    "risk",
+    "region",
+    "circle",
+    "activity_description",
+    "node_details",
+    "node_count",
+    "bpms_cr_yes_no",
+    "planning_status",
+    "activity_executor",
+    "auditor_name",
+    "activity_status",
+    "reason_for_rollback_cancel",
+    "technical_validator",
+    "service_affecting",
+    "impact",
+    "test_cases",
+    "kpi_name",
+    "kpi_spoc_night",
+    "kpi_spoc_morning",
+    "inter_domain_activity",
+    "inter_domain_kpi_required",
+    "inter_domain_measuring_kpis",
+    "activity_type",
+    "vendor",
+    "protocol",
+    "execution_type",
+    "cli_availability",
+    "team",
+    "scheduled_start_date",
+    "scheduled_end_date",
+    "niam_ticket_required",
+    "niam_node_type",
+    "additional_info",
+]
+
 ALLOWED_REGION_CR_EDIT_ROLES = {"Admin", "Validator", "Night-SPOC"}
 
 
@@ -415,7 +456,7 @@ def fetch_cr_history(request):
     if err:
         return JsonResponse({"ok": False, "message": err}, status=400)
 
-    rows = list(qs.values(*CR_HISTORY_EXPORT_FIELDS))
+    rows = list(qs.values(*CR_HISTORY_EXPORT_FIELDS_VIEW))
 
     for row in rows:
         if row.get("execution_date"):

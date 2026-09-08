@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import pandas as pd
 from io import StringIO
@@ -115,6 +116,14 @@ def get_browser() -> str:
     return os.path.join(str(os.environ["PROJECT_ROOT"]) , str(os.getenv("BROWSER_PATH")))
 
 def get_itsm_session_file_path() -> str:
+    os.makedirs(
+        os.path.dirname(
+            os.path.join(
+                str(os.environ["PROJECT_ROOT"]), str(os.getenv("ITSM_SESSION_FILE"))
+                )
+            ),  exist_ok=True
+        )
+    
     return os.path.join(str(os.environ["PROJECT_ROOT"]) , str(os.getenv("ITSM_SESSION_FILE")))
 
 
@@ -123,12 +132,12 @@ def call_with_modal_ack(func, *args, max_retries=3, **kwargs):
     Calls a function that may trigger a popup iframe.
     Detects popup, mutates args, retries, and returns updated args.
     """
-    print("inside call_with_modal_ack\n")
+    # print("inside call_with_modal_ack\n")
     try:
         sig = inspect.signature(func)
-        print(f"{sig =}\n\n")
+        # print(f"{sig =}\n\n")
         bound = sig.bind(*args, **kwargs)
-        print(f"{bound =}\n\n")
+        # print(f"{bound =}\n\n")
         bound.apply_defaults()
     except TypeError as e:
         print(f"BINDING FAILED: {e}")
@@ -137,13 +146,13 @@ def call_with_modal_ack(func, *args, max_retries=3, **kwargs):
         print(f"CALLING FAILED: {e}")
         raise
     else:
-        print(f"{bound.arguments=}\n")
+        # print(f"{bound.arguments=}\n")
         earlier_value_of_token_for_locking = bound.arguments["token_for_locking"]
         availability_list = updated_token = updated_logs = None
         for attempt in range(1, max_retries + 1):
             result = func(*bound.args, **bound.kwargs)
             availability_list, updated_token, updated_logs = result
-            print(f"{result=}\n")
+            # print(f"{result=}\n")
 
             # allow iframe watcher to act
             # page.wait_for_timeout(300)
@@ -170,6 +179,202 @@ def call_with_modal_ack(func, *args, max_retries=3, **kwargs):
                 continue
                 
         return availability_list, updated_token, updated_logs
+
+
+def cr_approval_func(
+    cr: str,
+    page: Page,
+    username: str
+) -> Literal["Approved", "Not Approved"]:
+    result = "Not Approved"
+    
+    _ = search_for_cr(page, cr, [])
+
+    try:
+        wait_var = True
+        # username = str(os.getlogin()).strip()
+
+        # Waiting for the table to load
+        while wait_var:
+            if (
+                page.locator(
+                    "//div[@class='PageBody pbChrome']/div[@id='WIN_3_301389923']/div[@class='TableHdr']/table[@class='TableHdr']/tbody/tr/td[@class='TableHdrL']"
+                ).text_content()
+                == "Table has Not been Loaded"
+            ):
+                page.wait_for_timeout(1000)
+            else:
+                wait_var = False
+
+        list_of_locators = page.locator(
+            f"//div/fieldset[@class='PageBodyVertical']/div[@class='PageBody pbChrome']/div[@arid='301320700']/div[@class='TableInner']/div[@class='BaseTableOuter']/div/table/tbody/tr/td/nobr/span[text()='{str(username).lower()}']"
+        ).all()
+        # list_of_locators = page.locator(f"//div/fieldset[@class='PageBodyVertical']/div[@class='PageBody pbChrome']/div[@arid='301320700']/div[@class='TableInner']/div[@class='BaseTableOuter']/div/table/tbody/tr/td/nobr/span[text()='emudrup']").all()
+
+        if len(list_of_locators) > 0:
+            i = 0
+            while i < len(list_of_locators):
+                # print(i)
+                if (
+                    page.locator(
+                        f"//div/fieldset[@class='PageBodyVertical']/div[@class='PageBody pbChrome']/div[@arid='301320700']/div[@class='TableInner']/div[@class='BaseTableOuter']/div/table/tbody/tr/td/nobr/span[text()='{str(username).lower()}']"
+                    )
+                    .nth(i)
+                    .is_visible()
+                ):
+                    page.locator(
+                        f"//div/fieldset[@class='PageBodyVertical']/div[@class='PageBody pbChrome']/div[@arid='301320700']/div[@class='TableInner']/div[@class='BaseTableOuter']/div/table/tbody/tr/td/nobr/span[text()='{str(username).lower()}']"
+                    ).nth(i).click()
+
+                    if (
+                        page.locator(
+                            "//div/fieldset[@class='PageBodyVertical']/div[@class='PageBody pbChrome']/div[@arid='304198500']/fieldset[@class=' pnl ']/a[@title='Approve']"
+                        )
+                        .nth(i)
+                        .is_visible()
+                    ):
+                        # print("Approve button found")
+                        page.locator(
+                            "//div/fieldset[@class='PageBodyVertical']/div[@class='PageBody pbChrome']/div[@arid='304198500']/fieldset[@class=' pnl ']/a[@title='Approve']"
+                        ).nth(i).dblclick()
+                        result = "Approved"
+                i += 1
+
+    except Exception as e:
+        # print(f"Error occurred while filling MOP attachment for CR {cr}: {e}")
+        raise e
+
+    return result
+
+
+def mop_attachment_func(
+    cr: str,
+    mop_attachment_string_for_notes: str,
+    page: Page,
+    token_for_locking: bool = True,
+) -> Literal["Success", "Failure"]:
+    result = "Failure"
+    
+    _ = search_for_cr(page, cr, [])
+
+    try:
+        wait_var = True
+
+        # Waiting for the table to load
+        while wait_var:
+            if (
+                page.locator(
+                    "//div[@class='PageBody pbChrome']/div[@id='WIN_3_301389923']/div[@class='TableHdr']/table[@class='TableHdr']/tbody/tr/td[@class='TableHdrL']"
+                ).text_content()
+                == "Table has Not been Loaded"
+            ):
+                page.wait_for_timeout(1000)
+            else:
+                wait_var = False
+
+        # Clicking on More Info
+        page.locator(
+            "//div/fieldset[@class='PageBodyHorizontal']/div[@class='PageBody pbChrome']/div/fieldset/div[@arid='304196500']/div/div/div/div/a[@class='pagebtn ']/span[@class='Twisty Tsize']"
+        ).click()
+
+        # Selecting Info
+        page.locator(
+            "//div/fieldset/div[@class='PageBody pbChrome']/div[@arid='304247210']/div[@class='selection']/a[@class='btn btn3d selectionbtn']"
+        ).click()
+        page.locator(
+            "//div[@class='MenuOuter']/div[@class='MenuTableContainer']/table[@class='MenuTable']/tbody/tr/td",
+            has_text="MOP",
+        ).click()
+
+        if (
+            re.fullmatch(
+                pattern="MOP Links:\n",
+                string=mop_attachment_string_for_notes,
+            )
+            is None
+        ):
+            # Filling the Mop link attachments
+            page.locator(
+                "//div/fieldset[@class='PageBodyVertical']/div[@class='PageBody pbChrome']/div[@arwindowid='3' and @arid='304247080']/textarea[@class='text ']"
+            ).fill(mop_attachment_string_for_notes)
+            
+            # Clicking on 'Add' button
+            page.locator(
+                "//div/fieldset[@class='PageBodyVertical']/div[@class='PageBody pbChrome']/a[@arid='304247110']/div[@class='btntextdiv']"
+            ).click()
+            
+            # Clicking on the MOP links to lock them
+            page.locator(
+               "//div[@id='WIN_3_301389923' and @arid='301389923']/div[@class='TableInner']/div[@class='BaseTableOuter']/div[@class='BaseTableInner']/table[@id='T301389923']/tbody/tr/td/nobr/span[text() = 'MOP']" 
+            ).first.dblclick()
+            
+            if token_for_locking:
+                mop_to_be_locked = False
+                mop_lock_button = page.locator(
+                    "//div[@arid='304247260']/fieldset[@class='fieldSetRadio']/div/span/input[@value='0']"
+                ).all()
+                i = 0
+                while i < len(mop_lock_button):
+                    if (
+                        page.locator(
+                            "//div[@arid='304247260']/fieldset[@class='fieldSetRadio']/div/span/input[@value='0']"
+                        )
+                        .nth(i)
+                        .is_visible()
+                    ):
+                        # CRQ000004668101
+                        # print(
+                        #     "{} page.locator(\"//div[@arid='304247260']/fieldset[@class='fieldSetRadio']/div/span/input[@value='0']\").is_disabled(){}".format(cr, page.locator("//div[@arid='304247260']/fieldset[@class='fieldSetRadio']/div/span/input[@value='0']").is_disabled())
+                        # )
+                        if (
+                            not page.locator(
+                                "//div[@arid='304247260']/fieldset[@class='fieldSetRadio']/div/span/input[@value='0']"
+                            )
+                            .nth(i)
+                            .is_disabled()
+                        ):
+                            mop_to_be_locked = True
+                            page.locator(
+                                "//div[@arid='304247260']/fieldset[@class='fieldSetRadio']/div/span/input[@value='0']"
+                            ).nth(i).click(timeout=60000)
+                            break
+                    i += 1
+            
+                if (
+                    mop_to_be_locked
+                    and page.locator(
+                        "//div[@arid='301389923']/div[@class='TableInner']/div[@class='BaseTableOuter']/div[@class='BaseTableInner']/table[@id='T301389923']/tbody/tr/td/nobr/span[text() = 'MOP']"
+                    ).first.is_visible()
+                ):
+                    # print(f"cr test_plan_to_be_locked : {cr}")
+                    save_button_locators_for_mop = page.locator(
+                        "//div/fieldset/div[@class='PageBody pbChrome']/a[@arid='301402700']/div[@class='btntextdiv']/div[@class='f1' and text()='Save']"
+                    ).all()
+                    i = 0
+                    while i < len(save_button_locators_for_mop):
+                        if (
+                            page.locator(
+                                "//div/fieldset/div[@class='PageBody pbChrome']/a[@arid='301402700']/div[@class='btntextdiv']/div[@class='f1' and text()='Save']"
+                            )
+                            .nth(i)
+                            .is_visible()
+                        ):
+                            page.locator(
+                                "//div/fieldset/div[@class='PageBody pbChrome']/a[@arid='301402700']/div[@class='btntextdiv']/div[@class='f1' and text()='Save']"
+                            ).nth(i).click(timeout=60000)
+                            token_for_locking = iframe_message_handler(
+                                page, token_for_locking,[]
+                            )
+                            break
+                        i += 1 
+        
+            result = "Success"
+
+    except Exception as e:
+        # print(f"Error occurred while filling MOP attachment for CR {cr}: {e}")
+        raise e
+    
+    return result
 
 
 
@@ -2026,6 +2231,7 @@ def itsm_logger(
         navigate_to_change_management(page)
 
         logs.append(f"{task_name}: logged in successfully ---- {timestamp_fn()}")
+        context.storage_state(path=get_itsm_session_file_path())
         logs.append("✓ All steps completed successfully")
 
     except Exception as e:

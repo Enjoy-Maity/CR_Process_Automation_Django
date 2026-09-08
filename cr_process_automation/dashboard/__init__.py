@@ -34,8 +34,8 @@ os.environ["BPMS_CR_HYGIENE_CHECKS_FILE"]=os.path.join(settings.HOST_DOWNLOAD_DI
 os.environ["BPMS_DB"]=os.path.join(settings.HOST_DOWNLOAD_DIR, "BPMS_DB", "BPMS DATA.xlsx")
 os.environ["PLAN_FILES_DOWNLOAD_FOLDER"]=os.path.join(settings.HOST_DOWNLOAD_DIR, "{}", "Plan_Files_Download")
 os.environ["PLAN_FILES_ZIP_FILE"]=os.path.join(settings.HOST_DOWNLOAD_DIR, os.environ["PLAN_FILES_DOWNLOAD_FOLDER"], "Plan_Files_Download_{}.zip")
-
+os.environ["MOP_ATTACHMENT_INVENTORY_SHEET"]=os.path.join(settings.HOST_DOWNLOAD_DIR, "MOP_ATTACHMENT_INVENTORY", "PS_Core_MOP link with Protocol.xlsx")
+os.environ["MOP_ATTACHMENT_CR_APPROVAL_VALIDATION_FILE"]=os.path.join(settings.HOST_DOWNLOAD_DIR, "{}", "Mop_Attachment_Approval", "MOP_Attachment_Approval_status.xlsx")
 os.environ["PLANNING_SHEET_WORKBOOK_NAME"]= "Standard_Planning_Sheet.xlsx"
 # Load variables from .env into the system environment
 load_dotenv()
-

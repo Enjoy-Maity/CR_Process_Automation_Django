@@ -6,6 +6,7 @@ from rest_framework.exceptions import APIException
 from rest_framework import status
 from django_pandas.io import read_frame
 from django.utils import timezone
+from django.core.management import call_command
 from datetime import timedelta
 from openpyxl import load_workbook
 from openpyxl.styles import (
@@ -209,5 +210,38 @@ def workbook_styling(workbook: str):
     wb.close()
 
 
+def sync_replica_task():
+    # self.update_state(state='RUNNING')
+    # sync_id = self.request.id
+    try:
+        call_command('sync_replica')
+        # cache.set(f'replica_sync_{sync_id}_status', 'complete', None)
+    except Exception as e:
+        # cache.set(f'replica_sync_{sync_id}_status', 'failed', None)
+        raise
 
+
+def selected_date_df_maker(selected_date_data: QuerySet) -> pd.DataFrame:
+    """
+    This function creates a pandas DataFrame from the selected_date_data.
+   
+    Parameters:
+        selected_date_data (QuerySet): A queryset of objects, object representing a row of data.    
+        The keys of the queryset should match the field names in the settings file.
+    Returns:
+        pd.DataFrame: A pandas DataFrame with the selected_date_data.
+    """
+    # selected_date_data = pd.DataFrame(selected_date_data)
+    # print(selected_date_data.columns)
+    df = read_frame(selected_date_data).rename(columns=settings.DB_TO_PL_COLUMNS_MAPPING)
+
+    # Normalize datetime columns to naive IST wall-clock for consistent comparisons
+    for col in ["Scheduled Start Date+", "Scheduled End Date+"]:
+        if col in df.columns:
+            s = pd.to_datetime(df[col], errors="coerce")
+            if getattr(s.dt, "tz", None) is not None:
+                s = s.dt.tz_convert("Asia/Kolkata").dt.tz_localize(None)
+            df[col] = s
+
+    return df
 

@@ -757,9 +757,9 @@ TASKS = [
     {"id": 2, "sequence_no": 2, "name": "CR Hygiene Checks", "download_required": True},
     {"id": 3, "sequence_no": 3, "name": "Install/Test Plan Downloads", "download_required": True},
     {"id": 4, "sequence_no": 4, "name": "BPMS CR Hygiene Checks", "download_required": True},
-    {"id": 5, "sequence_no": 5, "name": "MOP Attachment & Approvals", "download_required": False},
+    {"id": 5, "sequence_no": 5, "name": "MOP Attachment & Approvals", "download_required": True},
     {"id": 6, "sequence_no": 6, "name": "Final Email Package", "download_required": True},
-    {"id": 7, "sequence_no": 7, "name": "NIAM Ticket Generation", "download_required": False},
+    {"id": 7, "sequence_no": 7, "name": "NIAM Ticket Generation", "download_required": True},
 ]
 
 TASKS_REQUIRING_AUTH = {1, 2, 3, 4, 5, 7}

@@ -24,12 +24,13 @@ from dashboard.views import _make_serializable
 from dashboard.models import MasterCRDatabase, SelectedDateTable, CRWiseStatus
 from django.http import JsonResponse
 from django.conf import settings
-from django.core.management import call_command
 from django.db import transaction
 from dashboard.task_modules.cr_hygiene_checks.tasks import (
     validation_file_colorizer,
     file_reader_and_checker,
-    selected_date_df_maker
+    selected_date_df_maker,
+    cr_details_update_func,
+    cr_wise_status_modifier_update_func,
 )
 
 
@@ -54,28 +55,6 @@ relationship_nodes_queue = Queue()
 tasks_queue = Queue()
 queue_ = Queue()
 cr_to_circle_dict = {}
-
-
-def cr_wise_status_modifier_update_func(
-    cr: str,
-    status: str = "Success"
-):
-    with transaction.atomic(using='default'):
-        cr_wise_status = CRWiseStatus.objects.using('default').get(cr_no=cr, is_active=True)
-        cr_wise_status.CR_Hygiene_Checks = status
-        cr_wise_status.save()
-        transaction.on_commit(lambda: sync_replica_task(), using='default')
-
-
-def sync_replica_task():
-    # self.update_state(state='RUNNING')
-    # sync_id = self.request.id
-    try:
-        call_command('sync_replica')
-        # cache.set(f'replica_sync_{sync_id}_status', 'complete', None)
-    except Exception as e:
-        # cache.set(f'replica_sync_{sync_id}_status', 'failed', None)
-        raise
 
 
 def bpms_manual_cr_design_handler(cr: str, page: Page, date_: datetime, logs: list):
@@ -512,12 +491,12 @@ def cr_pre_hygiene_dictionary_maker():
     while not tasks_queue.empty():
         tasks_details_list.append(tasks_queue.get())
 
-    print(f"{relationship_nodes_list=}\n")
-    print(f"{len(relationship_nodes_list)=}\n")
-    print(f"{work_detail_list=}\n")
-    print(f"{len(work_detail_list)=}\n")
-    print(f"{tasks_details_list=}\n")
-    print(f"{len(tasks_details_list)=}\n\n")
+    # print(f"{relationship_nodes_list=}\n")
+    # print(f"{len(relationship_nodes_list)=}\n")
+    # print(f"{work_detail_list=}\n")
+    # print(f"{len(work_detail_list)=}\n")
+    # print(f"{tasks_details_list=}\n")
+    # print(f"{len(tasks_details_list)=}\n\n")
     
     if len(relationship_nodes_list) == len(work_detail_list) == len(tasks_details_list) == len(items):
         i = 0
@@ -1140,9 +1119,21 @@ def validation_summary_writer_and_planning_sheet_updater(filtered_df: pd.DataFra
         
         row, _ =excel_modifier_obj.get_cell_based_on_value("CR No", cr)
         excel_modifier_obj.value_adder("Node Details", value=dictionary_for_df["Node Details"][-1], row=row)
+        
         excel_modifier_obj.value_adder("Impact", value=dictionary_for_df["Impact"][-1], row=row)
         excel_modifier_obj.value_adder("Test Cases", value=dictionary_for_df["Test Plan Notes"][-1], row=row)
-        
+        thread = Thread(target=cr_details_update_func, args=(
+            cr, 
+            dictionary_for_df["Node Details"][-1],
+            dictionary_for_df["Impact"][-1],
+            dictionary_for_df["Test Plan Notes"][-1],
+            )
+        )
+        thread.start()
+        thread.join()
+        neo_thread = Thread(target=cr_wise_status_modifier_update_func, args=(cr, "Success"))
+        neo_thread.start()
+        neo_thread.join()
         i += 1
     
     df = pd.DataFrame(dictionary_for_df)
