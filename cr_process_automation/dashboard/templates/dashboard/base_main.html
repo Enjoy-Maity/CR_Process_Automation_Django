@@ -16,7 +16,8 @@
         <header class="top-header">
             <div class="header-left">
                 <nav class="top-nav" aria-label="Primary">
-                    <a href="{% url 'cr_planning' %}">Home</a>
+                     <a href="{% url 'cr_planning' %}" class="{% if selected_option == 'cr_planning' %}active{% endif %}">Home</a>
+                    <a href="{% url 'dashboard' %}" class="{% if selected_option == 'dashboard' %}active{% endif %}">Dashboard</a>
                     <a href="#">Contact us</a>
                 </nav>
             </div>

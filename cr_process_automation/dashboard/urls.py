@@ -9,6 +9,7 @@ urlpatterns = [
     path("logout/", views.logout_view, name="logout"),
     # path("*logout/", views.logout_view, name="logout"),
     path("home/", views.cr_planning_view, name="cr_planning"),
+    path("dashboard/", views.dashboard_view, name="dashboard"),
     path('night-execution/', views.night_execution_view, name='night_execution'),
     path('night-spoc/', views.night_spoc_view, name='night_spoc'),
     path('region-crs/', Region_views.region_crs_view, name='region_crs'),

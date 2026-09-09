@@ -828,8 +828,9 @@ def run_task(
             )
         ]
 
+        to_be_filter_crs = list(cr_wise_status_df["cr_no"].astype(str).str.strip())
         selected_data_df = selected_data_df.loc[
-            selected_data_df["CR No"].astype(str).str.strip().isin(cr_wise_status_df["cr_no"].astype(str).str.strip().tolist())
+            selected_data_df["CR No"].astype(str).str.strip().isin(to_be_filter_crs)
         ]
 
         planning_sheet_df = selected_data_df

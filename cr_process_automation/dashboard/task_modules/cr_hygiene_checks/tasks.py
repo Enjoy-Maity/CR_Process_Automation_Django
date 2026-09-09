@@ -683,31 +683,6 @@ def node_counts_remarks_maker(cr: str):
         return "Cannot Determine"
 
 
-def selected_date_df_maker(selected_date_data: QuerySet) -> pd.DataFrame:
-    """
-    This function creates a pandas DataFrame from the selected_date_data.
-   
-    Parameters:
-        selected_date_data (QuerySet): A queryset of objects, object representing a row of data.    
-        The keys of the queryset should match the field names in the settings file.
-    Returns:
-        pd.DataFrame: A pandas DataFrame with the selected_date_data.
-    """
-    # selected_date_data = pd.DataFrame(selected_date_data)
-    # print(selected_date_data.columns)
-    df = read_frame(selected_date_data).rename(columns=settings.DB_TO_PL_COLUMNS_MAPPING)
-
-    # Normalize datetime columns to naive IST wall-clock for consistent comparisons
-    for col in ["Scheduled Start Date+", "Scheduled End Date+"]:
-        if col in df.columns:
-            s = pd.to_datetime(df[col], errors="coerce")
-            if getattr(s.dt, "tz", None) is not None:
-                s = s.dt.tz_convert("Asia/Kolkata").dt.tz_localize(None)
-            df[col] = s
-
-    return df
-
-
 def datetime_check(row: pd.Series, start_datetime: pd.Timestamp, end_datetime: pd.Timestamp):
     """
     This function checks the given row of a dataframe for validity of a date-time value.
@@ -725,6 +700,7 @@ def datetime_check(row: pd.Series, start_datetime: pd.Timestamp, end_datetime: p
     if pd.isna(ts):
         return False
     ts = pd.Timestamp(ts)
+    print(f"{ts = }")
     return start_datetime < ts < end_datetime
 
 
@@ -744,13 +720,13 @@ def file_reader_and_checker(
 
         start_datetime = pd.Timestamp(selected_date.replace(hour=21, minute=0, second=0, microsecond=0))
         end_datetime = pd.Timestamp((selected_date + timedelta(days=1)).replace(hour=6, minute=0, second=0, microsecond=0))
-        print(f"{start_datetime = }")
-        print(f"{end_datetime = }")
+        # print(f"{start_datetime = }")
+        # print(f"{end_datetime = }")
         df_with_datatime_problem = raw_planning_sheet_df.loc[
             ~raw_planning_sheet_df.apply(lambda row: datetime_check(row, start_datetime, end_datetime), axis=1)
         ]
 
-        # print(f"{df_with_datatime_problem =}")
+        print(f"{df_with_datatime_problem =}")
         
         cr_array_with_problem = np.array([], dtype=str)
         
@@ -774,7 +750,7 @@ def file_reader_and_checker(
         raise 
     
     runtime["status"] = "Pre-checks completed"
-    
+    print(f"\nraw_planning_sheet_df = \n{raw_planning_sheet_df}")
     return raw_planning_sheet_df, cr_array_with_problem, logs
 
 
@@ -848,7 +824,7 @@ def run_task(
     # print(selected_date_data)
     
     if selected_date_data:
-        selected_data_df = selected_date_df_maker(selected_date_data)
+        selected_data_df = ed.selected_date_df_maker(selected_date_data)
     
     else:
         # print("Line No. 793")
@@ -866,7 +842,7 @@ def run_task(
                 for data in objects
             ]
 
-            print(f"{model_instances = }")
+            # print(f"{model_instances = }")
 
             with transaction.atomic(using='default'):
                 SelectedDateTable.objects.using('default').bulk_create(model_instances)
@@ -874,9 +850,11 @@ def run_task(
 
             selected_date_data = SelectedDateTable.objects.filter(execution_date=parsed_date + timedelta(days=1), is_active=True).values(*settings.SELECTED_DATE_TABLE_FIELDS)
             # print(f"{selected_date_data = }")
-        selected_data_df = selected_date_df_maker(selected_date_data)
+        selected_data_df = ed.selected_date_df_maker(selected_date_data)
     
     # print(selected_data_df.columns)
+    print(f"{'CRQ000005570931' in list(selected_data_df['CR No'].astype(str).str.strip()) = }")
+
     
     cr_wise_status_df = ed.cr_wise_status_df_maker(parsed_date)
     # cr_wise_status_df = cr_wise_status_df.where(~pd.notna(cr_wise_status_df["CR_Hygiene_Checks"]), "")
@@ -884,13 +862,33 @@ def run_task(
     cr_wise_status_df = cr_wise_status_df.loc[
         cr_wise_status_df["CR_Hygiene_Checks"].astype(str).str.lower().str.strip() != 'success'
     ]
-    # print(f"\n\n{cr_wise_status_df = }\n")
+    # print(f"\n\ncr_wise_status_df = \n{cr_wise_status_df[['cr_no', 'CR_Hygiene_Checks']]}\n")
     # print(f"{selected_data_df.columns = }\n\n")
     # print(f"{selected_data_df['Planning Status'].unique()}")
     # print(f"{cr_wise_status_df["cr_no"].astype(str).str.strip().tolist() = }")
     # print(f"{selected_data_df.loc[selected_data_df['Planning Status'].astype(str).str.strip().astype(str).str.lower() == 'planned']["CR No"].tolist() = }\n")
     # print(f"{selected_data_df.loc[selected_data_df['Planning Status'].astype(str).str.strip().astype(str).str.lower() == 'planned']["BPMS CR (Yes/No)"].tolist() = }\n")
     # print(f"{selected_data_df.loc[selected_data_df['CR No'].astype(str).str.strip().isin(cr_wise_status_df['cr_no'].astype(str).str.strip().tolist())]["CR No"].tolist() =  }\n\n")
+
+    # print(f"\n\nselected_data_df[['CR No', 'Planning Status', 'BPMS CR (Yes/No)']]=\n{(selected_data_df.loc[selected_data_df['is_active'].astype(str).str.strip().str.lower() == 'true'])[['CR No', 'Planning Status', 'BPMS CR (Yes/No)']]}\n")
+    # print(f"\n\nselected_data_df['Planning Status'].unique()\n {selected_data_df['Planning Status'].unique()}")
+    # print(f"\n\nselected_data_df['CR No'].unique()\n {selected_data_df['CR No'].unique()}\n")
+    # print(f"\n\ncr_wise_status_df['cr_no'].unique()\n {cr_wise_status_df['cr_no'].unique()}\n")
+    print(f"\n\nselected_data_df.loc[selected_data_df['CR No'] == 'CRQ000005570931'][['CR No', 'Planning Status']] = {selected_data_df.loc[selected_data_df['CR No'] == 'CRQ000005570931'][['CR No', 'Planning Status']]}\n")
+    import numpy as np
+    # print(f"np.setdiff1d(selected_data_df['CR No'].unique(), cr_wise_status_df['cr_no'].unique()) = \n{np.intersect1d(np.array(selected_data_df['CR No'].unique()), np.array(cr_wise_status_df['cr_no'].unique()))}\n\n")
+    print(f"\nselected_data_df['Planning Status'].astype(str).str.strip().astype(str).str.lower() == 'planned']=\n\n{list(selected_data_df.loc[selected_data_df['Planning Status'].astype(str).str.strip().astype(str).str.lower() == 'planned']['CR No'])}")
+    print(f"\nselected_data_df['BPMS CR (Yes/No)'].astype(str).str.strip().astype(str).str.lower() == 'no']=\n\n{list(selected_data_df.loc[selected_data_df['BPMS CR (Yes/No)'].astype(str).str.strip().astype(str).str.lower() == 'no']['CR No'])}")
+    print(
+        f"np.intersect1d(\
+        np.array(selected_data_df.loc[selected_data_df['Planning Status'].astype(str).str.strip().astype(str).str.lower() == 'planned']['CR No']),\
+        np.array(selected_data_df.loc[selected_data_df['BPMS CR (Yes/No)'].astype(str).str.strip().astype(str).str.lower() == 'no']['CR No']))=\n\
+        {
+            np.intersect1d(
+        np.array(selected_data_df.loc[selected_data_df['Planning Status'].astype(str).str.strip().astype(str).str.lower() == 'planned']['CR No']),
+        np.array(selected_data_df.loc[selected_data_df['BPMS CR (Yes/No)'].astype(str).str.strip().astype(str).str.lower() == 'no']['CR No']))
+        }"
+    )
     selected_data_df = selected_data_df.loc[
         (
             (
@@ -903,15 +901,19 @@ def run_task(
         )
     ]
 
+    to_be_filter_crs = list(cr_wise_status_df["cr_no"].astype(str).str.strip().unique())
+    # print(f"\n\nto_be_filter_crs = \n{to_be_filter_crs}\n")
+    print(f"selected_data_df_crs=\n{selected_data_df['CR No'].tolist()}\n")
+
     selected_data_df = selected_data_df.loc[
-        selected_data_df["CR No"].astype(str).str.strip().isin(cr_wise_status_df["cr_no"].astype(str).str.strip().tolist())
+        selected_data_df["CR No"].astype(str).str.strip().isin(to_be_filter_crs)
     ]
 
-    # print(f"{selected_data_df = }\n\n")
+    print(f"{selected_data_df = }\n\n")
 
     filtered_df, crs_with_problem, GLOBAL_LOGS = file_reader_and_checker(selected_data_df, runtime, GLOBAL_LOGS, parsed_date)
 
-    # print(f"{filtered_df = }")
+    # print(f"\nfiltered_df = \n{filtered_df}")
     
 
     if len(crs_with_problem) > 0:

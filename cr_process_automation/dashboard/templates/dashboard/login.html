@@ -1,43 +1,415 @@
-
 {% load static %}
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Login</title>
-    <link rel="stylesheet" href="{% static 'dashboard/css/style.css' %}">
+
+    <title>Login | Automation Tool</title>
+
+    <link
+        rel="preconnect"
+        href="https://fonts.googleapis.com"
+    >
+    <link
+        rel="preconnect"
+        href="https://fonts.gstatic.com"
+        crossorigin
+    >
+    <link
+        href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap"
+        rel="stylesheet"
+    >
+
     <style>
-        .login-page{min-height:100vh;display:flex;align-items:center;justify-content:center;background:#edf3fa}
-        .login-card{width:100%;max-width:420px;background:#fff;border:1px solid #d5dde8;border-radius:12px;box-shadow:0 8px 24px rgba(10,35,66,.08);padding:28px}
-        .login-card h1{margin:0 0 18px;color:#0a5ea8;text-align:center;font-size:26px}
-        .login-form-row{margin-bottom:16px}
-        .login-form-row label{display:block;margin-bottom:6px;font-weight:700;color:#1f2937}
-        .login-form-row input{width:100%;padding:10px 12px;border:1px solid #cbd5e1;border-radius:8px}
-        .login-btn{width:100%;border:none;background:#0a5ea8;color:#fff;padding:11px 14px;border-radius:8px;font-weight:700;cursor:pointer}
-        .login-error{margin-bottom:14px;background:#fee2e2;color:#b91c1c;border:1px solid #fecaca;padding:10px 12px;border-radius:8px;text-align:center}
+        :root {
+            --login-ink: #16385c;
+            --login-muted: #64748b;
+            --login-blue: #0a6fb5;
+            --login-blue-dark: #07558e;
+            --login-panel: #eaf5fc;
+            --login-border: #d8e4ed;
+            --login-white: #ffffff;
+            --login-error-bg: #fff1f2;
+            --login-error-border: #fecdd3;
+            --login-error-text: #b42318;
+            --login-shadow: 0 20px 60px rgba(12, 64, 104, 0.12);
+        }
+
+        *,
+        *::before,
+        *::after {
+            box-sizing: border-box;
+        }
+
+        html,
+        body {
+            min-height: 100%;
+            margin: 0;
+        }
+
+        body {
+            min-height: 100vh;
+            display: grid;
+            place-items: center;
+            padding: 24px;
+            color: var(--login-ink);
+            background: #f2f7fb;
+            font-family: "Manrope", Arial, sans-serif;
+        }
+
+        .login-shell {
+            width: min(1120px, 100%);
+            min-height: min(700px, calc(100vh - 48px));
+            display: grid;
+            grid-template-columns: minmax(0, 1.08fr) minmax(380px, 0.92fr);
+            overflow: hidden;
+            background: var(--login-white);
+            border: 1px solid var(--login-border);
+            border-radius: 20px;
+            box-shadow: var(--login-shadow);
+        }
+
+        .login-visual-panel {
+            position: relative;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            min-height: 620px;
+            padding: 48px;
+            overflow: hidden;
+            background:
+                radial-gradient(circle at 18% 10%, rgba(255, 255, 255, 0.75), transparent 30%),
+                linear-gradient(145deg, #d7effb 0%, #eaf6fc 52%, #cfeaf7 100%);
+        }
+
+        .login-visual-panel::after {
+            position: absolute;
+            right: -95px;
+            bottom: -110px;
+            width: 300px;
+            height: 300px;
+            border: 42px solid rgba(10, 111, 181, 0.08);
+            border-radius: 50%;
+            content: "";
+        }
+
+        .login-brand {
+            position: relative;
+            z-index: 1;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .login-brand-mark {
+            width: 36px;
+            height: 36px;
+            display: grid;
+            place-items: center;
+            background: transparent;
+            border-radius: 10px;
+            overflow: visible;
+        }
+
+        .login-brand-mark img {
+            width: 100%;
+            height: 100%;
+            display: block;
+            object-fit: contain;
+        }
+
+        .login-brand-name {
+            margin: 0;
+            font-size: 18px;
+            font-weight: 900;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+        }
+
+        .login-visual-copy {
+            position: relative;
+            z-index: 1;
+            margin-top: 48px;
+        }
+
+        .login-visual-copy h1 {
+            max-width: 520px;
+            margin: 0;
+            color: #0d4b7c;
+            font-size: clamp(10px, 4vw, 30px);
+            font-weight: 800;
+            letter-spacing: -0.045em;
+            line-height: 1.08;
+        }
+
+        .login-visual-copy p {
+            max-width: 470px;
+            margin: 18px 0 0;
+            color: #35617f;
+            font-size: 16px;
+            line-height: 1.65;
+        }
+
+        .login-illustration-wrap {
+            position: relative;
+            z-index: 1;
+            display: flex;
+            justify-content: center;
+            align-items: flex-end;
+            margin-top: 22px;
+        }
+
+        .login-illustration {
+            width: min(100%, 510px);
+            height: auto;
+            object-fit: contain;
+        }
+
+        .login-form-panel {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 48px;
+            background: var(--login-white);
+        }
+
+        .login-form-wrap {
+            width: min(100%, 390px);
+        }
+
+        .login-form-wrap h2 {
+            margin: 0;
+            color: var(--login-ink);
+            font-size: 32px;
+            font-weight: 800;
+            letter-spacing: -0.035em;
+        }
+
+        .login-form-wrap > p {
+            margin: 10px 0 30px;
+            color: var(--login-muted);
+            font-size: 15px;
+            line-height: 1.55;
+        }
+
+        .login-error {
+            margin: 0 0 22px;
+            padding: 12px 14px;
+            color: var(--login-error-text);
+            background: var(--login-error-bg);
+            border: 1px solid var(--login-error-border);
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 600;
+        }
+
+        .login-form {
+            display: grid;
+            gap: 20px;
+        }
+
+        .login-field {
+            display: grid;
+            gap: 8px;
+        }
+
+        .login-field label {
+            color: #344054;
+            font-size: 14px;
+            font-weight: 700;
+        }
+
+        .login-field input {
+            width: 100%;
+            min-height: 48px;
+            padding: 12px 14px;
+            color: var(--login-ink);
+            background: #ffffff;
+            border: 1px solid #cbd5e1;
+            border-radius: 8px;
+            font: inherit;
+            outline: none;
+            transition: border-color 180ms ease, box-shadow 180ms ease;
+        }
+
+        .login-field input:focus {
+            border-color: var(--login-blue);
+            box-shadow: 0 0 0 4px rgba(10, 111, 181, 0.13);
+        }
+
+        .login-field .errorlist {
+            margin: 0;
+            padding: 0;
+            color: var(--login-error-text);
+            font-size: 12px;
+            font-weight: 600;
+            list-style: none;
+        }
+
+        .login-submit-btn {
+            min-height: 50px;
+            margin-top: 4px;
+            padding: 12px 18px;
+            color: #ffffff;
+            background: var(--login-blue);
+            border: 0;
+            border-radius: 8px;
+            font: inherit;
+            font-weight: 800;
+            cursor: pointer;
+            transition: background-color 180ms ease, transform 180ms ease;
+        }
+
+        .login-submit-btn:hover {
+            background: var(--login-blue-dark);
+        }
+
+        .login-submit-btn:active {
+            transform: translateY(1px);
+        }
+
+        .login-footer-note {
+            margin: 22px 0 0;
+            color: #98a2b3;
+            font-size: 12px;
+            line-height: 1.5;
+            text-align: center;
+        }
+
+        @media (max-width: 860px) {
+            body {
+                padding: 0;
+                background: var(--login-white);
+            }
+
+            .login-shell {
+                min-height: 100vh;
+                grid-template-columns: 1fr;
+                border: 0;
+                border-radius: 0;
+                box-shadow: none;
+            }
+
+            .login-visual-panel {
+                min-height: auto;
+                padding: 32px 26px 22px;
+            }
+
+            .login-visual-copy {
+                margin-top: 30px;
+            }
+
+            .login-visual-copy h1 {
+                font-size: 30px;
+            }
+
+            .login-illustration-wrap {
+                max-height: 260px;
+                margin-top: 16px;
+            }
+
+            .login-illustration {
+                max-height: 230px;
+            }
+
+            .login-form-panel {
+                align-items: flex-start;
+                padding: 36px 26px 48px;
+            }
+        }
+
+        @media (max-width: 420px) {
+            .login-visual-panel,
+            .login-form-panel {
+                padding-right: 20px;
+                padding-left: 20px;
+            }
+
+            .login-form-wrap h2 {
+                font-size: 28px;
+            }
+        }
     </style>
 </head>
+
 <body>
-    <div class="login-page">
-        <div class="login-card">
-            <h1>CR Process Automation (CRPA)</h1>
-            {% if message %}
-                <div class="login-error">{{ message }}</div>
-            {% endif %}
-            <form method="post">
-                {% csrf_token %}
-                <div class="login-form-row">
-                    <label for="id_username">Username</label>
-                    {{ form.username }}
+    <main class="login-shell">
+        <section class="login-visual-panel" aria-labelledby="automation-tool-title">
+            <div class="login-brand">
+                <div class="login-brand-mark">
+                    <img
+                        src="{% static 'dashboard/images/automation-tool-brand.png' %}"
+                        alt="Automation Tool logo"
+                        width="42"
+                        height="42"
+                    >
                 </div>
-                <div class="login-form-row">
-                    <label for="id_password">Password</label>
-                    {{ form.password }}
-                </div>
-                <button type="submit" class="login-btn">Login</button>
-            </form>
-        </div>
-    </div>
+
+                <p class="login-brand-name">SRF-CRPA TOOL</p>
+            </div>
+
+            <div class="login-visual-copy">
+                <h1 id="automation-tool-title">CR Process Automation (PS-CORE) </h1>
+                <p>
+                    A focused workspace for managing daily CR planning,
+                    validation, and performance insights.
+                </p>
+            </div>
+
+            <div class="login-illustration-wrap">
+                <img
+                    class="login-illustration"
+                    src="{% static 'dashboard/images/automation-tool-login.png' %}"
+                    alt="Analytics dashboard illustration"
+                    width="620"
+                    height="460"
+                >
+            </div>
+        </section>
+
+        <section class="login-form-panel" aria-labelledby="login-title">
+            <div class="login-form-wrap">
+                <h2 id="login-title">Welcome Back</h2>
+                <p>Sign in with your application credentials to continue.</p>
+
+                {% if message %}
+                    <div class="login-error" role="alert">
+                        {{ message }}
+                    </div>
+                {% endif %}
+
+                {% if form.non_field_errors %}
+                    <div class="login-error" role="alert">
+                        {{ form.non_field_errors }}
+                    </div>
+                {% endif %}
+
+                <form method="post" class="login-form" novalidate>
+                    {% csrf_token %}
+
+                    <div class="login-field">
+                        <label for="{{ form.username.id_for_label }}">
+                            Username
+                        </label>
+                        {{ form.username }}
+                        {{ form.username.errors }}
+                    </div>
+
+                    <div class="login-field">
+                        <label for="{{ form.password.id_for_label }}">
+                            Password
+                        </label>
+                        {{ form.password }}
+                        {{ form.password.errors }}
+                    </div>
+
+                    <button type="submit" class="login-submit-btn">
+                        Sign In
+                    </button>
+                </form>
+            </div>
+        </section>
+    </main>
 </body>
 </html>

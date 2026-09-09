@@ -37,9 +37,15 @@ class CustomThread(Thread):
 
 
 def cr_wise_status_df_maker(date_: datetime) -> pd.DataFrame:
-    cr_wise_status_df = read_frame( 
-            CRWiseStatus.objects.filter(execution_date=date_+timedelta(days=1), is_active=True).values(*settings.CR_WISE_STATUS_FIELDS)
-        )
+    # cr_wise_status_df = read_frame( 
+    #         CRWiseStatus.objects.filter(execution_date=date_+timedelta(days=1), is_active=True).values(*settings.CR_WISE_STATUS_FIELDS)
+    #     )
+
+    query_result = list(
+        CRWiseStatus.objects.filter(execution_date=date_+timedelta(days=1), is_active=True).values(*settings.CR_WISE_STATUS_FIELDS)
+    )
+    cr_wise_status_df = pd.DataFrame(query_result)
+    print(f"cr_wise_status_df = \n{cr_wise_status_df}")
     return cr_wise_status_df
 
 
@@ -233,7 +239,11 @@ def selected_date_df_maker(selected_date_data: QuerySet) -> pd.DataFrame:
     """
     # selected_date_data = pd.DataFrame(selected_date_data)
     # print(selected_date_data.columns)
-    df = read_frame(selected_date_data).rename(columns=settings.DB_TO_PL_COLUMNS_MAPPING)
+    if not isinstance(selected_date_data, list):
+        selected_date_data = list(selected_date_data)
+    df = pd.DataFrame(selected_date_data)
+    df = df.rename(columns=settings.DB_TO_PL_COLUMNS_MAPPING)
+    # df = read_frame(selected_date_data).rename(columns=settings.DB_TO_PL_COLUMNS_MAPPING)
 
     # Normalize datetime columns to naive IST wall-clock for consistent comparisons
     for col in ["Scheduled Start Date+", "Scheduled End Date+"]:
@@ -242,6 +252,5 @@ def selected_date_df_maker(selected_date_data: QuerySet) -> pd.DataFrame:
             if getattr(s.dt, "tz", None) is not None:
                 s = s.dt.tz_convert("Asia/Kolkata").dt.tz_localize(None)
             df[col] = s
-
+    print(f"selected_date_df = \n{df}")
     return df
-

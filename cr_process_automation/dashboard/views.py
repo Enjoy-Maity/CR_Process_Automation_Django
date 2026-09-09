@@ -1585,3 +1585,34 @@ def _make_serializable(obj):
         return [_make_serializable(v) for v in obj]
     return obj
 
+
+@login_required(login_url="login")
+def dashboard_view(request):
+    ctx = _common_context(request)
+    ctx["selected_option"] = "dashboard"
+
+    ctx["dashboard_options"] = [
+        {
+            "key": "vendor_wise",
+            "label": "Vendor Wise",
+            "description": "Review Vendor wise CR distribution and planning analysis.",
+        },
+        {
+            "key": "cr_success_rate",
+            "label": "CR Success Rate",
+            "description": "Review Successful, Cancelled and Rollback CR outcomes.",
+        },
+        {
+            "key": "team_performance",
+            "label": "Team Performance",
+            "description": "Review CR workload and execution performance by team.",
+        },
+        {
+            "key": "automation_cr",
+            "label": "Automation CR",
+            "description": "Review Automation coverage and CR analysis.",
+        },
+    ]
+
+    return render(request, "dashboard/dashboard.html", ctx)
+

@@ -1,0 +1,66 @@
+{% extends "dashboard/base_main.html" %}
+
+{% block main_content %}
+<section class="dashboard-page" aria-labelledby="dashboard-title">
+
+    <div class="dashboard-page-head">
+        <h2 id="dashboard-title" class="dashboard-title">
+            Analytics Workspace
+        </h2>
+
+        <p class="dashboard-description">
+            Select an analysis view to review CR execution, Performance,
+            Automation, and Vendor-level insights.
+        </p>
+    </div>
+
+    <div class="dashboard-options-grid">
+        {% for option in dashboard_options %}
+            <article
+                class="dashboard-option-card dashboard-option-{{ option.key }}"
+            >
+                <h3>{{ option.label }}</h3>
+
+                <p>{{ option.description }}</p>
+
+                <button
+                    type="button"
+                    class="dashboard-option-btn"
+                    data-dashboard-option="{{ option.key }}"
+                >
+                    {{ option.label }} Analysis
+                </button>
+            </article>
+        {% empty %}
+            <div class="dashboard-option-empty">
+                No dashboard options are available.
+            </div>
+        {% endfor %}
+    </div>
+
+    <p
+        id="dashboard-option-status"
+        class="dashboard-option-status"
+        aria-live="polite"
+    ></p>
+</section>
+
+<script>
+document.querySelectorAll("[data-dashboard-option]").forEach(button => {
+    button.addEventListener("click", function () {
+        const option = this.dataset.dashboardOption;
+        const status = document.getElementById("dashboard-option-status");
+
+        const labels = {
+            vendor_wise: "Vendor Wise",
+            cr_success_rate: "CR Success Rate",
+            team_performance: "Team Performance",
+            automation_cr_analysis: "Automation CR Analysis",
+        };
+
+        status.textContent =
+            `${labels[option] || "Selected"} dashboard has been selected.`;
+    });
+});
+</script>
+{% endblock %}

@@ -14,7 +14,24 @@
         <button type="button" class="action-btn compact-btn region-tab-btn" data-region="west">West</button>
         <button type="button" class="action-btn compact-btn region-tab-btn" data-region="east">East</button>
         <button type="button" class="action-btn compact-btn region-tab-btn" data-region="south">South</button>
-      </div>
+            <label for="planning-status-filter" class="region-date-label">
+                Planning Status
+            </label>
+
+            <select id="planning-status-filter" class="planning-status-filter">
+                <option value="">All Statuses</option>
+                <option value="planned">Planned</option>
+                <option value="discussed">Discussed</option>
+            </select>
+
+            <button
+                type="button"
+                id="sort-planned-first-btn"
+                class="action-btn compact-btn planning-sort-btn"
+            >
+                Planned First
+            </button>
+        </div>
     </div>
 
     <div class="region-cr-data-panel">
@@ -54,14 +71,19 @@ const CAN_EDIT = {{ can_edit_region_crs|yesno:"true,false" }};
 const REGION_CR_SESSION_KEY = 'region_crs_page_state';
 
 function saveRegionCrSessionState() {
-    const date = document.getElementById('region-cr-date').value;
+    const date = document.getElementById("region-cr-date").value;
+    const planningStatus = document.getElementById("planning-status-filter").value;
     const state = {
         date,
         selectedRegion: SELECTED_REGION,
+        planningStatus,
         allRows: ALL_ROWS,
     };
     try {
-        sessionStorage.setItem(REGION_CR_SESSION_KEY, JSON.stringify(state));
+         sessionStorage.setItem(
+            REGION_CR_SESSION_KEY,
+            JSON.stringify(state)
+        );
     } catch (e) {
         // storage full or unavailable — ignore silently
     }
@@ -78,6 +100,11 @@ function restoreRegionCrSessionState() {
     if (!saved || !saved.date) return false;
 
     document.getElementById('region-cr-date').value = saved.date;
+    const planningStatusFilter = document.getElementById("planning-status-filter");
+
+	if (planningStatusFilter && saved.planningStatus !== undefined) {
+		planningStatusFilter.value = saved.planningStatus;
+	}
 
     ALL_ROWS = Array.isArray(saved.allRows) ? saved.allRows : [];
     ORIGINAL_ROWS_BY_ID = {};
@@ -293,6 +320,39 @@ function getVisibleRows() {
     return ALL_ROWS.filter(row => String(row.region || '').toLowerCase() === SELECTED_REGION);
 }
 
+function getPlanningStatusFilterValue() {
+    const filter = document.getElementById("planning-status-filter");
+    return filter ? filter.value.trim().toLowerCase() : "";
+}
+
+function getStatusFilteredRows(rows) {
+    const selectedStatus = getPlanningStatusFilterValue();
+
+    if (!selectedStatus) {
+        return rows;
+    }
+
+    return rows.filter(row => {
+        const rowStatus = String(row.planning_status || "")
+            .trim()
+            .toLowerCase();
+
+        return rowStatus === selectedStatus;
+    });
+}
+
+function sortPlannedRowsFirst(rows) {
+    return [...rows].sort((a, b) => {
+        const aStatus = String(a.planning_status || "").trim().toLowerCase();
+        const bStatus = String(b.planning_status || "").trim().toLowerCase();
+
+        const aIsPlanned = aStatus === "planned" ? 0 : 1;
+        const bIsPlanned = bStatus === "planned" ? 0 : 1;
+
+        return aIsPlanned - bIsPlanned;
+    });
+}
+
 function applyRegionFilter() {
     const date = document.getElementById('region-cr-date').value;
     const displayDate = getDisplayDate(date);
@@ -303,15 +363,27 @@ function applyRegionFilter() {
         return;
     }
 
-    const visibleRows = getVisibleRows();
-    renderTable(visibleRows);
+        let visibleRows = getVisibleRows();
+	visibleRows = getStatusFilteredRows(visibleRows);
 
-    if (!SELECTED_REGION) {
-        setMeta(`Showing ${visibleRows.length} CRs for all regions on ${displayDate}.`);
-    } else {
-        const regionLabel = SELECTED_REGION.charAt(0).toUpperCase() + SELECTED_REGION.slice(1);
-        setMeta(`Showing ${visibleRows.length} CRs for ${regionLabel} on ${displayDate}.`);
-    }
+	renderTable(visibleRows);
+    const selectedStatus = getPlanningStatusFilterValue();
+	const statusLabel = selectedStatus
+		? ` with Planning Status: ${selectedStatus.charAt(0).toUpperCase() + selectedStatus.slice(1)}`
+		: "";
+    	if (!SELECTED_REGION) {
+		setMeta(
+			`Showing ${visibleRows.length} CRs for all regions on ${displayDate}${statusLabel}.`
+		);
+	} else {
+		const regionLabel =
+			SELECTED_REGION.charAt(0).toUpperCase() +
+			SELECTED_REGION.slice(1);
+
+		setMeta(
+			`Showing ${visibleRows.length} CRs for ${regionLabel} on ${displayDate}${statusLabel}.`
+		);
+	}
 }
 
 function buildRowsFromApiResponse(data) {
@@ -540,5 +612,22 @@ document.getElementById('fetch-region-cr-btn').addEventListener('click', functio
 });
 
 document.getElementById('save-region-cr-btn').addEventListener('click', saveChanges);
+document.getElementById("planning-status-filter").addEventListener("change", function () {
+    applyRegionFilter();
+    saveRegionCrSessionState();
+});
+
+document.getElementById("sort-planned-first-btn").addEventListener("click", function () {
+    if (!ALL_ROWS.length) {
+        showStatus("Please fetch CR records first.", "info");
+        return;
+    }
+
+    ALL_ROWS = sortPlannedRowsFirst(ALL_ROWS);
+    applyRegionFilter();
+    saveRegionCrSessionState();
+
+    showStatus("Planned CRs moved to the top.", "success");
+});
 </script>
 {% endblock %}

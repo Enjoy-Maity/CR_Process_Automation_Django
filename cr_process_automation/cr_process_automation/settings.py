@@ -147,16 +147,16 @@ LOGOUT_REDIRECT_URL = "login"
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-CACHES = {
-    "default": {
-        "BACKEND": "django_redis.cache.RedisCache",
-        # Update this URL if your Redis is hosted elsewhere (e.g., AWS ElastiCache)
-        "LOCATION": "redis://127.0.0.1:6379/1", 
-        "OPTIONS": {
-            "CLIENT_CLASS": "django_redis.client.DefaultClient",
-        }
-    }
-}
+# CACHES = {
+#     "default": {
+#         "BACKEND": "django_redis.cache.RedisCache",
+#         # Update this URL if your Redis is hosted elsewhere (e.g., AWS ElastiCache)
+#         "LOCATION": "redis://127.0.0.1:6379/1", 
+#         "OPTIONS": {
+#             "CLIENT_CLASS": "django_redis.client.DefaultClient",
+#         }
+#     }
+# }
 
 X_FRAME_OPTIONS = 'SAMEORIGIN'
 

@@ -257,6 +257,7 @@ def save_region_cr_details(request):
         }, status=400)
 
     changes = payload.get("changes", [])
+    print(f"changes=\n{changes}")
     if not isinstance(changes, list) or not changes:
         return JsonResponse({
             "ok": False,
@@ -369,9 +370,11 @@ def save_region_cr_details(request):
             })
             did_write = True
 
+
         # Register master->replica sync after commit (runs synchronously here)
         if did_write:
             _trigger_replica_sync_on_commit()
+        transaction.on_commit(lambda: _trigger_replica_sync_on_commit(), using=DB_MASTER)
 
     if errors and not updated_rows:
         return JsonResponse({

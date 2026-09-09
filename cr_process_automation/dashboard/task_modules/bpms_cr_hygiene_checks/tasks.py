@@ -8,7 +8,12 @@ import dateutil.parser as dp
 import dashboard.task_modules.dependencies.batch_methods as bm
 import dashboard.task_modules.dependencies.playwright_common_methods_ as pcm
 from pathlib import Path
-from dashboard.task_modules.dependencies.extra_dependencies import workbook_styling, cr_wise_status_df_maker
+from dashboard.task_modules.dependencies.extra_dependencies import (
+    workbook_styling, 
+    cr_wise_status_df_maker, 
+    sync_replica_task,
+    selected_date_df_maker,
+)
 from dashboard.task_modules.dependencies.excel_modifier import ExcelModifier
 from dashboard.exceptions import CustomException
 from playwright.sync_api import sync_playwright, Page
@@ -1261,7 +1266,7 @@ def run_task(
 
     selected_date_data = SelectedDateTable.objects.filter(execution_date=parsed_date + timedelta(days=1), is_active=True).values(*settings.SELECTED_DATE_TABLE_FIELDS)
     
-    # print(selected_date_data)
+    print(list(selected_date_data))
     
     if selected_date_data:
         selected_data_df = selected_date_df_maker(selected_date_data)
@@ -1311,8 +1316,9 @@ def run_task(
         )
     ]
 
+    to_be_filter_crs = list(cr_wise_status_df["cr_no"].astype(str).str.strip())
     selected_data_df = selected_data_df.loc[
-        selected_data_df["CR No"].astype(str).str.strip().isin(cr_wise_status_df["cr_no"].astype(str).str.strip().tolist())
+        selected_data_df["CR No"].astype(str).str.strip().isin(to_be_filter_crs)
     ]
 
     bpms_filtered_df, crs_with_problem, GLOBAL_LOGS = file_reader_and_checker(selected_data_df, runtime, GLOBAL_LOGS, parsed_date)
