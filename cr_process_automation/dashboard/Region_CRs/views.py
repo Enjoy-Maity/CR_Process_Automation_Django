@@ -1,3 +1,5 @@
+import logging
+import copy
 from django.core.serializers.json import DjangoJSONEncoder
 from pathlib import Path
 from datetime import datetime
@@ -15,7 +17,7 @@ from django.http import JsonResponse, FileResponse, Http404
 from django.shortcuts import render, redirect
 from django.views.decorators.clickjacking import xframe_options_sameorigin
 from django.views.decorators.http import require_GET, require_POST
-from dashboard.models import MasterCRDatabase
+from dashboard.models import MasterCRDatabase, SelectedDateTable, CRWiseStatus  # CHANGED: added CRWiseStatus
 from dashboard.views import _common_context
 from django.db import transaction
 from django.views.decorators.csrf import csrf_exempt
@@ -26,15 +28,23 @@ from io import BytesIO
 from django.utils import timezone
 from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
 
-# ─────────────────────────────────────────────
+# CHANGED: define module logger (used by bootstrap_selected_date_table,
+# _trigger_replica_sync_on_commit, and save_region_cr_details).
+logger = logging.getLogger(__name__)
+
+# ────────────────────────────────────────────────────────────────
 # Database Alias Constants
-# ─────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────
 DB_MASTER  = 'default'   # All writes go here
 DB_REPLICA = 'replica'   # All reads go here
 
-# ─────────────────────────────────────────────
+# CHANGED: define _COW_BOOKKEEPING (referenced by _sync_fields but never defined).
+# These are pk + CoW columns that must NOT be copied when mirroring master rows.
+# _COW_BOOKKEEPING = {"id", "is_active", "version", "parent_reference"}
+
+# ────────────────────────────────────────────────────────────────
 # Field Definitions
-# ─────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────
 MASTER_CR_FIELDS = [
     "id", "sno", "ms_project", "execution_date", "maintenance_window", "cr_no",
     "priority", "risk", "region", "circle", "activity_description", "node_details", "node_count",
@@ -159,26 +169,113 @@ CR_HISTORY_EXPORT_FIELDS_VIEW = [
 ]
 
 ALLOWED_REGION_CR_EDIT_ROLES = {"Admin", "Validator", "Night-SPOC"}
+# Must match the exact values stored in the DB / model choices.
+PLANNING_STATUS_ALLOWED = {"planned", "unplanned", "discussed"}
 
 
-# ─────────────────────────────────────────────
+_COW_BOOKKEEPING = {"id", "is_active", "version", "parent_reference", "parent_reference_id"}
+
+
+def _sync_fields():
+    def concrete_names(model):
+        names = set()
+        for f in model._meta.get_fields():
+            # Skip reverse relations (e.g. historical_versions) and m2m.
+            if f.auto_created and not f.concrete:
+                continue
+            if getattr(f, "many_to_many", False):
+                continue
+            if not getattr(f, "concrete", False):
+                continue
+            # Use the DB attribute name for FKs (…_id), plain name otherwise.
+            names.add(f.attname if hasattr(f, "attname") else f.name)
+        return names
+
+    master_fields = concrete_names(MasterCRDatabase)
+    sel_fields = concrete_names(SelectedDateTable)
+    return (master_fields & sel_fields) - _COW_BOOKKEEPING
+
+
+def sync_selected_date_table(execution_date):
+    """
+    Rebuild SelectedDateTable for a single execution_date to mirror the
+    currently-active MasterCRDatabase rows for that date.
+
+    Behavior:
+      - If SelectedDateTable has rows for this date, they are deleted and
+        rebuilt from active master rows (self-healing).
+      - If SelectedDateTable has NO rows for this date ("not available"),
+        they are simply created from active master rows.
+
+    Call this AFTER MasterCRDatabase has committed for `execution_date`
+    (i.e. from a transaction.on_commit hook). Scoped to one date so other
+    dates are never touched. bulk_create intentionally bypasses
+    SelectedDateTable.save()/CoW: a rebuild is a full mirror, not a versioned edit.
+    """
+    copy_fields = _sync_fields()  # concrete, assignable columns only
+
+    with transaction.atomic(using=DB_MASTER):
+        SelectedDateTable.objects.using(DB_MASTER).filter(
+            execution_date=execution_date
+        ).delete()
+
+        master_rows = list(  # CHANGED: materialise once (needed for drift guard + build)
+            MasterCRDatabase.objects.using(DB_MASTER).filter(
+                execution_date=execution_date, is_active=True
+            ).values(*copy_fields)
+        )
+
+        # Drift guard: active master must be unique per cr_no.
+        seen = set()
+        for row in master_rows:
+            cr = row.get("cr_no")
+            if cr in seen:
+                raise ValueError(
+                    f"Duplicate active master row for cr_no={cr} on "
+                    f"{execution_date}; fix master drift before rebuild."
+                )
+            seen.add(cr)
+
+        # copy_fields already excludes pk/CoW/reverse fields, so this is safe.
+        model_instances = [SelectedDateTable(**row) for row in master_rows]
+
+        if model_instances:
+            SelectedDateTable.objects.using(DB_MASTER).bulk_create(model_instances)
+
+    logger.info(
+        "sync_selected_date_table: rebuilt %d rows for %s",
+        len(model_instances), execution_date,
+    )
+    return len(model_instances)
+
+
+# ────────────────────────────────────────────────────────────────
 # Helper: Sync replica after master commit
-# ─────────────────────────────────────────────
-def _trigger_replica_sync_on_commit():
+# ────────────────────────────────────────────────────────────────
+def _trigger_replica_sync_on_commit(affected_dates):
     """
     Registers a post-commit hook to sync the master DB
     to the replica after the current transaction commits.
     No Redis or Celery required: runs synchronously via call_command.
     """
-    transaction.on_commit(
-        lambda: call_command('sync_replica'),
-        using=DB_MASTER
-    )
+    # transaction.on_commit(
+    #     lambda: call_command('sync_replica'),
+    #     using=DB_MASTER
+    # )
+    def _run_sync():
+        try:
+            from django.core.management import call_command
+            call_command("sync_replica")
+        except Exception:
+            logger.exception("Replica sync failed after commit")
+    for d in affected_dates:
+        sync_selected_date_table(d)
+    transaction.on_commit(_run_sync, using=DB_MASTER)
 
 
-# ─────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────
 # Views: Render Pages
-# ─────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────
 @login_required(login_url="login")
 def region_crs_view(request):
     ctx = _common_context(request)
@@ -196,9 +293,9 @@ def cr_history_view(request):
     return render(request, "dashboard/cr_history.html", ctx)
 
 
-# ─────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────
 # View: Fetch Region CR Details (READ → replica)
-# ─────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────
 @require_GET
 @login_required(login_url="login")
 def fetch_region_cr_details(request):
@@ -235,165 +332,395 @@ def fetch_region_cr_details(request):
     })
 
 
-# ─────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────
 # View: Save Region CR Details (WRITE → CoW on master)
-# ─────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────
+# @require_POST
+# @login_required(login_url="login")
+# def save_region_cr_details(request):
+#     user_role = getattr(request.user, "role", "")
+#     if user_role not in ALLOWED_REGION_CR_EDIT_ROLES:
+#         return JsonResponse({
+#             "ok": False,
+#             "message": "You are not authorized to modify Region CR records."
+#         }, status=403)
+
+#     try:
+#         payload = json.loads(request.body.decode("utf-8"))
+#     except Exception:
+#         return JsonResponse({
+#             "ok": False,
+#             "message": "Invalid JSON payload."
+#         }, status=400)
+
+#     changes = payload.get("changes", [])
+#     print(f"changes=\n{changes}")
+#     if not isinstance(changes, list) or not changes:
+#         return JsonResponse({
+#             "ok": False,
+#             "message": "No changes were submitted."
+#         }, status=400)
+
+#     updated_rows = []
+#     errors = []
+#     did_write = False
+
+#     with transaction.atomic(using=DB_MASTER):
+#         for item in changes:
+#             row_id = item.get("id")
+#             field_values = item.get("fields", {})
+
+#             if not row_id:
+#                 errors.append({"id": None, "message": "Missing row id."})
+#                 continue
+
+#             if not isinstance(field_values, dict):
+#                 errors.append({"id": row_id, "message": "Invalid fields payload."})
+#                 continue
+
+#             invalid_fields = [f for f in field_values.keys() if f not in EDITABLE_REGION_CR_FIELDS]
+#             if invalid_fields:
+#                 errors.append({
+#                     "id": row_id,
+#                     "message": f"Invalid editable fields: {', '.join(invalid_fields)}"
+#                 })
+#                 continue
+
+#             try:
+#                 active_obj = MasterCRDatabase.objects.using(DB_MASTER).get(id=row_id, is_active=True)
+#             except MasterCRDatabase.DoesNotExist:
+#                 errors.append({"id": row_id, "message": "Active record not found. It may have already been updated."})
+#                 continue
+
+#             # sanitise and validate input values (same handling as views1.py)
+#             sanitised_fields = {}
+#             field_error = None
+#             for field_name, raw_value in field_values.items():
+#                 value = raw_value
+#                 if isinstance(value, str):
+#                     value = value.strip()
+#                     if value.lower() in {"nan", "na", "n/a", "n.a.", "n.a", "none", "null", "nat"}:
+#                         value = ""
+#                 if field_name == "node_count":
+#                     if value in ("", None):
+#                         value = None
+#                     else:
+#                         try:
+#                             value = int(value)
+#                         except (TypeError, ValueError):
+#                             field_error = {"id": row_id, "message": "node_count must be a valid integer."}
+#                             break
+#                 sanitised_fields[field_name] = value
+
+#             if field_error:
+#                 errors.append(field_error)
+#                 continue
+
+#             if not sanitised_fields:
+#                 continue
+
+#             # CoW step: deactivate current active record
+#             MasterCRDatabase.objects.using(DB_MASTER).filter(pk=active_obj.pk).update(is_active=False)
+
+#             # Build new record dictionary by copying fields from the active object
+#             new_record_data = {}
+#             for field in active_obj._meta.get_fields():
+#                 # skip reverse relations and non-concrete fields
+#                 if getattr(field, "many_to_many", False):
+#                     continue
+#                 if not getattr(field, "concrete", True):
+#                     continue
+#                 fname = field.name
+#                 if fname == "id":
+#                     continue
+#                 new_record_data[fname] = getattr(active_obj, fname)
+
+#             # Apply incoming changes
+#             new_record_data.update(sanitised_fields)
+
+#             # Set CoW metadata
+#             new_record_data["is_active"] = True
+#             new_record_data["version"] = (active_obj.version or 0) + 1
+#             new_record_data["parent_reference_id"] = active_obj.pk
+
+#             # Create new instance using setattr pattern (so behaviour mirrors views1.py)
+#             new_obj = MasterCRDatabase()
+#             row_updated_fields = []
+#             for k, v in new_record_data.items():
+#                 # skip id if present
+#                 if k == "id":
+#                     continue
+#                 setattr(new_obj, k, v)
+#                 # record which user-submitted editable fields changed
+#                 if k in sanitised_fields:
+#                     row_updated_fields.append(k)
+
+#             # Save new version to master
+#             # new_obj.save(using=DB_MASTER, force_insert=True)
+#             try:
+#                 new_obj.save(using=DB_MASTER, force_insert=True)
+#             except Exception as exc:
+#                 logging.getLogger(__name__).exception(
+#                     "CoW insert failed for row %s", row_id
+#                 )
+#                 errors.append({"id": row_id, "message": str(exc)})
+#                 # roll back the deactivation of this row within the atomic block
+#                 MasterCRDatabase.objects.using(DB_MASTER).filter(
+#                     pk=active_obj.pk
+#                 ).update(is_active=True)
+#                 continue
+
+#             updated_rows.append({
+#                 "old_id": active_obj.pk,
+#                 "new_id": new_obj.pk,
+#                 "cr_no": new_obj.cr_no,
+#                 "new_version": new_obj.version,
+#                 "updated_fields": row_updated_fields,
+#             })
+#             # did_write = True
+
+
+#         # Register master->replica sync after commit (runs synchronously here)
+#         if did_write:
+#             _trigger_replica_sync_on_commit()
+#         # transaction.on_commit(lambda: _trigger_replica_sync_on_commit(), using=DB_MASTER)
+
+#     if errors and not updated_rows:
+#         return JsonResponse({
+#             "ok": False,
+#             "message": "No records were updated.",
+#             "errors": errors,
+#         }, status=400)
+
+#     return JsonResponse({
+#         "ok": True,
+#         "message": f"{len(updated_rows)} record(s) updated successfully (new CoW versions created).",
+#         "updated_rows": updated_rows,
+#         "errors": errors,
+#     })
+
+
+def _user_can_edit_region_crs(user):
+    return user.is_authenticated and user.role in ("Admin", "Validator")
+
+
+def bootstrap_selected_date_table():
+    """
+    Full bootstrap: if SelectedDateTable is entirely empty (table not populated),
+    build it from ALL active MasterCRDatabase rows across every execution_date.
+    Safe to call on startup or via a management command. No-op if rows exist.
+    """
+    if SelectedDateTable.objects.using(DB_MASTER).exists():
+        return 0
+
+    copy_fields = _sync_fields()
+    with transaction.atomic(using=DB_MASTER):
+        master_rows = list(
+            MasterCRDatabase.objects.using(DB_MASTER)
+            .filter(is_active=True)
+            .values(*copy_fields)
+        )
+        instances = [SelectedDateTable(**row) for row in master_rows]
+        if instances:
+            SelectedDateTable.objects.using(DB_MASTER).bulk_create(instances)
+
+    logger.info("bootstrap_selected_date_table: created %d rows", len(instances))
+    return len(instances)
+
+
 @require_POST
 @login_required(login_url="login")
 def save_region_cr_details(request):
-    user_role = getattr(request.user, "role", "")
-    if user_role not in ALLOWED_REGION_CR_EDIT_ROLES:
-        return JsonResponse({
-            "ok": False,
-            "message": "You are not authorized to modify Region CR records."
-        }, status=403)
+    if not _user_can_edit_region_crs(request.user):  # your existing auth check
+        return JsonResponse(
+            {"ok": False, "message": "Not authorized.", "errors": []},
+            status=403,
+        )
 
+    # --- Parse payload ---
     try:
         payload = json.loads(request.body.decode("utf-8"))
-    except Exception:
-        return JsonResponse({
-            "ok": False,
-            "message": "Invalid JSON payload."
-        }, status=400)
+        changes = payload.get("changes", [])
+    except (ValueError, KeyError):
+        return JsonResponse(
+            {"ok": False, "message": "Invalid request body.", "errors": []},
+            status=400,
+        )
 
-    changes = payload.get("changes", [])
-    print(f"changes=\n{changes}")
     if not isinstance(changes, list) or not changes:
-        return JsonResponse({
-            "ok": False,
-            "message": "No changes were submitted."
-        }, status=400)
+        return JsonResponse(
+            {"ok": False, "message": "No changes to save.", "errors": []},
+            status=400,
+        )
 
-    updated_rows = []
     errors = []
+    updated_rows = []
     did_write = False
+    affected_dates = set()  # CHANGED: track dates to rebuild in SelectedDateTable
 
-    with transaction.atomic(using=DB_MASTER):
-        for item in changes:
-            row_id = item.get("id")
-            field_values = item.get("fields", {})
+    try:
+        with transaction.atomic(using=DB_MASTER):
+            for item in changes:
+                row_id = item.get("id")
+                raw_fields = item.get("fields", {}) or {}
 
-            if not row_id:
-                errors.append({"id": None, "message": "Missing row id."})
-                continue
+                if row_id is None:
+                    errors.append({"id": None, "message": "Missing row id."})
+                    continue
 
-            if not isinstance(field_values, dict):
-                errors.append({"id": row_id, "message": "Invalid fields payload."})
-                continue
+                # --- Validate field allowlist ---
+                invalid_fields = [
+                    f for f in raw_fields.keys()
+                    if f not in EDITABLE_REGION_CR_FIELDS
+                ]
+                if invalid_fields:
+                    errors.append({
+                        "id": row_id,
+                        "message": f"Non-editable field(s): {', '.join(invalid_fields)}",
+                    })
+                    continue
 
-            invalid_fields = [f for f in field_values.keys() if f not in EDITABLE_REGION_CR_FIELDS]
-            if invalid_fields:
-                errors.append({
-                    "id": row_id,
-                    "message": f"Invalid editable fields: {', '.join(invalid_fields)}"
-                })
-                continue
+                # --- Sanitise / normalise values ---
+                sanitised_fields = {}
+                field_error = None
 
-            try:
-                active_obj = MasterCRDatabase.objects.using(DB_MASTER).get(id=row_id, is_active=True)
-            except MasterCRDatabase.DoesNotExist:
-                errors.append({"id": row_id, "message": "Active record not found. It may have already been updated."})
-                continue
+                for field_name, value in raw_fields.items():
+                    # Trim strings; treat blanks as empty
+                    if isinstance(value, str):
+                        value = value.strip()
 
-            # sanitise and validate input values (same handling as views1.py)
-            sanitised_fields = {}
-            field_error = None
-            for field_name, raw_value in field_values.items():
-                value = raw_value
-                if isinstance(value, str):
-                    value = value.strip()
-                    if value.lower() in {"nan", "na", "n/a", "n.a.", "n.a", "none", "null", "nat"}:
-                        value = ""
-                if field_name == "node_count":
-                    if value in ("", None):
-                        value = None
-                    else:
-                        try:
-                            value = int(value)
-                        except (TypeError, ValueError):
-                            field_error = {"id": row_id, "message": "node_count must be a valid integer."}
+                    if field_name == "node_count":
+                        if value in ("", None):
+                            value = None
+                        else:
+                            try:
+                                value = int(value)
+                            except (TypeError, ValueError):
+                                field_error = {
+                                    "id": row_id,
+                                    "message": "node_count must be a valid integer.",
+                                }
+                                break
+
+                    if field_name == "planning_status" and value not in ("", None):
+                        normalized = str(value).strip().lower()
+                        if normalized not in PLANNING_STATUS_ALLOWED:
+                            field_error = {
+                                "id": row_id,
+                                "message": f"Invalid planning_status: {value}",
+                            }
                             break
-                sanitised_fields[field_name] = value
+                        value = normalized  # store canonical form
 
-            if field_error:
-                errors.append(field_error)
-                continue
+                    sanitised_fields[field_name] = value
 
-            if not sanitised_fields:
-                continue
-
-            # CoW step: deactivate current active record
-            MasterCRDatabase.objects.using(DB_MASTER).filter(pk=active_obj.pk).update(is_active=False)
-
-            # Build new record dictionary by copying fields from the active object
-            new_record_data = {}
-            for field in active_obj._meta.get_fields():
-                # skip reverse relations and non-concrete fields
-                if getattr(field, "many_to_many", False):
+                if field_error:
+                    errors.append(field_error)
                     continue
-                if not getattr(field, "concrete", True):
+
+                if not sanitised_fields:
+                    continue  # nothing to change for this row
+
+                # --- Load the current active row ---
+                active_obj = (
+                    MasterCRDatabase.objects.using(DB_MASTER)
+                    .filter(pk=row_id, is_active=True)
+                    .first()
+                )
+                if active_obj is None:
+                    errors.append({
+                        "id": row_id,
+                        "message": "Active record not found (may have been modified).",
+                    })
                     continue
-                fname = field.name
-                if fname == "id":
+
+                # --- CoW step 1: deactivate current active row (guarded) ---
+                deactivated = (
+                    MasterCRDatabase.objects.using(DB_MASTER)
+                    .filter(pk=active_obj.pk, is_active=True)
+                    .update(is_active=False)
+                )
+                if deactivated != 1:
+                    errors.append({
+                        "id": row_id,
+                        "message": "Record was modified concurrently. Please re-fetch and retry.",
+                    })
                     continue
-                new_record_data[fname] = getattr(active_obj, fname)
 
-            # Apply incoming changes
-            new_record_data.update(sanitised_fields)
+                # --- CoW step 2: build the new active row ---
+                # Deep-copy the existing row so ALL NOT NULL columns carry over,
+                # then overlay only the edited fields. This prevents the
+                # NOT NULL constraint failure from hand-picking fields.
+                new_obj = copy.deepcopy(active_obj)
+                new_obj.pk = None
+                new_obj.id = None          # adjust if your PK isn't 'id'
+                new_obj.is_active = True
 
-            # Set CoW metadata
-            new_record_data["is_active"] = True
-            new_record_data["version"] = (active_obj.version or 0) + 1
-            new_record_data["parent_reference_id"] = active_obj.pk
+                for field_name, value in sanitised_fields.items():
+                    setattr(new_obj, field_name, value)
 
-            # Create new instance using setattr pattern (so behaviour mirrors views1.py)
-            new_obj = MasterCRDatabase()
-            row_updated_fields = []
-            for k, v in new_record_data.items():
-                # skip id if present
-                if k == "id":
+                # No-op unless MasterCRDatabase gains updated_at; kept for future-proofing.
+                if hasattr(new_obj, "updated_at"):
+                    new_obj.updated_at = timezone.now()
+
+                # --- CoW step 3: insert new row (single CoW path) ---
+                try:
+                    # skip_cow=True: only if MasterCRDatabase.save() supports it.
+                    # Drop skip_cow if your model has no CoW override.
+                    # new_obj.save(using=DB_MASTER, force_insert=True, skip_cow=True)
+                    new_obj.save(using=DB_MASTER, force_insert=True)
+                except Exception as exc:
+                    logger.exception("CoW insert failed for row %s", row_id)
+                    errors.append({"id": row_id, "message": str(exc)})
+                    # Roll back the deactivation of this specific row.
+                    MasterCRDatabase.objects.using(DB_MASTER).filter(
+                        pk=active_obj.pk
+                    ).update(is_active=True)
                     continue
-                setattr(new_obj, k, v)
-                # record which user-submitted editable fields changed
-                if k in sanitised_fields:
-                    row_updated_fields.append(k)
 
-            # Save new version to master
-            new_obj.save(using=DB_MASTER)
+                updated_rows.append(new_obj.pk)
+                did_write = True
 
-            updated_rows.append({
-                "old_id": active_obj.pk,
-                "new_id": new_obj.pk,
-                "cr_no": new_obj.cr_no,
-                "new_version": new_obj.version,
-                "updated_fields": row_updated_fields,
-            })
-            did_write = True
+                # CHANGED: record the execution_date so SelectedDateTable can be
+                # rebuilt for it post-commit ("create from master if not available").
+                if new_obj.execution_date is not None:
+                    affected_dates.add(new_obj.execution_date)
 
+            # Register replica sync exactly once, only if we wrote something.
+            if did_write:
+                _trigger_replica_sync_on_commit(affected_dates)
 
-        # Register master->replica sync after commit (runs synchronously here)
-        if did_write:
-            _trigger_replica_sync_on_commit()
-        transaction.on_commit(lambda: _trigger_replica_sync_on_commit(), using=DB_MASTER)
+                # CHANGED: rebuild SelectedDateTable per affected date AFTER commit.
+                # sync_selected_date_table opens its own atomic() and must run post-commit;
+                # it self-heals (creates rows if the date has none).
+                # for d in affected_dates:
+                #     transaction.on_commit(
+                #         lambda d=d: sync_selected_date_table(d),
+                #         using=DB_MASTER,
+                #     )
 
-    if errors and not updated_rows:
-        return JsonResponse({
-            "ok": False,
-            "message": "No records were updated.",
+    except Exception:
+        logger.exception("save_region_cr_details failed")
+        return JsonResponse(
+            {"ok": False, "message": "Internal error while saving.", "errors": errors},
+            status=500,
+        )
+
+    ok = len(updated_rows) > 0
+    status_code = 200 if ok else 400
+    return JsonResponse(
+        {
+            "ok": ok,
+            "updated_rows": updated_rows,
             "errors": errors,
-        }, status=400)
-
-    return JsonResponse({
-        "ok": True,
-        "message": f"{len(updated_rows)} record(s) updated successfully (new CoW versions created).",
-        "updated_rows": updated_rows,
-        "errors": errors,
-    })
+        },
+        status=status_code,
+    )
 
 
-# ─────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────
 # Helpers: CR History Querysets (READ → replica)
-# ─────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────
 def _get_history_start_date(range_key):
     today = timezone.localdate()
 
@@ -446,9 +773,9 @@ def _get_cr_history_queryset(date_str=None, range_key=None):
     return qs, start_date, end_date, None
 
 
-# ─────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────
 # View: Fetch CR History (READ → replica)
-# ─────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────
 @require_GET
 @login_required(login_url="login")
 def fetch_cr_history(request):
@@ -506,9 +833,9 @@ def fetch_cr_history(request):
     })
 
 
-# ─────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────
 # View: Download CR History (READ → replica)
-# ─────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────
 @require_GET
 @login_required(login_url="login")
 def download_cr_history(request):
@@ -664,3 +991,37 @@ def download_cr_history(request):
         filename=filename,
         content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
+
+
+@require_GET
+@login_required(login_url="login")
+def fetch_cr_wise_status(request):
+    date_str = request.GET.get("date", "").strip()
+
+    if not date_str:
+        return JsonResponse({"ok": False, "message": "Date is required."}, status=400)
+
+    try:
+        parsed_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+    except ValueError:
+        return JsonResponse({"ok": False, "message": "Invalid date format."}, status=400)
+
+    result = list(
+        CRWiseStatus.objects.filter(
+            execution_date=parsed_date, is_active=True
+        ).values(*settings.CR_WISE_STATUS_FIELDS)
+    )
+
+    return JsonResponse({
+        "ok": True,
+        "date": date_str,
+        "fields": settings.CR_WISE_STATUS_FIELDS,
+        "rows": result,
+    }, encoder=DjangoJSONEncoder)
+
+
+@login_required(login_url="login")
+def cr_wise_status(request):
+    ctx = _common_context(request)
+    ctx["selected_option"] = "cr_wise_status"
+    return render(request, "dashboard/cr_wise_status.html", ctx)

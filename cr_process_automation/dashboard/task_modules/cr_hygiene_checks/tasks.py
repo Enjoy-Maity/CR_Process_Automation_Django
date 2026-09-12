@@ -9,7 +9,8 @@ from dashboard.task_modules.dependencies.excel_modifier import ExcelModifier
 from dashboard.views import _make_serializable
 from queue import Queue
 from threading import Thread
-from typing import List, Callable, AnyStr, Dict
+# from typing import List, Callable, AnyStr, Dict
+from typing import List, Callable, AnyStr, Dict, Tuple, Optional
 from dashboard.exceptions import CustomException
 from typing import Any, AnyStr
 from numpy.typing import ArrayLike
@@ -34,6 +35,18 @@ cr_itsm_details_dictionary = None
 cr_to_circle_checker_dictionary = None
 work_details_cr_hygiene_dictionary = None
 interdomain_kpi_activity_name_interdomain_kpi_required_check_dictionary = None
+
+
+def _norm_series(series: pd.Series) -> pd.Series:
+    """Normalize text for exact-match filters: strip hidden chars + casefold."""
+    return (
+        series.astype("string")
+        .str.replace("\xa0", " ", regex=False)   # non-breaking space
+        .str.replace("\u200b", "", regex=False)  # zero-width space
+        .str.strip()
+        .str.casefold()
+    )
+
 
 
 def cr_wise_status_modifier_update_func(
@@ -709,7 +722,7 @@ def file_reader_and_checker(
     runtime: dict, 
     logs: list, 
     selected_date:datetime 
-) -> Tuple[pd.DataFrame, ArrayLike[AnyStr]|None, list]:
+) -> Tuple[pd.DataFrame, "np.ndarray", list]:
     runtime["status"] = "Performing pre-checks"
     try:
         # raw_planning_sheet_df = raw_planning_sheet_df.loc[
@@ -853,7 +866,7 @@ def run_task(
         selected_data_df = ed.selected_date_df_maker(selected_date_data)
     
     # print(selected_data_df.columns)
-    print(f"{'CRQ000005570931' in list(selected_data_df['CR No'].astype(str).str.strip()) = }")
+    # print(f"{'CRQ000005570931' in list(selected_data_df['CR No'].astype(str).str.strip()) = }")
 
     
     cr_wise_status_df = ed.cr_wise_status_df_maker(parsed_date)
@@ -889,16 +902,24 @@ def run_task(
         np.array(selected_data_df.loc[selected_data_df['BPMS CR (Yes/No)'].astype(str).str.strip().astype(str).str.lower() == 'no']['CR No']))
         }"
     )
+    # selected_data_df = selected_data_df.loc[
+    #     (
+    #         (
+    #             selected_data_df["Planning Status"].astype(str).str.strip().astype(str).str.lower() == 'planned'
+    #         )
+    #         & 
+    #         (
+    #             selected_data_df["BPMS CR (Yes/No)"].astype(str).str.strip().astype(str).str.lower() == 'no'
+    #         )
+    #     )
+    # ]
+
+
+    planning_status_norm = _norm_series(selected_data_df["Planning Status"])
+    bpms_cr_norm = _norm_series(selected_data_df["BPMS CR (Yes/No)"])
+
     selected_data_df = selected_data_df.loc[
-        (
-            (
-                selected_data_df["Planning Status"].astype(str).str.strip().astype(str).str.lower() == 'planned'
-            )
-            & 
-            (
-                selected_data_df["BPMS CR (Yes/No)"].astype(str).str.strip().astype(str).str.lower() == 'no'
-            )
-        )
+        planning_status_norm.eq("planned") & bpms_cr_norm.eq("no")
     ]
 
     to_be_filter_crs = list(cr_wise_status_df["cr_no"].astype(str).str.strip().unique())

@@ -70,6 +70,24 @@ const CAN_EDIT = {{ can_edit_region_crs|yesno:"true,false" }};
 
 const REGION_CR_SESSION_KEY = 'region_crs_page_state';
 
+// Generalized editable-field renderer config.
+// Add any field here to control how its editable cell renders.
+const FIELD_INPUT_CONFIG = {
+    planning_status: {
+        type: 'select',
+        // MUST match backend-accepted values exactly (case-sensitive on save)
+        options: [
+            { value: 'planned',   label: 'Planned' },
+            { value: 'unplanned', label: 'Unplanned' },
+            { value: 'discussed', label: 'Discussed' },
+        ],
+    },
+    // Example of extending later:
+    // service_affecting: { type: 'select', options: [
+    //     { value: 'Yes', label: 'Yes' }, { value: 'No', label: 'No' },
+    // ]},
+};
+
 function saveRegionCrSessionState() {
     const date = document.getElementById("region-cr-date").value;
     const planningStatus = document.getElementById("planning-status-filter").value;
@@ -223,7 +241,57 @@ function escapeHtml(value) {
         .replace(/'/g, '&#039;');
 }
 
+// function renderEditableCell(row, column) {
+//     const value = row[column] ?? '';
+//     const rowId = row.id;
+
+//     if (column === 'node_count') {
+//         return `<input type="number" class="region-cr-input region-cr-input-sm" data-row-id="${rowId}" data-field="${column}" value="${escapeHtml(value)}">`;
+//     }
+
+//     if (['node_details', 'reason_for_rollback_cancel', 'test_cases', 'additional_info'].includes(column)) {
+//         return `<textarea class="region-cr-input region-cr-textarea" data-row-id="${rowId}" data-field="${column}">${escapeHtml(value)}</textarea>`;
+//     }
+
+//     return `<input type="text" class="region-cr-input" data-row-id="${rowId}" data-field="${column}" value="${escapeHtml(value)}">`;
+// }
+
+
+function renderSelectCell(row, column, cfg) {
+    const rowId = row.id;
+    const current = getNormalizedValue(row[column]).toLowerCase();
+
+    // Build options; include the stored value even if it's not in the
+    // configured list so we never silently drop/misrepresent existing data.
+    const knownValues = cfg.options.map(o => String(o.value).toLowerCase());
+    const optionList = [...cfg.options];
+
+    if (current && !knownValues.includes(current)) {
+        optionList.unshift({ value: row[column], label: `${row[column]} (current)` });
+    }
+
+    // Always allow clearing to blank if the field is nullable.
+    const blankSelected = current === '' ? 'selected' : '';
+    const optionsHtml = optionList.map(opt => {
+        const optVal = String(opt.value);
+        const selected = optVal.toLowerCase() === current ? 'selected' : '';
+        return `<option value="${escapeHtml(optVal)}" ${selected}>${escapeHtml(opt.label)}</option>`;
+    }).join('');
+
+    return `
+        <select class="region-cr-input region-cr-select"
+                data-row-id="${rowId}" data-field="${column}">
+            <option value="" ${blankSelected}>—</option>
+            ${optionsHtml}
+        </select>`;
+}
+
 function renderEditableCell(row, column) {
+    const cfg = FIELD_INPUT_CONFIG[column];
+    if (cfg && cfg.type === 'select') {
+        return renderSelectCell(row, column, cfg);
+    }
+
     const value = row[column] ?? '';
     const rowId = row.id;
 
@@ -237,6 +305,7 @@ function renderEditableCell(row, column) {
 
     return `<input type="text" class="region-cr-input" data-row-id="${rowId}" data-field="${column}" value="${escapeHtml(value)}">`;
 }
+
 
 const FROZEN_COLUMN_WIDTHS = {
     sno: 60,
@@ -556,7 +625,10 @@ function saveChanges() {
         .then(res => res.json())
         .then(data => {
             if (!data.ok) {
-                showStatus('Failed to save record.', 'error');
+                const detail = Array.isArray(data.errors) && data.errors.length
+                    ? data.errors.map(e => e.message).join('; ')
+                    : (data.message || 'Failed to save record.');
+                showStatus(detail, 'error');
                 return;
             }
 
@@ -585,6 +657,15 @@ function saveChanges() {
             saveBtn.disabled = !CAN_EDIT;
             saveBtn.textContent = 'Save Changes';
         });
+}
+
+function bindDirtyTracking() {
+    document.querySelectorAll('.region-cr-input').forEach(input => {
+        const handler = () => markInputDirtyState(input);
+        input.addEventListener('input', handler);
+        input.addEventListener('change', handler); // needed for <select>
+        markInputDirtyState(input);
+    });
 }
 
 setRegionCrDateMin();
