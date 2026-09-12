@@ -3,6 +3,7 @@
 /env
 /venv
 .env
+.vscode/
 .gitignore
 .python-version
 *.toml
