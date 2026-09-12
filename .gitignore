@@ -19,3 +19,5 @@ Session_store_files/
 logs/
 /cr_process_automation/pw-browsers/
 migrations/
+uv.lock
+pyproject.toml
