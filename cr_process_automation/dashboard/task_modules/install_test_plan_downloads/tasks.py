@@ -20,7 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dashboard.views import _make_serializable
 from dashboard.models import MasterCRDatabase, SelectedDateTable, CRWiseStatus
 from dashboard.task_modules.cr_hygiene_checks.tasks import selected_date_df_maker
-from dashboard.task_modules.dependencies.extra_dependencies import cr_wise_status_df_maker
+from dashboard.task_modules.dependencies.extra_dependencies import cr_wise_status_df_maker, _norm_series
 
 
 queue_ = Queue()
@@ -456,14 +456,16 @@ def run_task(
             cr_wise_status_df["Install_Test_Plan_Downloads"].astype(str).str.lower().str.strip() != 'success'
         ]
 
-        selected_data_df = selected_data_df.loc[
-            (
-                selected_data_df["Planning Status"].astype(str).str.strip().astype(str).str.lower() == 'planned'
-            )
-        ]
+
+        planning_status_norm = _norm_series(selected_data_df["Planning Status"])
 
         selected_data_df = selected_data_df.loc[
-            selected_data_df["CR No"].astype(str).str.strip().isin(cr_wise_status_df["cr_no"].astype(str).str.strip().tolist())
+            planning_status_norm.eq("planned")
+        ]
+
+        to_be_filter_crs = list(cr_wise_status_df["cr_no"].astype(str).str.strip().unique())
+        selected_data_df = selected_data_df.loc[
+            selected_data_df["CR No"].astype(str).str.strip().isin(to_be_filter_crs)
         ]
 
         planning_sheet_df = selected_data_df

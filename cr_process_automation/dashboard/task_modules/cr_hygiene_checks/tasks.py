@@ -37,15 +37,7 @@ work_details_cr_hygiene_dictionary = None
 interdomain_kpi_activity_name_interdomain_kpi_required_check_dictionary = None
 
 
-def _norm_series(series: pd.Series) -> pd.Series:
-    """Normalize text for exact-match filters: strip hidden chars + casefold."""
-    return (
-        series.astype("string")
-        .str.replace("\xa0", " ", regex=False)   # non-breaking space
-        .str.replace("\u200b", "", regex=False)  # zero-width space
-        .str.strip()
-        .str.casefold()
-    )
+
 
 
 
@@ -867,7 +859,6 @@ def run_task(
     
     # print(selected_data_df.columns)
     # print(f"{'CRQ000005570931' in list(selected_data_df['CR No'].astype(str).str.strip()) = }")
-
     
     cr_wise_status_df = ed.cr_wise_status_df_maker(parsed_date)
     # cr_wise_status_df = cr_wise_status_df.where(~pd.notna(cr_wise_status_df["CR_Hygiene_Checks"]), "")
@@ -887,21 +878,21 @@ def run_task(
     # print(f"\n\nselected_data_df['Planning Status'].unique()\n {selected_data_df['Planning Status'].unique()}")
     # print(f"\n\nselected_data_df['CR No'].unique()\n {selected_data_df['CR No'].unique()}\n")
     # print(f"\n\ncr_wise_status_df['cr_no'].unique()\n {cr_wise_status_df['cr_no'].unique()}\n")
-    print(f"\n\nselected_data_df.loc[selected_data_df['CR No'] == 'CRQ000005570931'][['CR No', 'Planning Status']] = {selected_data_df.loc[selected_data_df['CR No'] == 'CRQ000005570931'][['CR No', 'Planning Status']]}\n")
-    import numpy as np
-    # print(f"np.setdiff1d(selected_data_df['CR No'].unique(), cr_wise_status_df['cr_no'].unique()) = \n{np.intersect1d(np.array(selected_data_df['CR No'].unique()), np.array(cr_wise_status_df['cr_no'].unique()))}\n\n")
-    print(f"\nselected_data_df['Planning Status'].astype(str).str.strip().astype(str).str.lower() == 'planned']=\n\n{list(selected_data_df.loc[selected_data_df['Planning Status'].astype(str).str.strip().astype(str).str.lower() == 'planned']['CR No'])}")
-    print(f"\nselected_data_df['BPMS CR (Yes/No)'].astype(str).str.strip().astype(str).str.lower() == 'no']=\n\n{list(selected_data_df.loc[selected_data_df['BPMS CR (Yes/No)'].astype(str).str.strip().astype(str).str.lower() == 'no']['CR No'])}")
-    print(
-        f"np.intersect1d(\
-        np.array(selected_data_df.loc[selected_data_df['Planning Status'].astype(str).str.strip().astype(str).str.lower() == 'planned']['CR No']),\
-        np.array(selected_data_df.loc[selected_data_df['BPMS CR (Yes/No)'].astype(str).str.strip().astype(str).str.lower() == 'no']['CR No']))=\n\
-        {
-            np.intersect1d(
-        np.array(selected_data_df.loc[selected_data_df['Planning Status'].astype(str).str.strip().astype(str).str.lower() == 'planned']['CR No']),
-        np.array(selected_data_df.loc[selected_data_df['BPMS CR (Yes/No)'].astype(str).str.strip().astype(str).str.lower() == 'no']['CR No']))
-        }"
-    )
+    # print(f"\n\nselected_data_df.loc[selected_data_df['CR No'] == 'CRQ000005570931'][['CR No', 'Planning Status']] = {selected_data_df.loc[selected_data_df['CR No'] == 'CRQ000005570931'][['CR No', 'Planning Status']]}\n")
+    # import numpy as np
+    # # print(f"np.setdiff1d(selected_data_df['CR No'].unique(), cr_wise_status_df['cr_no'].unique()) = \n{np.intersect1d(np.array(selected_data_df['CR No'].unique()), np.array(cr_wise_status_df['cr_no'].unique()))}\n\n")
+    # print(f"\nselected_data_df['Planning Status'].astype(str).str.strip().astype(str).str.lower() == 'planned']=\n\n{list(selected_data_df.loc[selected_data_df['Planning Status'].astype(str).str.strip().astype(str).str.lower() == 'planned']['CR No'])}")
+    # print(f"\nselected_data_df['BPMS CR (Yes/No)'].astype(str).str.strip().astype(str).str.lower() == 'no']=\n\n{list(selected_data_df.loc[selected_data_df['BPMS CR (Yes/No)'].astype(str).str.strip().astype(str).str.lower() == 'no']['CR No'])}")
+    # print(
+    #     f"np.intersect1d(\
+    #     np.array(selected_data_df.loc[selected_data_df['Planning Status'].astype(str).str.strip().astype(str).str.lower() == 'planned']['CR No']),\
+    #     np.array(selected_data_df.loc[selected_data_df['BPMS CR (Yes/No)'].astype(str).str.strip().astype(str).str.lower() == 'no']['CR No']))=\n\
+    #     {
+    #         np.intersect1d(
+    #     np.array(selected_data_df.loc[selected_data_df['Planning Status'].astype(str).str.strip().astype(str).str.lower() == 'planned']['CR No']),
+    #     np.array(selected_data_df.loc[selected_data_df['BPMS CR (Yes/No)'].astype(str).str.strip().astype(str).str.lower() == 'no']['CR No']))
+    #     }"
+    # )
     # selected_data_df = selected_data_df.loc[
     #     (
     #         (
@@ -913,24 +904,21 @@ def run_task(
     #         )
     #     )
     # ]
-
-
-    planning_status_norm = _norm_series(selected_data_df["Planning Status"])
-    bpms_cr_norm = _norm_series(selected_data_df["BPMS CR (Yes/No)"])
-
+    planning_status_norm = ed._norm_series(selected_data_df["Planning Status"])
+    bpms_cr_norm = ed._norm_series(selected_data_df["BPMS CR (Yes/No)"])
     selected_data_df = selected_data_df.loc[
         planning_status_norm.eq("planned") & bpms_cr_norm.eq("no")
     ]
 
     to_be_filter_crs = list(cr_wise_status_df["cr_no"].astype(str).str.strip().unique())
     # print(f"\n\nto_be_filter_crs = \n{to_be_filter_crs}\n")
-    print(f"selected_data_df_crs=\n{selected_data_df['CR No'].tolist()}\n")
+    # print(f"selected_data_df_crs=\n{selected_data_df['CR No'].tolist()}\n")
 
     selected_data_df = selected_data_df.loc[
         selected_data_df["CR No"].astype(str).str.strip().isin(to_be_filter_crs)
     ]
 
-    print(f"{selected_data_df = }\n\n")
+    # print(f"{selected_data_df = }\n\n")
 
     filtered_df, crs_with_problem, GLOBAL_LOGS = file_reader_and_checker(selected_data_df, runtime, GLOBAL_LOGS, parsed_date)
 

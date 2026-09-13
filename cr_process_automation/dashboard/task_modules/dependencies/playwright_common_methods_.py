@@ -4,7 +4,7 @@ import time
 import pandas as pd
 from io import StringIO
 import traceback
-import pythoncom
+# import pythoncom
 import rootutils
 import inspect
 from bs4 import BeautifulSoup as beautifulsoup
@@ -1713,7 +1713,7 @@ def handle_authenticator(
     task:dict,
     timestamp_fn:Callable|None
 ):
-    pythoncom.PumpWaitingMessages()
+    # pythoncom.PumpWaitingMessages()
     
     """Handle MFA / 2FA authentication flow."""
     logs = logs if logs is not None else []

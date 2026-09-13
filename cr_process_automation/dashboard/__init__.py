@@ -1,4 +1,5 @@
 import os
+import sys
 import rootutils
 from pathlib import Path
 from datetime import datetime
@@ -15,8 +16,39 @@ default_app_config = "dashboard.DashboardConfig"
 root = rootutils.setup_root(__file__, indicator=".project-root", pythonpath=True, dotenv=True)
 
 os.environ["PROJECT_ROOT"] = str(root)
-os.environ["ITSM_SESSION_FILE"] = os.path.join(str(root), "dashboard", "task_modules", "dependencies", "Session_store_files", "itsm_session_file.json")
+os.environ["ITSM_SESSION_FILE"] = os.path.join(
+    str(root), 
+    "dashboard", 
+    "task_modules", 
+    "dependencies", 
+    "Session_store_files", 
+    "itsm_session_file.json"
+)
 os.environ["PLAYWRIGHT_BROWSERS_PATH"]=os.path.join(str(root), "pw-browsers")
+# Assume 'root' is already defined
+base_dir = Path(root).parent.joinpath("pw-browsers")
+# print(f"{base_dir = }")
+# 1. Set platform-specific variables
+if sys.platform == "win32":
+    os_folder = "chrome-win64"
+    exe_name = "chrome.exe"
+else:
+    os_folder = "chrome-linux64"  # Playwright's default Linux subfolder
+    exe_name = "chrome"
+
+# 2. Search for the dynamic "chromium-xxxx" folder
+chromium_dirs = list(base_dir.glob("chromium-*"))
+# print(chromium_dirs)
+
+if chromium_dirs:
+    # 3. Take the first match and construct the full path
+    # Sort them if you want to ensure you get the latest version: sorted(chromium_dirs)[-1]
+    browser_path = chromium_dirs[0] / os_folder / exe_name
+    
+    # 4. Set the environment variable as a string
+    os.environ["BROWSER_PATH"] = str(browser_path)
+else:
+    raise FileNotFoundError(f"No 'chromium-*' folder found in {base_dir}")
 
 # # Adding the path for task_wise_output
 # os.environ.setdefault(

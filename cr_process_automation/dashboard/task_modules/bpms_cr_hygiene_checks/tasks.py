@@ -8,6 +8,7 @@ import dateutil.parser as dp
 import dashboard.task_modules.dependencies.batch_methods as bm
 import dashboard.task_modules.dependencies.playwright_common_methods_ as pcm
 from pathlib import Path
+import dashboard.task_modules.dependencies.extra_dependencies as ed
 from dashboard.task_modules.dependencies.extra_dependencies import (
     workbook_styling, 
     cr_wise_status_df_maker, 
@@ -33,7 +34,6 @@ from django.db import transaction
 from dashboard.task_modules.cr_hygiene_checks.tasks import (
     validation_file_colorizer,
     file_reader_and_checker,
-    selected_date_df_maker,
     cr_details_update_func,
     cr_wise_status_modifier_update_func,
 )
@@ -1266,10 +1266,10 @@ def run_task(
 
     selected_date_data = SelectedDateTable.objects.filter(execution_date=parsed_date + timedelta(days=1), is_active=True).values(*settings.SELECTED_DATE_TABLE_FIELDS)
     
-    print(list(selected_date_data))
+    # print(list(selected_date_data))
     
     if selected_date_data:
-        selected_data_df = selected_date_df_maker(selected_date_data)
+        selected_data_df = ed.selected_date_df_maker(selected_date_data)
     
     else:
         # print("Line No. 793")
@@ -1293,30 +1293,37 @@ def run_task(
 
             selected_date_data = SelectedDateTable.objects.filter(execution_date=parsed_date + timedelta(days=1), is_active=True).values(*settings.SELECTED_DATE_TABLE_FIELDS)
             # print(f"{selected_date_data = }")
-        selected_data_df = selected_date_df_maker(selected_date_data)
+        selected_data_df = ed.selected_date_df_maker(selected_date_data)
     
     # print(selected_data_df.columns)
     
-    cr_wise_status_df = cr_wise_status_df_maker(parsed_date)
+    cr_wise_status_df = ed.cr_wise_status_df_maker(parsed_date)
     # cr_wise_status_df = cr_wise_status_df.where(~pd.notna(cr_wise_status_df["CR_Hygiene_Checks"]), "")
     cr_wise_status_df["CR_Hygiene_Checks"].fillna("", inplace=True)
     cr_wise_status_df = cr_wise_status_df.loc[
         cr_wise_status_df["CR_Hygiene_Checks"].astype(str).str.lower().str.strip() != 'success'
     ]
 
+    # selected_data_df = selected_data_df.loc[
+    #     (
+    #         (
+    #             selected_data_df["Planning Status"].astype(str).str.strip().astype(str).str.lower() == 'planned'
+    #         )
+    #         & 
+    #         (
+    #             selected_data_df["BPMS CR (Yes/No)"].astype(str).str.strip().astype(str).str.lower() == 'yes'
+    #         )
+    #     )
+    # ]
+
+    planning_status_norm = ed._norm_series(selected_data_df["Planning Status"])
+    bpms_cr_norm = ed._norm_series(selected_data_df["BPMS CR (Yes/No)"])
+
     selected_data_df = selected_data_df.loc[
-        (
-            (
-                selected_data_df["Planning Status"].astype(str).str.strip().astype(str).str.lower() == 'planned'
-            )
-            & 
-            (
-                selected_data_df["BPMS CR (Yes/No)"].astype(str).str.strip().astype(str).str.lower() == 'yes'
-            )
-        )
+        planning_status_norm.eq("planned") & bpms_cr_norm.eq("yes")
     ]
 
-    to_be_filter_crs = list(cr_wise_status_df["cr_no"].astype(str).str.strip())
+    to_be_filter_crs = list(cr_wise_status_df["cr_no"].astype(str).str.strip().unique())
     selected_data_df = selected_data_df.loc[
         selected_data_df["CR No"].astype(str).str.strip().isin(to_be_filter_crs)
     ]

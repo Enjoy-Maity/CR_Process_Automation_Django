@@ -215,9 +215,11 @@ def sync_selected_date_table(execution_date):
     copy_fields = _sync_fields()  # concrete, assignable columns only
 
     with transaction.atomic(using=DB_MASTER):
-        SelectedDateTable.objects.using(DB_MASTER).filter(
+        table_with_current_selected_date = SelectedDateTable.objects.using(DB_MASTER).filter(
             execution_date=execution_date
-        ).delete()
+        )
+        if table_with_current_selected_date is not None:
+            table_with_current_selected_date.delete()
 
         master_rows = list(  # CHANGED: materialise once (needed for drift guard + build)
             MasterCRDatabase.objects.using(DB_MASTER).filter(
@@ -262,14 +264,14 @@ def _trigger_replica_sync_on_commit(affected_dates):
     #     lambda: call_command('sync_replica'),
     #     using=DB_MASTER
     # )
+    for d in affected_dates:
+        sync_selected_date_table(d)
     def _run_sync():
         try:
             from django.core.management import call_command
             call_command("sync_replica")
         except Exception:
             logger.exception("Replica sync failed after commit")
-    for d in affected_dates:
-        sync_selected_date_table(d)
     transaction.on_commit(_run_sync, using=DB_MASTER)
 
 
@@ -304,7 +306,7 @@ def fetch_region_cr_details(request):
         return JsonResponse({"ok": False, "message": "Date is required."}, status=400)
 
     try:
-        parsed_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+        parsed_date = datetime.strptime(date_str, "%Y-%m-%d").date()  # noqa: DTZ007
     except ValueError:
         return JsonResponse({"ok": False, "message": "Invalid date format."}, status=400)
 
@@ -541,6 +543,7 @@ def save_region_cr_details(request):
     try:
         payload = json.loads(request.body.decode("utf-8"))
         changes = payload.get("changes", [])
+        print(f'\n\n{changes = }')
     except (ValueError, KeyError):
         return JsonResponse(
             {"ok": False, "message": "Invalid request body.", "errors": []},
@@ -563,6 +566,7 @@ def save_region_cr_details(request):
             for item in changes:
                 row_id = item.get("id")
                 raw_fields = item.get("fields", {}) or {}
+                print(f'\n\n{raw_fields = }\n\n')
 
                 if row_id is None:
                     errors.append({"id": None, "message": "Missing row id."})
@@ -627,6 +631,7 @@ def save_region_cr_details(request):
                     .filter(pk=row_id, is_active=True)
                     .first()
                 )
+                # print(f"{row_id = }")
                 if active_obj is None:
                     errors.append({
                         "id": row_id,
@@ -656,7 +661,10 @@ def save_region_cr_details(request):
                 new_obj.id = None          # adjust if your PK isn't 'id'
                 new_obj.is_active = True
 
+                # print(f'{new_obj = }')
                 for field_name, value in sanitised_fields.items():
+                    # print(f'{field_name = }')
+                    # print(f'{value =}\n')
                     setattr(new_obj, field_name, value)
 
                 # No-op unless MasterCRDatabase gains updated_at; kept for future-proofing.

@@ -252,5 +252,17 @@ def selected_date_df_maker(selected_date_data: QuerySet) -> pd.DataFrame:
             if getattr(s.dt, "tz", None) is not None:
                 s = s.dt.tz_convert("Asia/Kolkata").dt.tz_localize(None)
             df[col] = s
-    print(f"selected_date_df = \n{df}")
+    # print(f"selected_date_df = \n{df}")
     return df
+
+
+def _norm_series(series: pd.Series) -> pd.Series:
+    """Normalize text for exact-match filters: strip hidden chars + casefold."""
+    return (
+        series.astype("string")
+        .str.replace("\xa0", " ", regex=False)   # non-breaking space
+        .str.replace("\u200b", "", regex=False)  # zero-width space
+        .str.strip()
+        .str.casefold()
+    )
+

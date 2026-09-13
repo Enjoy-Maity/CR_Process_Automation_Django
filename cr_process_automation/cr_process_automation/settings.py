@@ -1,14 +1,14 @@
 import os
+import sys
 from datetime import datetime
 from pathlib import Path
-import os
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-HOST_DOWNLOAD_DIR = os.getenv(
-     "DJANGO_DOWNLOAD_DIR", 
-    os.path.join(os.path.abspath(os.sep), "PS-Core-Automation")
-)
+# HOST_DOWNLOAD_DIR = os.getenv(
+#      "DJANGO_DOWNLOAD_DIR", 
+#     os.path.join(os.path.abspath(os.sep), "PS-Core-Automation")
+# )
 
 SECRET_KEY = 'django-insecure-change-me'
 DEBUG = True
@@ -163,7 +163,12 @@ X_FRAME_OPTIONS = 'SAMEORIGIN'
 # Read the path from the environment, fallback to a local 'downloads' folder
 HOST_DOWNLOAD_DIR = os.environ.get(
     'DJANGO_DOWNLOAD_DIR', 
-    os.path.join(os.path.abspath(os.sep), "Automation", "PS_Core_Automation", "Task_Wise_Automation")
+    os.path.join(
+        os.path.abspath(os.sep) if sys.platform=='win32' else os.path.expanduser('~'),
+        "Automation", 
+        "PS_Core_Automation", 
+        "Task_Wise_Automation"
+    )
 )
 
 CR_WISE_STATUS_FIELDS = [

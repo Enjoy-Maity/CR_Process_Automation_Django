@@ -22,3 +22,5 @@ logs/
 migrations/
 uv.lock
 pyproject.toml
+*.sqlite3-shm
+*.sqlite3-wal
