@@ -161,6 +161,18 @@ function restoreHomeSessionState() {
             if (westCell) westCell.textContent = savedRow.west_crs ?? "";
             if (eastCell) eastCell.textContent = savedRow.east_crs ?? "";
             if (southCell) southCell.textContent = savedRow.south_crs ?? "";
+            // CHANGED: restore download button state (load-time bridge only).
+            // Guard on `link` skips "Not Applicable" rows (no .js-download-link).
+            // We only reveal a ready button; we never force-hide, so tasks that
+            // became ready server-side still render correctly, and the
+            // dashboard.js poll remains the source of truth afterwards.
+            const link = row.querySelector(".js-download-link");
+            const placeholder = row.querySelector(".js-download-placeholder");
+            if (link && savedRow.download_ready) {
+                if (savedRow.download_url) link.setAttribute("href", savedRow.download_url);
+                link.classList.remove("hidden");
+                if (placeholder) placeholder.classList.add("hidden");
+            }
         });
     }
 

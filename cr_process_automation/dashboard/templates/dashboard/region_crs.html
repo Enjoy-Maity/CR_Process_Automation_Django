@@ -70,8 +70,18 @@ const CAN_EDIT = {{ can_edit_region_crs|yesno:"true,false" }};
 
 const REGION_CR_SESSION_KEY = 'region_crs_page_state';
 
+const HIDDEN_COLUMNS = new Set([
+    'id',
+    'is_active',
+    'version',
+    'parent_reference_id'
+]);
+
+let USER_OPTIONS = [];   // [{ value: 'jdoe', label: 'jdoe' }, ...]
+
 // Generalized editable-field renderer config.
 // Add any field here to control how its editable cell renders.
+
 const FIELD_INPUT_CONFIG = {
     planning_status: {
         type: 'select',
@@ -82,6 +92,41 @@ const FIELD_INPUT_CONFIG = {
             { value: 'discussed', label: 'Discussed' },
         ],
     },
+    activity_executor: {
+        type: 'select',
+        dynamic: 'users',   // marker: pull options from USER_OPTIONS
+        options: [],        // populated after fetchUserOptions()
+    },
+    auditor_name: {
+        type: 'select',
+        dynamic: 'users',   // marker: pull options from USER_OPTIONS
+        options: [],        // populated after fetchUserOptions()
+    },
+    kpi_spoc_night: {
+        type: 'select',
+        dynamic: 'users',   // marker: pull options from USER_OPTIONS
+        options: [],        // populated after fetchUserOptions()
+    },
+    kpi_spoc_morning: {
+        type: 'select',
+        dynamic: 'users',   // marker: pull options from USER_OPTIONS
+        options: [],        // populated after fetchUserOptions()
+    },
+    execution_type:{
+        type: 'select',
+        options: [
+            { value: 'manual', label: 'Manual' },
+            { value: 'automation', label: 'Automation' },
+            {value: 'partial_automation', label: 'Partial Automation' },
+        ],
+    },
+    niam_ticket_required:{
+        type: 'select',
+        options: [
+            { value: 'Yes', label: 'Yes' }, { value: 'No', label: 'No' },
+        ],
+    }
+
     // Example of extending later:
     // service_affecting: { type: 'select', options: [
     //     { value: 'Yes', label: 'Yes' }, { value: 'No', label: 'No' },
@@ -336,7 +381,8 @@ function renderTable(rows) {
     }
 
     const rawColumns = Object.keys(rows[0]);
-    const columns = rawColumns.filter(col => col !== 'id');
+    // const columns = rawColumns.filter(col => col !== 'id');
+    const columns = rawColumns.filter(col => !HIDDEN_COLUMNS.has(col));
     const freezeUntilIndex = columns.indexOf('cr_no');
 
     const leftOffsets = [];
@@ -541,6 +587,8 @@ function fetchAllForDate() {
             applyRegionFilter();
             bindDirtyTracking();
             saveRegionCrSessionState();
+            
+            if (typeof onLoaded === 'function') onLoaded();
         })
         .catch(() => {
             ALL_ROWS = [];
@@ -595,6 +643,23 @@ function clearDirtyHighlights() {
     document.querySelectorAll('.dirty-cell').forEach(cell => cell.classList.remove('dirty-cell'));
 }
 
+function fetchUserOptions() {
+    return fetch(`{% url 'fetch_user_options' %}`)
+        .then(res => res.json())
+        .then(data => {
+            if (!data.ok) return;
+            USER_OPTIONS = (data.users || []).map(u => ({
+                value: u.employee_name,     // must match what the backend stores/validates
+                label: u.employee_name,     // change to a display name if you prefer
+            }));
+            // inject into every config entry marked dynamic:'users'
+            Object.values(FIELD_INPUT_CONFIG).forEach(cfg => {
+                if (cfg.dynamic === 'users') cfg.options = USER_OPTIONS;
+            });
+        })
+        .catch(() => { /* leave options empty on failure */ });
+}
+
 function saveChanges() {
     if (!CAN_EDIT) {
         showStatus('You are not authorized to save changes.', 'error');
@@ -642,13 +707,22 @@ function saveChanges() {
             saveRegionCrSessionState();
 
             const updatedCount = Array.isArray(data.updated_rows) ? data.updated_rows.length : 0;
-
-            if (updatedCount > 0) {
-                const label = updatedCount === 1 ? 'record' : 'records';
-                showStatus(`${updatedCount} ${label} updated successfully.`, 'success');
-            } else {
-                showStatus('Failed to save record.', 'error');
-            }
+            
+            // if (updatedCount > 0) {
+            //     const label = updatedCount === 1 ? 'record' : 'records';
+            //     showStatus(`${updatedCount} ${label} updated successfully.`, 'success');
+            //     fetchAllForDate();
+            // } else {
+            //     showStatus('Failed to save record.', 'error');
+            // }
+                                        // CHANGED: show status after reload
+                if (updatedCount > 0) {
+                    const label = updatedCount === 1 ? 'record' : 'records';
+                    showStatus(`${updatedCount} ${label} updated successfully.`, 'success');
+                    fetchAllForDate();
+                } else {
+                    showStatus('Failed to save record.', 'error');
+                }
         })
         .catch(() => {
             showStatus('Failed to save record.', 'error');
@@ -669,7 +743,10 @@ function bindDirtyTracking() {
 }
 
 setRegionCrDateMin();
-restoreRegionCrSessionState();
+fetchUserOptions().then(() => {
+    restoreRegionCrSessionState();
+});
+
 
 document.querySelectorAll('.region-tab-btn').forEach(btn => {
     btn.addEventListener('click', function () {

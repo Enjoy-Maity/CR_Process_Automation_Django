@@ -26,7 +26,7 @@ os.environ["ITSM_SESSION_FILE"] = os.path.join(
 )
 os.environ["PLAYWRIGHT_BROWSERS_PATH"]=os.path.join(str(root), "pw-browsers")
 # Assume 'root' is already defined
-base_dir = Path(root).parent.joinpath("pw-browsers")
+base_dir = Path(root).joinpath("pw-browsers")
 # print(f"{base_dir = }")
 # 1. Set platform-specific variables
 if sys.platform == "win32":

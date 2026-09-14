@@ -171,6 +171,7 @@ CR_HISTORY_EXPORT_FIELDS_VIEW = [
 ALLOWED_REGION_CR_EDIT_ROLES = {"Admin", "Validator", "Night-SPOC"}
 # Must match the exact values stored in the DB / model choices.
 PLANNING_STATUS_ALLOWED = {"planned", "unplanned", "discussed"}
+USER_EDITABLE_FIELDS = {"activity_executor", "auditor_name", "kpi_spoc_night", "kpi_spoc_morning", }  # add more if needed
 
 
 _COW_BOOKKEEPING = {"id", "is_active", "version", "parent_reference", "parent_reference_id"}
@@ -293,6 +294,7 @@ def cr_history_view(request):
     ctx = _common_context(request)
     ctx["selected_option"] = "cr_history"
     return render(request, "dashboard/cr_history.html", ctx)
+
 
 
 # ────────────────────────────────────────────────────────────────
@@ -616,6 +618,17 @@ def save_region_cr_details(request):
                             break
                         value = normalized  # store canonical form
 
+                    if field_name in USER_EDITABLE_FIELDS and value not in ("", None):
+                        User = get_user_model()
+                        if not User.objects.filter(
+                            is_active=True, employee_name=value
+                        ).exists():
+                            field_error = {
+                                "id": row_id,
+                                "message": f"Invalid user for {field_name}: {value}",
+                            }
+                            break
+
                     sanitised_fields[field_name] = value
 
                 if field_error:
@@ -706,6 +719,7 @@ def save_region_cr_details(request):
                 #         lambda d=d: sync_selected_date_table(d),
                 #         using=DB_MASTER,
                 #     )
+                
 
     except Exception:
         logger.exception("save_region_cr_details failed")

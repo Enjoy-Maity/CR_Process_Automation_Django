@@ -36,6 +36,8 @@ urlpatterns = [
     
     path('cr_wise_status/', CR_Wise_Status_views.cr_wise_status, name='cr_wise_status'),
     path('fetch-cr-wise-status/', CR_Wise_Status_views.fetch_cr_wise_status, name='fetch_cr_wise_status'),
+    # CHANGED: new URL
+    path("fetch-user-options/", views.fetch_user_options, name="fetch_user_options"),
     
     path('api/replica-sync-status/<str:sync_id>/', views.check_replica_sync_status, name='replica_sync_status'),
 ]
