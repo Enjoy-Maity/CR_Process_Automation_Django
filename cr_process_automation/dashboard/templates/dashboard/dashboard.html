@@ -49,8 +49,12 @@
 document.querySelectorAll("[data-dashboard-option]").forEach(button => {
     button.addEventListener("click", function () {
         const option = this.dataset.dashboardOption;
-        const status = document.getElementById("dashboard-option-status");
+        if (option === "vendor_wise") {
+            window.location.href = "{% url 'vendor_dashboard_view' %}";
+            return;
+        }
 
+        const status = document.getElementById("dashboard-option-status");
         const labels = {
             vendor_wise: "Vendor Wise",
             cr_success_rate: "CR Success Rate",

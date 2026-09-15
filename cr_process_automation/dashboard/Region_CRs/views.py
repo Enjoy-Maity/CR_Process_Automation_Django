@@ -975,8 +975,8 @@ def download_cr_history(request):
         "niam_node_type":               "NIAM Node Type",
         "additional_info":              "Additional Info",
         # CoW metadata columns in export
-        "version":                      "Version",
-        "parent_reference_id":          "Parent Reference ID",
+        # "version":                      "Version",
+        # "parent_reference_id":          "Parent Reference ID",
     }
 
     df = df.rename(columns=header_label_map)

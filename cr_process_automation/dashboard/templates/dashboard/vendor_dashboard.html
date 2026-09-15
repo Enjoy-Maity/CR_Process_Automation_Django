@@ -1,0 +1,504 @@
+{% extends "dashboard/base_main.html" %}
+
+{% block main_content %}
+<section class="dashboard-page vendor-dash-page" aria-labelledby="vendor-dash-title">
+
+  <div class="dashboard-page-head">
+    <h2 id="vendor-dash-title" class="dashboard-title">Vendor Wise Dashboard</h2>
+    <p class="dashboard-description">
+      Vendor-level CR distribution, execution outcomes, and automation coverage.
+    </p>
+  </div>
+
+  <!-- Filters (mirrors CR History page: specific date OR a range period) -->
+  <div class="region-filter-panel vendor-filter-panel">
+    <div class="region-filter-row cr-history-filter-row">
+      <div>
+        <label for="vendor-circle-filter" class="region-date-label">Circle:</label>
+        <select id="vendor-circle-filter" class="planning-status-filter">
+          <option value="">All Circles</option>
+        </select>
+      </div>
+
+      <label class="history-date-option">
+        <input type="date" id="vendor-date-filter" class="history-date-input">
+      </label>
+
+      <label class="history-range-option">
+        <input type="checkbox" class="history-range-checkbox" value="1m">
+        <span>Last Month CR</span>
+      </label>
+
+      <label class="history-range-option">
+        <input type="checkbox" class="history-range-checkbox" value="3m">
+        <span>Last 3-Months CR</span>
+      </label>
+
+      <label class="history-range-option">
+        <input type="checkbox" class="history-range-checkbox" value="6m">
+        <span>Last 6-Months CR</span>
+      </label>
+
+      <label class="history-range-option">
+        <input type="checkbox" class="history-range-checkbox" value="12m">
+        <span>Last Year CR</span>
+      </label>
+
+      <button type="button" id="vendor-apply-btn" class="action-btn compact-btn apply-filter-btn">Apply</button>
+      <button type="button" id="vendor-reset-btn" class="action-btn compact-btn">Reset</button>
+    </div>
+  </div>
+
+  <div class="region-cr-status-bar hidden" id="vendor-status-bar"></div>
+
+  <!-- KPI cards -->
+  <div class="vendor-kpi-grid" id="vendor-kpi-grid"></div>
+
+  <!-- Charts grid -->
+  <div class="vendor-charts-grid">
+    <div class="vendor-chart-card">
+      <h3>Outcome Distribution (Overall)</h3>
+      <canvas id="vendor-outcome-donut" height="220"></canvas>
+    </div>
+    <div class="vendor-chart-card">
+      <h3>Automation Coverage (Overall)</h3>
+      <canvas id="vendor-automation-donut" height="220"></canvas>
+    </div>
+
+    <div class="vendor-chart-card vendor-chart-wide">
+      <h3>CRs by Circle &amp; Vendor</h3>
+      <canvas id="vendor-circle-bar" height="220"></canvas>
+    </div>
+
+    <div class="vendor-chart-card vendor-chart-wide">
+      <h3>Vendor Outcome Split (Completed / Rollback / Cancelled)</h3>
+      <canvas id="vendor-outcome-bar" height="220"></canvas>
+    </div>
+
+    <div class="vendor-chart-card vendor-chart-wide">
+      <h3>Automation Split by Vendor</h3>
+      <canvas id="vendor-automation-bar" height="220"></canvas>
+    </div>
+
+    <div class="vendor-chart-card vendor-chart-wide">
+      <h3>Vendor × Circle Heatmap (CR Count)</h3>
+      <div class="vendor-heatmap-wrap">
+        <canvas id="vendor-heatmap"></canvas>
+      </div>
+    </div>
+
+    <div class="vendor-chart-card vendor-chart-wide">
+      <h3>CR Volume by Month (Histogram)</h3>
+      <canvas id="vendor-histogram" height="220"></canvas>
+    </div>
+  </div>
+
+  <!-- Data table -->
+  <div class="region-cr-data-panel">
+    <div class="region-cr-table-meta" id="vendor-table-meta">Loading…</div>
+    <div class="region-cr-scroll-wrap" style="height:auto;max-height:360px;">
+      <table class="region-cr-table" id="vendor-table" style="width:100%;">
+        <thead>
+          <tr>
+            <th>Circle</th><th>Vendor</th><th>Total</th>
+            <th>Completed</th><th>Rollback</th><th>Cancelled</th>
+            <th>Automation</th><th>Partial</th><th>Manual</th>
+          </tr>
+        </thead>
+        <tbody id="vendor-table-body"></tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- Chart.js + matrix (heatmap) plugin -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-chart-matrix@2.0.1/dist/chartjs-chart-matrix.min.js"></script>
+
+<script>
+const VENDOR_DATA_URL = "{% url 'vendor_dashboard_data' %}";
+
+const PALETTE = {
+  completed: '#1f9d55', rollback: '#d97706', cancelled: '#dc2626',
+  automation: '#0a5ea8', partial: '#7c3aed', manual: '#6b7280',
+};
+const VENDOR_COLORS = ['#0a5ea8', '#00A7E1', '#F17720', '#1f9d55', '#7c3aed', '#d97706', '#dc2626'];
+
+let charts = {};
+let VENDOR_SELECTED_RANGE = null;
+let VENDOR_SELECTED_DATE = null;
+
+// Ensure the heatmap controller is registered (idempotent).
+const MATRIX_AVAILABLE = !!(window.MatrixController && window.MatrixElement);
+if (MATRIX_AVAILABLE) {
+  Chart.register(window.MatrixController, window.MatrixElement);
+}
+
+function showStatus(msg, type = 'info') {
+  const bar = document.getElementById('vendor-status-bar');
+  if (!msg) { bar.className = 'region-cr-status-bar hidden'; return; }
+  bar.textContent = msg;
+  bar.className = `region-cr-status-bar status-${type}`;
+}
+
+function destroyChart(key) {
+  if (charts[key]) { charts[key].destroy(); delete charts[key]; }
+}
+
+function renderKPIs(overall) {
+  const grid = document.getElementById('vendor-kpi-grid');
+  const cards = [
+    { label: 'Total CRs', value: overall.total_count, color: '#0a5ea8' },
+    { label: 'Completed', value: overall.completed, color: PALETTE.completed },
+    { label: 'Rollback', value: overall.rollback, color: PALETTE.rollback },
+    { label: 'Cancelled', value: overall.cancelled, color: PALETTE.cancelled },
+    { label: 'Automation', value: overall.automation, color: PALETTE.automation },
+    { label: 'Manual', value: overall.manual, color: PALETTE.manual },
+  ];
+  grid.innerHTML = cards.map(c => `
+    <div class="vendor-kpi-card" style="border-left:5px solid ${c.color}">
+      <div class="vendor-kpi-value">${c.value}</div>
+      <div class="vendor-kpi-label">${c.label}</div>
+    </div>`).join('');
+}
+
+function renderOutcomeDonut(overall) {
+  destroyChart('outcome');
+  charts.outcome = new Chart(document.getElementById('vendor-outcome-donut'), {
+    type: 'doughnut',
+    data: {
+      labels: ['Completed', 'Rollback', 'Cancelled'],
+      datasets: [{
+        data: [overall.completed, overall.rollback, overall.cancelled],
+        backgroundColor: [PALETTE.completed, PALETTE.rollback, PALETTE.cancelled],
+      }],
+    },
+    options: { responsive: true, plugins: { legend: { position: 'bottom' } } },
+  });
+}
+
+function renderAutomationDonut(overall) {
+  destroyChart('autoDonut');
+  charts.autoDonut = new Chart(document.getElementById('vendor-automation-donut'), {
+    type: 'doughnut',
+    data: {
+      labels: ['Automation', 'Partial', 'Manual'],
+      datasets: [{
+        data: [overall.automation, overall.partial_automation, overall.manual],
+        backgroundColor: [PALETTE.automation, PALETTE.partial, PALETTE.manual],
+      }],
+    },
+    options: { responsive: true, plugins: { legend: { position: 'bottom' } } },
+  });
+}
+
+function renderCircleBar(rows) {
+  destroyChart('circleBar');
+  const circles = [...new Set(rows.map(r => r.circle))];
+  const vendors = [...new Set(rows.map(r => r.vendor))];
+  const datasets = vendors.map((v, i) => ({
+    label: v,
+    data: circles.map(c => {
+      const row = rows.find(r => r.circle === c && r.vendor === v);
+      return row ? row.total_count : 0;
+    }),
+    backgroundColor: VENDOR_COLORS[i % VENDOR_COLORS.length],
+  }));
+  charts.circleBar = new Chart(document.getElementById('vendor-circle-bar'), {
+    type: 'bar',
+    data: { labels: circles, datasets },
+    options: {
+      responsive: true,
+      scales: { x: { stacked: true }, y: { stacked: true, beginAtZero: true } },
+      plugins: { legend: { position: 'bottom' } },
+    },
+  });
+}
+
+function renderVendorOutcomeBar(vendorTotals) {
+  destroyChart('outcomeBar');
+  const labels = vendorTotals.map(v => v.vendor);
+  charts.outcomeBar = new Chart(document.getElementById('vendor-outcome-bar'), {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [
+        { label: 'Completed', data: vendorTotals.map(v => v.completed), backgroundColor: PALETTE.completed },
+        { label: 'Rollback', data: vendorTotals.map(v => v.rollback), backgroundColor: PALETTE.rollback },
+        { label: 'Cancelled', data: vendorTotals.map(v => v.cancelled), backgroundColor: PALETTE.cancelled },
+      ],
+    },
+    options: {
+      responsive: true,
+      scales: { x: { stacked: true }, y: { stacked: true, beginAtZero: true } },
+      plugins: { legend: { position: 'bottom' } },
+    },
+  });
+}
+
+function renderAutoBar(vendorTotals) {
+  destroyChart('autoBar');
+  const labels = vendorTotals.map(v => v.vendor);
+  charts.autoBar = new Chart(document.getElementById('vendor-automation-bar'), {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [
+        { label: 'Automation', data: vendorTotals.map(v => v.automation), backgroundColor: PALETTE.automation },
+        { label: 'Partial', data: vendorTotals.map(v => v.partial_automation), backgroundColor: PALETTE.partial },
+        { label: 'Manual', data: vendorTotals.map(v => v.manual), backgroundColor: PALETTE.manual },
+      ],
+    },
+    options: {
+      responsive: true,
+      scales: { x: { stacked: true }, y: { stacked: true, beginAtZero: true } },
+      plugins: { legend: { position: 'bottom' } },
+    },
+  });
+}
+
+function heatColor(value, max) {
+  if (!max) return '#f0f4f8';
+  const t = Math.min(1, value / max);
+  return `rgba(10, 94, 168, ${(0.12 + t * 0.88).toFixed(3)})`;
+}
+
+function renderHeatmapFallback(heatmap) {
+  // Pure-HTML heat table used when the Chart.js matrix plugin could not load.
+  destroyChart('heatmap');
+  const wrap = document.querySelector('.vendor-heatmap-wrap');
+  if (!wrap) return;
+
+  const { vendors, circles, data, max_count: maxCount } = heatmap;
+  const table = document.createElement('table');
+  table.className = 'region-cr-table vendor-heat-row';
+  table.style.fontSize = '12px';
+
+  const thead = document.createElement('thead');
+  const headRow = document.createElement('tr');
+  headRow.insertAdjacentHTML('beforeend', '<th></th>');
+  circles.forEach(c => headRow.insertAdjacentHTML('beforeend', `<th>${c}</th>`));
+  thead.appendChild(headRow);
+  table.appendChild(thead);
+
+  const tbody = document.createElement('tbody');
+  vendors.forEach((v, vi) => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td><b>${v}</b></td>`;
+    circles.forEach((c, ci) => {
+      const count = (data[vi] && data[vi][ci]) || 0;
+      const td = document.createElement('td');
+      td.textContent = count || '';
+      td.style.background = heatColor(count, maxCount);
+      td.style.textAlign = 'center';
+      td.style.color = count > maxCount * 0.55 ? '#fff' : '#111';
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+  wrap.replaceChildren(table);
+}
+
+function renderHeatmap(heatmap) {
+  if (!MATRIX_AVAILABLE) {
+    renderHeatmapFallback(heatmap);
+    return;
+  }
+  destroyChart('heatmap');
+  // Ensure the canvas element exists in the wrapper (fallback may have replaced it).
+  const wrap = document.querySelector('.vendor-heatmap-wrap');
+  if (wrap && !document.getElementById('vendor-heatmap')) {
+    const canvas = document.createElement('canvas');
+    canvas.id = 'vendor-heatmap';
+    wrap.replaceChildren(canvas);
+  }
+  const { vendors, circles, data, max_count: maxCount } = heatmap;
+  const points = [];
+  vendors.forEach((v, vi) => {
+    circles.forEach((c, ci) => {
+      points.push({ x: c, y: v, v: data[vi][ci] || 0 });
+    });
+  });
+
+  charts.heatmap = new Chart(document.getElementById('vendor-heatmap'), {
+    type: 'matrix',
+    data: {
+      datasets: [{
+        label: 'CR count',
+        data: points,
+        borderColor: '#ffffff',
+        borderWidth: 1,
+        backgroundColor(ctx) {
+          const item = ctx.dataset.data[ctx.dataIndex];
+          return heatColor(item.v, maxCount);
+        },
+        width(ctx) {
+          const a = ctx.chart.chartArea;
+          if (!a) return 30;
+          return Math.max(24, (a.right - a.left) / circles.length - 6);
+        },
+        height(ctx) {
+          const a = ctx.chart.chartArea;
+          if (!a) return 30;
+          return Math.max(24, (a.bottom - a.top) / vendors.length - 6);
+        },
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      layout: { padding: 12 },
+      scales: {
+        x: { type: 'category', labels: circles, ticks: { autoSkip: false }, grid: { display: false } },
+        y: { type: 'category', labels: vendors, grid: { display: false } },
+      },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: (ctx) => {
+              const item = ctx.dataset.data[ctx.dataIndex];
+              return `${item.y} / ${item.x}: ${item.v} CR(s)`;
+            },
+          },
+        },
+      },
+    },
+  });
+}
+
+function renderHistogram(monthlySeries) {
+  destroyChart('histogram');
+  const labels = monthlySeries.map(m => m.label);
+  charts.histogram = new Chart(document.getElementById('vendor-histogram'), {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [
+        { label: 'Completed', data: monthlySeries.map(m => m.completed), backgroundColor: PALETTE.completed },
+        { label: 'Rollback', data: monthlySeries.map(m => m.rollback), backgroundColor: PALETTE.rollback },
+        { label: 'Cancelled', data: monthlySeries.map(m => m.cancelled), backgroundColor: PALETTE.cancelled },
+      ],
+    },
+    options: {
+      responsive: true,
+      scales: { x: { stacked: true }, y: { stacked: true, beginAtZero: true } },
+      plugins: { legend: { position: 'bottom' } },
+    },
+  });
+}
+
+function renderTable(rows) {
+  const body = document.getElementById('vendor-table-body');
+  if (!rows.length) {
+    body.innerHTML = `<tr><td colspan="9" class="region-cr-empty-cell">No data.</td></tr>`;
+    return;
+  }
+  body.innerHTML = rows.map(r => `
+    <tr>
+      <td>${r.circle}</td><td>${r.vendor}</td><td>${r.total_count}</td>
+      <td class="status-cell-success">${r.completed}</td>
+      <td class="status-cell-pending">${r.rollback}</td>
+      <td class="status-cell-unsuccessful">${r.cancelled}</td>
+      <td>${r.automation}</td><td>${r.partial_automation}</td><td>${r.manual}</td>
+    </tr>`).join('');
+}
+
+function populateCircleFilter(circles) {
+  const sel = document.getElementById('vendor-circle-filter');
+  const current = sel.value;
+  sel.innerHTML = '<option value="">All Circles</option>' +
+    circles.map(c => `<option value="${c}">${c}</option>`).join('');
+  sel.value = current;
+}
+
+function updateCheckboxState(selectedCheckbox) {
+  const checkboxes = document.querySelectorAll('.history-range-checkbox');
+  checkboxes.forEach(cb => { if (cb !== selectedCheckbox) cb.checked = false; });
+  VENDOR_SELECTED_RANGE = selectedCheckbox && selectedCheckbox.checked ? selectedCheckbox.value : null;
+  checkboxes.forEach(cb => {
+    if (VENDOR_SELECTED_RANGE) cb.disabled = !cb.checked;
+    else cb.disabled = false;
+  });
+}
+
+function safeRender(fn, name) {
+  try { fn(); } catch (e) { console.error('Failed to render ' + name, e); }
+}
+
+async function loadVendorData() {
+  const circle = document.getElementById('vendor-circle-filter').value;
+  const date = document.getElementById('vendor-date-filter').value || VENDOR_SELECTED_DATE;
+  const params = new URLSearchParams();
+  if (circle) params.set('circle', circle);
+  if (date) params.set('date', date);
+  else if (VENDOR_SELECTED_RANGE) params.set('range', VENDOR_SELECTED_RANGE);
+
+  showStatus('Loading dashboard…', 'info');
+  document.getElementById('vendor-table-meta').textContent = 'Loading…';
+
+  try {
+    const res = await fetch(`${VENDOR_DATA_URL}?${params.toString()}`);
+    const data = await res.json();
+    if (!data.ok) { showStatus(data.message || 'Failed to load.', 'error'); return; }
+
+    populateCircleFilter(data.circles);
+    safeRender(() => renderKPIs(data.overall), 'KPIs');
+    safeRender(() => renderOutcomeDonut(data.overall), 'Outcome donut');
+    safeRender(() => renderAutomationDonut(data.overall), 'Automation donut');
+    safeRender(() => renderCircleBar(data.rows), 'Circle×Vendor bar');
+    safeRender(() => renderVendorOutcomeBar(data.vendor_totals), 'Vendor outcome bar');
+    safeRender(() => renderAutoBar(data.vendor_totals), 'Automation split bar');
+    safeRender(() => renderHeatmap(data.heatmap), 'Heatmap');
+    safeRender(() => renderHistogram(data.monthly_series), 'Histogram');
+    renderTable(data.rows);
+
+    document.getElementById('vendor-table-meta').textContent =
+      `Showing ${data.rows.length} circle/vendor group(s) for ${data.filter_label}.`;
+    showStatus('');
+  } catch (e) {
+    console.error(e);
+    showStatus('Error fetching dashboard data.', 'error');
+  }
+}
+
+document.getElementById('vendor-apply-btn').addEventListener('click', loadVendorData);
+document.getElementById('vendor-reset-btn').addEventListener('click', () => {
+  document.getElementById('vendor-circle-filter').value = '';
+  document.getElementById('vendor-date-filter').value = '';
+  VENDOR_SELECTED_DATE = null;
+  VENDOR_SELECTED_RANGE = null;
+  document.querySelectorAll('.history-range-checkbox').forEach(cb => {
+    cb.checked = false;
+    cb.disabled = false;
+  });
+  loadVendorData();
+});
+
+document.getElementById('vendor-date-filter').addEventListener('change', function () {
+  VENDOR_SELECTED_DATE = this.value || null;
+  if (VENDOR_SELECTED_DATE) {
+    document.querySelectorAll('.history-range-checkbox').forEach(cb => {
+      cb.checked = false;
+      cb.disabled = true;
+    });
+    VENDOR_SELECTED_RANGE = null;
+  } else {
+    document.querySelectorAll('.history-range-checkbox').forEach(cb => cb.disabled = false);
+  }
+});
+
+document.querySelectorAll('.history-range-checkbox').forEach(cb => {
+  cb.addEventListener('change', function () {
+    updateCheckboxState(cb);
+    if (!cb.checked) {
+      VENDOR_SELECTED_RANGE = null;
+      document.querySelectorAll('.history-range-checkbox').forEach(item => item.disabled = false);
+    }
+  });
+});
+
+loadVendorData();
+</script>
+{% endblock %}

@@ -2,6 +2,9 @@ from django.urls import path
 from . import views
 from dashboard.Region_CRs import views as Region_views
 from dashboard.CR_Wise_Status import views as CR_Wise_Status_views
+# from dashboard.vendor_dashboard import views as VendorDashboard_views
+from dashboard.vendor_dashboard.views import vendor_dashboard_view, vendor_dashboard_data
+
 
 urlpatterns = [
     path("", views.login_view, name="login"),
@@ -40,4 +43,10 @@ urlpatterns = [
     path("fetch-user-options/", views.fetch_user_options, name="fetch_user_options"),
     
     path('api/replica-sync-status/<str:sync_id>/', views.check_replica_sync_status, name='replica_sync_status'),
+
+
+    #  path('dashboard/vendor-wise/', VendorDashboard_views.vendor_dashboard_view, name='vendor_dashboard'),
+    # path('api/dashboard/vendor-wise-data/', VendorDashboard_views.vendor_dashboard_data, name='vendor_dashboard_data'),
+     path("vendor-dashboard/", vendor_dashboard_view, name="vendor_dashboard_view"),
+    path("api/dashboard/vendor-wise-data/", vendor_dashboard_data, name="vendor_dashboard_data"),
 ]
