@@ -17,7 +17,7 @@ from threading import Event, Thread
 from datetime import datetime, timedelta
 from queue import Queue
 from concurrent.futures import ThreadPoolExecutor
-from dashboard.views import _make_serializable
+from dashboard.views import _make_serializable, _timestamp
 from dashboard.models import MasterCRDatabase, SelectedDateTable, CRWiseStatus
 from dashboard.task_modules.cr_hygiene_checks.tasks import selected_date_df_maker
 from dashboard.task_modules.dependencies.extra_dependencies import cr_wise_status_df_maker, _norm_series

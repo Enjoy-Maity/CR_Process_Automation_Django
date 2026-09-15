@@ -1,5 +1,6 @@
 import logging
 import copy
+from collections import defaultdict
 from django.core.serializers.json import DjangoJSONEncoder
 from pathlib import Path
 from datetime import datetime
@@ -17,7 +18,7 @@ from django.http import JsonResponse, FileResponse, Http404
 from django.shortcuts import render, redirect
 from django.views.decorators.clickjacking import xframe_options_sameorigin
 from django.views.decorators.http import require_GET, require_POST
-from dashboard.models import MasterCRDatabase, SelectedDateTable, CRWiseStatus  # CHANGED: added CRWiseStatus
+from dashboard.models import MasterCRDatabase, SelectedDateTable, CRWiseStatus,UserManagement  # CHANGED: added CRWiseStatus
 from dashboard.views import _common_context
 from django.db import transaction
 from django.views.decorators.csrf import csrf_exempt
@@ -216,10 +217,11 @@ def sync_selected_date_table(execution_date):
     copy_fields = _sync_fields()  # concrete, assignable columns only
 
     with transaction.atomic(using=DB_MASTER):
+        # Delete existing rows for this execution_date to avoid unique constraint violations
         table_with_current_selected_date = SelectedDateTable.objects.using(DB_MASTER).filter(
             execution_date=execution_date
         )
-        if table_with_current_selected_date is not None:
+        if table_with_current_selected_date.exists():
             table_with_current_selected_date.delete()
 
         master_rows = list(  # CHANGED: materialise once (needed for drift guard + build)
@@ -240,10 +242,19 @@ def sync_selected_date_table(execution_date):
             seen.add(cr)
 
         # copy_fields already excludes pk/CoW/reverse fields, so this is safe.
-        model_instances = [SelectedDateTable(**row) for row in master_rows]
+        # Set is_active=True explicitly to avoid any default value issues
+        model_instances = []
+        for row in master_rows:
+            row_data = row.copy()
+            row_data['is_active'] = True
+            model_instances.append(SelectedDateTable(**row_data))
 
         if model_instances:
-            SelectedDateTable.objects.using(DB_MASTER).bulk_create(model_instances)
+            # Use bulk_create with ignore_conflicts to handle any remaining unique constraint issues
+            SelectedDateTable.objects.using(DB_MASTER).bulk_create(
+                model_instances, 
+                ignore_conflicts=True
+            )
 
     logger.info(
         "sync_selected_date_table: rebuilt %d rows for %s",
@@ -261,19 +272,19 @@ def _trigger_replica_sync_on_commit(affected_dates):
     to the replica after the current transaction commits.
     No Redis or Celery required: runs synchronously via call_command.
     """
-    # transaction.on_commit(
-    #     lambda: call_command('sync_replica'),
-    #     using=DB_MASTER
-    # )
-    for d in affected_dates:
-        sync_selected_date_table(d)
     def _run_sync():
         try:
+            # Sync SelectedDateTable for affected dates
+            for d in affected_dates:
+                sync_selected_date_table(d)
+            # Then sync replica
             from django.core.management import call_command
             call_command("sync_replica")
         except Exception:
             logger.exception("Replica sync failed after commit")
-    transaction.on_commit(_run_sync, using=DB_MASTER)
+    
+    if affected_dates:
+        transaction.on_commit(_run_sync, using=DB_MASTER)
 
 
 # ────────────────────────────────────────────────────────────────
@@ -524,12 +535,38 @@ def bootstrap_selected_date_table():
             .filter(is_active=True)
             .values(*copy_fields)
         )
-        instances = [SelectedDateTable(**row) for row in master_rows]
-        if instances:
-            SelectedDateTable.objects.using(DB_MASTER).bulk_create(instances)
+        
+        # Group by execution_date to handle unique constraints properly
+        rows_by_date = defaultdict(list)
+        for row in master_rows:
+            exec_date = row.get('execution_date')
+            if exec_date:
+                rows_by_date[exec_date].append(row)
+        
+        # Process each date separately to avoid unique constraint violations
+        total_created = 0
+        for exec_date, rows in rows_by_date.items():
+            # Ensure no existing records for this date
+            SelectedDateTable.objects.using(DB_MASTER).filter(
+                execution_date=exec_date
+            ).delete()
+            
+            # Create instances with explicit is_active=True
+            instances = []
+            for row in rows:
+                row_data = row.copy()
+                row_data['is_active'] = True
+                instances.append(SelectedDateTable(**row_data))
+            
+            if instances:
+                SelectedDateTable.objects.using(DB_MASTER).bulk_create(
+                    instances, 
+                    ignore_conflicts=True
+                )
+                total_created += len(instances)
 
-    logger.info("bootstrap_selected_date_table: created %d rows", len(instances))
-    return len(instances)
+    logger.info("bootstrap_selected_date_table: created %d rows", total_created)
+    return total_created
 
 
 @require_POST
@@ -619,8 +656,8 @@ def save_region_cr_details(request):
                         value = normalized  # store canonical form
 
                     if field_name in USER_EDITABLE_FIELDS and value not in ("", None):
-                        User = get_user_model()
-                        if not User.objects.filter(
+                        # User = get_user_model()
+                        if not UserManagement.objects.filter(
                             is_active=True, employee_name=value
                         ).exists():
                             field_error = {

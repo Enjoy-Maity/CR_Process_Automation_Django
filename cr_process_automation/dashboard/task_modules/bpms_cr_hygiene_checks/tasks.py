@@ -26,7 +26,7 @@ from queue import Queue
 from concurrent.futures import ThreadPoolExecutor
 from threading import Thread
 from collections import defaultdict
-from dashboard.views import _make_serializable
+from dashboard.views import _make_serializable, _timestamp
 from dashboard.models import MasterCRDatabase, SelectedDateTable, CRWiseStatus
 from django.http import JsonResponse
 from django.conf import settings
