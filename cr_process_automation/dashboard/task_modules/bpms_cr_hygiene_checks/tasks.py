@@ -14,6 +14,7 @@ from dashboard.task_modules.dependencies.extra_dependencies import (
     cr_wise_status_df_maker, 
     sync_replica_task,
     selected_date_df_maker,
+    _norm_series
 )
 from dashboard.task_modules.dependencies.excel_modifier import ExcelModifier
 from dashboard.exceptions import CustomException
@@ -1269,7 +1270,7 @@ def run_task(
     # print(list(selected_date_data))
     
     if selected_date_data:
-        selected_data_df = ed.selected_date_df_maker(selected_date_data)
+        selected_data_df = selected_date_df_maker(selected_date_data)
     
     else:
         # print("Line No. 793")
@@ -1293,11 +1294,11 @@ def run_task(
 
             selected_date_data = SelectedDateTable.objects.filter(execution_date=parsed_date + timedelta(days=1), is_active=True).values(*settings.SELECTED_DATE_TABLE_FIELDS)
             # print(f"{selected_date_data = }")
-        selected_data_df = ed.selected_date_df_maker(selected_date_data)
+        selected_data_df = selected_date_df_maker(selected_date_data)
     
     # print(selected_data_df.columns)
     
-    cr_wise_status_df = ed.cr_wise_status_df_maker(parsed_date)
+    cr_wise_status_df = cr_wise_status_df_maker(parsed_date)
     # cr_wise_status_df = cr_wise_status_df.where(~pd.notna(cr_wise_status_df["CR_Hygiene_Checks"]), "")
     cr_wise_status_df["CR_Hygiene_Checks"].fillna("", inplace=True)
     cr_wise_status_df = cr_wise_status_df.loc[
@@ -1316,8 +1317,8 @@ def run_task(
     #     )
     # ]
 
-    planning_status_norm = ed._norm_series(selected_data_df["Planning Status"])
-    bpms_cr_norm = ed._norm_series(selected_data_df["BPMS CR (Yes/No)"])
+    planning_status_norm = _norm_series(selected_data_df["Planning Status"])
+    bpms_cr_norm = _norm_series(selected_data_df["BPMS CR (Yes/No)"])
 
     selected_data_df = selected_data_df.loc[
         planning_status_norm.eq("planned") & bpms_cr_norm.eq("yes")
