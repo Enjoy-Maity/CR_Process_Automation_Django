@@ -2296,6 +2296,47 @@ def new_page_opener(context: BrowserContext, logs: list) -> Tuple[Page|None, Lis
     return result, logs
 
 
+def fetch_cr_status(page: Page, cr: str, logs: list) -> str:
+    """
+    Reads the CR status from an already-open ITSM CR page.
+
+    Assumes the CR has already been searched/opened (call search_for_cr first).
+
+    NOTE: Replace STATUS_TEXTAREA_XPATH with the real read-only textarea/field
+    XPath that holds the CR status on the ITSM CR page.
+    """
+    # ── PLACEHOLDER: replace with the actual read-only status field XPath ──
+    STATUS_TEXTAREA_XPATH = "//textarea[@id='REPLACE_WITH_STATUS_FIELD_ID']"
+    # ──────────────────────────────────────────────────────────────────────
+
+    status = "Unknown"
+    try:
+        page.wait_for_load_state("domcontentloaded")
+        page.wait_for_load_state("load")
+
+        locator = page.locator(STATUS_TEXTAREA_XPATH)
+        locator.first.wait_for(state="visible", timeout=30000)
+
+        # textarea -> input_value(); if it's a span/div, use inner_text() instead.
+        try:
+            status = locator.first.input_value().strip()
+        except Exception:
+            status = locator.first.inner_text().strip()
+
+        if not status:
+            status = "Unknown"
+
+        logs.append(f"{_timestamp()} -- Fetched status for CR '{cr}': {status}")
+
+    except Exception as e:
+        logs.append(
+            f"{_timestamp()} -- Failed to fetch status for CR '{cr}': "
+            f"{type(e).__name__}: {e}"
+        )
+        status = "Error"
+
+    return status, logs
+
 
 def session_maker(
     logs: list, 
