@@ -74,9 +74,12 @@ DATABASES = {
     }
 }
 
+DB_REPLICA_PATH = BASE_DIR / "db.replica.sqlite3"
+DB_RESTORE_PATH = BASE_DIR / "db.master.sqlite3"
+
 DATABASE_ROUTERS = ['cr_process_automation.routers.CoWRouter',]
 
-BASE_DIR = Path(__file__).resolve().parent.parent
+# BASE_DIR = Path(__file__).resolve().parent.parent
 LOGS_DIR = BASE_DIR / 'logs'
 LOGS_DIR.mkdir(exist_ok=True)  # Create if it doesn't exist
 
