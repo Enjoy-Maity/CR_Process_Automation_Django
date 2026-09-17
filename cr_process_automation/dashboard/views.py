@@ -238,12 +238,12 @@ def cr_planning_view(request):
     return render(request, "dashboard/home.html", _common_context(request))
 
 
-@login_required(login_url="login")
-def night_execution_view(request):
-    """Render night execution page."""
-    ctx = _common_context(request)
-    ctx["selected_option"] = "night_execution"
-    return render(request, "dashboard/night_execution.html", ctx)
+# @login_required(login_url="login")
+# def night_execution_view(request):
+#     """Render night execution page."""
+#     ctx = _common_context(request)
+#     ctx["selected_option"] = "night_execution"
+#     return render(request, "dashboard/night_execution.html", ctx)
 
 
 @login_required(login_url="login")

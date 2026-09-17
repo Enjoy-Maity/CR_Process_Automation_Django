@@ -1,139 +1,31 @@
-{% extends 'dashboard/base_module.html' %}
+{% extends 'dashboard/base_main.html' %}
+{% load static %}
 
-{% block module_content %}
-<div class="content-card compact-content-card">
-    <div class="page-head compact-page-head">
-        <h2 class="module-page-title compact-module-title">Night Execution</h2>
-    </div>
+{% block main_content %}
+<div class="content-card">
+    <h2>Night Execution</h2>
 
-    <div class="region-filter-panel" style="margin-bottom:12px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
-        <div class="region-cr-table-meta">
-            Showing CRs assigned to: {{ user_name }}
-            <span style="font-weight:400;">({{ cr_rows|length }} CR{{ cr_rows|length|pluralize }})</span>
-        </div>
-        <button type="button" id="fetch-cr-status-btn"
-                class="action-btn compact-btn apply-filter-btn">
-            Fetch CR Status
-        </button>
-    </div>
-
-    <div id="ne-status-bar" class="region-cr-status-bar hidden"></div>
-
-    <div class="region-cr-data-panel">
-        <div class="region-cr-scroll-wrap">
-            <table class="region-cr-table">
-                <thead>
-                    <tr>
-                        <th class="sticky-col sticky-corner" style="left:0;">CR No</th>
-                        <th>Activity Description</th>
-                        <th>Circle</th>
-                        <th>Region</th>
-                        <th>CR Status</th>
-                        {% for col in task_columns %}
-                            <th>{{ col.label }}</th>
-                        {% endfor %}
-                    </tr>
-                </thead>
-                <tbody>
-                {% for row in cr_rows %}
-                    <tr data-cr-no="{{ row.cr_no }}">
-                        <td class="sticky-col" style="left:0;font-weight:700;">{{ row.cr_no }}</td>
-                        <td style="white-space:normal;max-width:280px;text-align:left;">{{ row.activity_description }}</td>
-                        <td>{{ row.circle }}</td>
-                        <td>{{ row.region }}</td>
-                        <td class="js-cr-status status-badge compact-status">—</td>
-                        {% for col in task_columns %}
-                            <td>
-                                <button type="button"
-                                        class="action-btn start-btn compact-btn ne-start-task"
-                                        data-cr-no="{{ row.cr_no }}"
-                                        data-task-key="{{ col.key }}">
-                                    Start
-                                </button>
-                            </td>
-                        {% endfor %}
-                    </tr>
-                {% empty %}
-                    <tr>
-                        <td colspan="{{ task_columns|length|add:5 }}" class="region-cr-empty-cell">
-                            No CRs assigned to you.
-                        </td>
-                    </tr>
+    <table class="cr-table">
+        <thead>
+            <tr>
+                {% for col in task_columns %}
+                    <th>{{ col.label }}</th>
                 {% endfor %}
-                </tbody>
-            </table>
-        </div>
-    </div>
+            </tr>
+        </thead>
+        <tbody>
+            {% for row in cr_rows %}
+                <tr>
+                    {% for col in task_columns %}
+                        <td>{{ row|default:"" }}</td>
+                    {% endfor %}
+                </tr>
+            {% empty %}
+                <tr><td colspan="{{ task_columns|length }}">No CRs available.</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
 </div>
 
-<script>
-(function () {
-    const statusClass = {
-        "Completed":   "status-cell-success",
-        "Successful":  "status-cell-success",
-        "Pending":     "status-cell-pending",
-        "In Progress": "status-cell-pending",
-        "Failed":      "status-cell-unsuccessful",
-        "Unsuccessful":"status-cell-unsuccessful",
-    };
-
-    function showBar(message, type) {
-        const bar = document.getElementById("ne-status-bar");
-        if (!bar) return;
-        bar.textContent = message;
-        bar.className = "region-cr-status-bar status-" + (type || "info");
-    }
-
-    function applyStatuses(statuses) {
-        document.querySelectorAll("tr[data-cr-no]").forEach(row => {
-            const crNo = row.dataset.crNo;
-            const cell = row.querySelector(".js-cr-status");
-            if (!cell) return;
-
-            const status = (statuses && statuses[crNo]) ? statuses[crNo] : "—";
-            cell.textContent = status;
-            cell.className = "js-cr-status status-badge compact-status";
-            const cls = statusClass[status];
-            if (cls) cell.classList.add(cls);
-        });
-    }
-
-    // ── Fetch CR Status (wrapper endpoint) ──
-    const fetchBtn = document.getElementById("fetch-cr-status-btn");
-    if (fetchBtn) {
-        fetchBtn.addEventListener("click", async function () {
-            fetchBtn.disabled = true;
-            fetchBtn.textContent = "Fetching...";
-            showBar("Fetching CR statuses...", "info");
-            try {
-                const resp = await fetch("{% url 'fetch_night_cr_status' %}");
-                const data = await resp.json();
-                if (!resp.ok || !data.ok) {
-                    showBar(data.message || "Failed to fetch CR statuses.", "error");
-                    return;
-                }
-                applyStatuses(data.statuses || {});
-                showBar("CR statuses updated.", "success");
-            } catch (err) {
-                console.error(err);
-                showBar("Error fetching CR statuses.", "error");
-            } finally {
-                fetchBtn.disabled = false;
-                fetchBtn.textContent = "Fetch CR Status";
-            }
-        });
-    }
-
-    // ── Per-task Start buttons ──
-    document.querySelectorAll(".ne-start-task").forEach(btn => {
-        btn.addEventListener("click", function () {
-            const crNo = btn.dataset.crNo;
-            const taskKey = btn.dataset.taskKey;
-            console.log(`Start task: CR=${crNo}, task=${taskKey}`);
-            // TODO: POST to your task-trigger endpoint here.
-        });
-    });
-})();
-</script>
+<script src="{% static 'dashboard/js/night_execution.js' %}"></script>
 {% endblock %}
-

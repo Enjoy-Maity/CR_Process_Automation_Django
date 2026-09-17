@@ -66,17 +66,36 @@ def night_execution(request):
     # Replace with however you resolve the CRs assigned to the user.
     cr_numbers = request.session.get("assigned_crs", [])
 
+    # context = {
+    #     "tasks": NIGHT_EXECUTION_TASKS,
+    #     "crs": cr_numbers,
+    # }
+    # return render(request, "nightexecution.html", context)
+
+    # Template iterates row.cr_no, row.activity_description, row.circle, row.region
+    cr_rows = [
+        {"cr_no": cr, "activity_description": "", "circle": "", "region": ""}
+        for cr in cr_numbers
+    ]
+
     context = {
-        "tasks": NIGHT_EXECUTION_TASKS,
-        "crs": cr_numbers,
+        "page_title": "Night Execution",
+        "selected_option": "night_execution",
+        "task_columns": NIGHT_EXECUTION_TASKS,
+        "cr_rows": cr_rows,
+        "user_name": (request.user.get_full_name() or request.user.username)
+                     if request.user.is_authenticated else "Guest",
+        "user_role": getattr(request.user, "role", "") if request.user.is_authenticated else "",
+        "running_task": "",
+        "task_logs": [],
     }
-    return render(request, "nightexecution.html", context)
+    return render(request, "dashboard/night_execution.html", context)
 
 
 # ── Start a status-fetch job (background thread) ────────────────────────────
 # @login_required
 @require_POST
-def start_night_cr_status(request):
+def fetch_night_cr_status(request):
     """
     Starts a background ITSM status fetch and returns a job_id immediately.
 

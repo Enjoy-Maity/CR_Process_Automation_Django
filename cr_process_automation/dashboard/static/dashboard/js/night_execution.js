@@ -1,82 +1,14 @@
-{% extends 'dashboard/base_main.html' %}
-{% load static %}
-
-{% block main_content %}
-<div class="content-card compact-content-card">
-    <div class="page-head compact-page-head">
-        <h2 class="module-page-title compact-module-title">Night Execution</h2>
-    </div>
-
-    <div class="region-filter-panel" style="margin-bottom:12px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
-        <div class="region-cr-table-meta">
-            Showing CRs assigned to: {{ user_name }}
-            <span style="font-weight:400;">({{ cr_rows|length }} CR{{ cr_rows|length|pluralize }})</span>
-        </div>
-        <button type="button" id="fetch-cr-status-btn" class="action-btn compact-btn apply-filter-btn">
-            Fetch CR Status
-        </button>
-    </div>
-
-    <div id="ne-status-bar" class="region-cr-status-bar hidden"></div>
-
-    <div class="region-cr-data-panel">
-        <div class="region-cr-scroll-wrap">
-            <table class="region-cr-table">
-                <thead>
-                    <tr>
-                        <th class="sticky-col sticky-corner" style="left:0;">CR No</th>
-                        <th>Activity Description</th>
-                        <th>Circle</th>
-                        <th>Region</th>
-                        <th>CR Status</th>
-                        {% for col in task_columns %}
-                            <th>{{ col.label }}</th>
-                        {% endfor %}
-                    </tr>
-                </thead>
-                <tbody>
-                {% for row in cr_rows %}
-                    <tr data-cr-no="{{ row.cr_no }}">
-                        <td class="sticky-col" style="left:0;font-weight:700;">{{ row.cr_no }}</td>
-                        <td style="white-space:normal;max-width:280px;text-align:left;">{{ row.activity_description }}</td>
-                        <td>{{ row.circle }}</td>
-                        <td>{{ row.region }}</td>
-                        <td class="js-cr-status status-badge compact-status">—</td>
-                        {% for col in task_columns %}
-                            <td>
-                                <button type="button"
-                                        class="action-btn start-btn compact-btn ne-start-task"
-                                        data-cr-no="{{ row.cr_no }}"
-                                        data-task-key="{{ col.key }}">
-                                    Start
-                                </button>
-                            </td>
-                        {% endfor %}
-                    </tr>
-                {% empty %}
-                    <tr>
-                        <td colspan="{{ task_columns|length|add:5 }}" class="region-cr-empty-cell">
-                            No CRs assigned to you.
-                        </td>
-                    </tr>
-                {% endfor %}
-                </tbody>
-            </table>
-        </div>
-    </div>
-</div>
-
-<script>
 (function () {
     "use strict";
 
+    // ── Config ──────────────────────────────────────────────────────────
     const POLL_INTERVAL_MS = 2000;
-    const MAX_POLL_ATTEMPTS = 150;
+    const MAX_POLL_ATTEMPTS = 150;  // ~5 minutes at 2s; adjust as needed
     const CSRF_TOKEN = "{{ csrf_token }}";
     const USER_EMAIL = "{{ user_email|default:'' }}";
 
     const START_URL  = "{% url 'start_night_cr_status' %}";
-    const RESULT_URL = "{% url 'night_cr_status_result' %}";
+    const RESULT_URL  = "{% url 'night_cr_status_result' %}";
 
     const statusClass = {
         "Completed":    "status-cell-success",
@@ -87,6 +19,7 @@
         "Unsuccessful": "status-cell-unsuccessful",
     };
 
+    // ── Helpers ─────────────────────────────────────────────────────────
     function showBar(message, type) {
         const bar = document.getElementById("ne-status-bar");
         if (!bar) return;
@@ -105,6 +38,7 @@
             const crNo = row.dataset.crNo;
             const cell = row.querySelector(".js-cr-status");
             if (!cell) return;
+
             const status = (statuses && statuses[crNo]) ? statuses[crNo] : "—";
             cell.textContent = status;
             cell.className = "js-cr-status status-badge compact-status";
@@ -117,6 +51,7 @@
         return new Promise(res => setTimeout(res, ms));
     }
 
+    // ── Fetch CR Status (start job + poll for result) ───────────────────
     const fetchBtn = document.getElementById("fetch-cr-status-btn");
     if (fetchBtn) {
         fetchBtn.addEventListener("click", async function () {
@@ -131,13 +66,17 @@
             showBar("Starting CR status fetch...", "info");
 
             try {
+                // 1) Start the background job.
                 const startResp = await fetch(START_URL, {
                     method: "POST",
                     headers: {
                         "Content-Type": "application/json",
                         "X-CSRFToken": CSRF_TOKEN,
                     },
-                    body: JSON.stringify({ cr_numbers: crNumbers, user_email: USER_EMAIL }),
+                    body: JSON.stringify({
+                        cr_numbers: crNumbers,
+                        user_email: USER_EMAIL,
+                    }),
                 });
                 const startData = await startResp.json();
                 if (!startResp.ok || !startData.ok) {
@@ -148,6 +87,7 @@
                 const jobId = startData.job_id;
                 const resultUrl = RESULT_URL + "?job_id=" + encodeURIComponent(jobId);
 
+                // 2) Poll for the result.
                 for (let attempt = 0; attempt < MAX_POLL_ATTEMPTS; attempt++) {
                     const r = await fetch(resultUrl);
                     const d = await r.json();
@@ -156,6 +96,11 @@
                         showBar(d.message || "Polling failed.", "error");
                         return;
                     }
+
+                    // NOTE: If d.password_required / d.otp_required are true, this
+                    // is where you would raise your password/OTP iframe so the
+                    // user can satisfy the prompt. The Playwright thread blocks
+                    // until submit_night_password / submit_night_otp fires.
 
                     showBar(d.status || "Working...", "info");
 
@@ -169,6 +114,7 @@
                     await sleep(POLL_INTERVAL_MS);
                 }
 
+                // Timed out without completion.
                 showBar("Timed out waiting for CR statuses.", "error");
 
             } catch (err) {
@@ -181,6 +127,7 @@
         });
     }
 
+    // ── Per-task Start buttons ──────────────────────────────────────────
     document.querySelectorAll(".ne-start-task").forEach(btn => {
         btn.addEventListener("click", function () {
             const crNo = btn.dataset.crNo;
@@ -190,6 +137,3 @@
         });
     });
 })();
-</script>
-{% endblock %}
-

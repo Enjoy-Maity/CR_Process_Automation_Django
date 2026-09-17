@@ -14,7 +14,7 @@ urlpatterns = [
     # path("*logout/", views.logout_view, name="logout"),
     path("home/", views.cr_planning_view, name="cr_planning"),
     path("dashboard/", views.dashboard_view, name="dashboard"),
-    path('night-execution/', views.night_execution_view, name='night_execution'),
+    # path('night-execution/', views.night_execution_view, name='night_execution'),
     path('night-spoc/', views.night_spoc_view, name='night_spoc'),
     path('region-crs/', Region_views.region_crs_view, name='region_crs'),
     path('cr_history/', Region_views.cr_history_view, name='cr_history'),
@@ -51,6 +51,11 @@ urlpatterns = [
     path("vendor-dashboard/", vendor_dashboard_view, name="vendor_dashboard_view"),
     path("api/dashboard/vendor-wise-data/", vendor_dashboard_data, name="vendor_dashboard_data"),
 
-    path('night-execution/', NightExecution_views.night_execution_view, name='night_execution'),
+    path('night-execution/', NightExecution_views.night_execution, name='night_execution'),
     path('night-execution/fetch-cr-status/', NightExecution_views.fetch_night_cr_status, name='fetch_night_cr_status'),
+
+    # path('night-execution/start-status/', NightExecution_views.start_night_cr_status, name='start_night_cr_status'),
+    path('night-execution/status-result/', NightExecution_views.night_cr_status_result, name='night_cr_status_result'),
+    path('night-execution/submit-password/', NightExecution_views.submit_night_password, name='submit_night_password'),
+    path('night-execution/submit-otp/', NightExecution_views.submit_night_otp, name='submit_night_otp'),
 ]
