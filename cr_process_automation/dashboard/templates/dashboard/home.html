@@ -229,11 +229,10 @@ document.getElementById("apply_region_filter_btn").addEventListener("click", fun
 restoreHomeSessionState();
 </script>
 <!-- Auth / Password / OTP overlay -->
-<div id="auth-overlay" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.6); z-index: 1050; align-items: center; justify-content: center; backdrop-filter: blur(3px);">
-    <div class="auth-modal" style="background: white; padding: 20px; border-radius: 8px; box-shadow: 0 10px 25px rgba(0,0,0,0.2); position: relative; width: 450px; max-width: 90%;">
-        <!-- ✅ Use closeAuthIframe() so JS tracking vars reset (modal can re-open on next poll) -->
-        <button type="button" onclick="closeAuthIframe()" style="position: absolute; top: 12px; right: 15px; background: none; border: none; font-size: 20px; cursor: pointer; color: #666; z-index: 2;">&times;</button>
-        <iframe id="auth-iframe" src="" width="100%" height="320" frameborder="0"></iframe>
+<div id="auth-overlay" class="auth-overlay" style="display: none;" aria-hidden="true">
+    <div class="auth-modal" role="dialog" aria-modal="true">
+        <button type="button" class="auth-modal-close" onclick="closeAuthIframe()" aria-label="Close">&times;</button>
+        <iframe id="auth-iframe" title="ITSM authentication" src=""></iframe>
     </div>
 </div>
 {% endblock %}

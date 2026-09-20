@@ -334,6 +334,12 @@ input {
     justify-content: center;
 }
 
+.action-btn:disabled {
+    background: #9ca3af;
+    cursor: not-allowed;
+    opacity: 0.6;
+}
+
 .start-btn {
     background: #2563eb;
 }
@@ -1191,6 +1197,90 @@ textarea {
 
 .planning-sort-btn:hover {
     background: #6d28d9;
+}
+
+/* Secondary button styling for better visibility */
+.action-btn.planning-sort-btn {
+    background: #7c3aed;
+    border: 2px solid #6d28d9;
+}
+
+.action-btn.planning-sort-btn:hover {
+    background: #6d28d9;
+}
+
+.action-btn.planning-sort-btn:disabled {
+    background: #9ca3af;
+    border-color: #9ca3af;
+    cursor: not-allowed;
+    opacity: 0.6;
+}
+
+/* Night Execution Page Styles - Using existing design system */
+.task-status-icons {
+    display: inline-flex;
+    gap: 4px;
+    margin-left: 4px;
+}
+
+.task-icon {
+    font-size: 14px;
+    font-weight: 700;
+}
+
+.task-success {
+    color: var(--success);
+}
+
+.task-failed {
+    color: var(--danger);
+}
+
+.auth-overlay {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(15, 35, 60, 0.45);
+    z-index: 1050;
+    align-items: center;
+    justify-content: center;
+}
+
+.auth-modal {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    position: relative;
+    width: 400px;
+    max-width: 92%;
+    overflow: hidden;
+}
+
+.auth-modal iframe {
+    display: block;
+    width: 100%;
+    height: 250px;
+    border: 0;
+    background: var(--surface);
+}
+
+.auth-modal-close {
+    position: absolute;
+    top: 8px;
+    right: 10px;
+    background: none;
+    border: none;
+    font-size: 22px;
+    line-height: 1;
+    cursor: pointer;
+    color: var(--muted);
+    z-index: 2;
+}
+
+.auth-modal-close:hover {
+    color: var(--text);
 }
 
 

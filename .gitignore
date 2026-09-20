@@ -4,6 +4,7 @@
 /venv
 .env
 .vscode/
+.continue/
 .gitignore
 .python-version
 *.toml

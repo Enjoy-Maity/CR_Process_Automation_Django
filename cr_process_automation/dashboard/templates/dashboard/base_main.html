@@ -1,195 +1,68 @@
-{% extends 'dashboard/base_main.html' %}
 {% load static %}
+<link rel="stylesheet" href="{% static 'css/style.css' %}">
+<script src="{% static 'js/dashboard.js' %}"></script>
 
-{% block main_content %}
-<div class="content-card compact-content-card">
-    <div class="page-head compact-page-head">
-        <h2 class="module-page-title compact-module-title">Night Execution</h2>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ page_title }}</title>
+    <link rel="stylesheet" href="{% static 'dashboard/css/style.css' %}">
+</head>
+<body data-selected-option="{{ selected_option }}">
+    <a class="skip-link" href="#main-content">Skip to content</a>
+    <div class="app-shell">
+        <header class="top-header">
+            <div class="header-left">
+                <nav class="top-nav" aria-label="Primary">
+                     <a href="{% url 'cr_planning' %}" class="{% if selected_option == 'cr_planning' %}active{% endif %}">Home</a>
+                    <a href="{% url 'dashboard' %}" class="{% if selected_option == 'dashboard' %}active{% endif %}">Dashboard</a>
+                    <a href="#">Contact us</a>
+                </nav>
+            </div>
+
+            <div class="header-center">
+                <h1 class="app-main-title">CR Process Automation (PS-CORE)</h1>
+            </div>
+
+            <div class="header-right">
+                <div class="user-summary">
+                    <span class="user-summary-text">{{ user_name }}</span>
+                    <span class="user-summary-separator">|</span>
+                    <span class="user-summary-text">{{ user_role }}</span>
+                </div>
+                <a href="{% url 'logout' %}" class="logout-btn">Logout</a>
+            </div>
+        </header>
+
+        <main id="main-content" class="content-area">
+            {% block main_content %}{% endblock %}
+        </main>
+
+        <footer class="bottom-footer">
+            <section class="footer-panel">
+                <h3>Running Task</h3>
+                <div class="panel-body running-task-box" id="running-task-box">{{ running_task }}</div>
+            </section>
+
+            <section class="footer-panel footer-panel-wide">
+                <h3>Task Log Events</h3>
+                <div class="panel-body task-log-box" id="task-log-box">
+                    {% if task_logs %}
+                        <ul class="log-list">
+                            {% for log in task_logs %}
+                                <li><span class="log-message">{{ log.message|default:log }}</span></li>
+                            {% endfor %}
+                        </ul>
+                    {% else %}
+                        <p>No log events available.</p>
+                    {% endif %}
+                </div>
+            </section>
+        </footer>
     </div>
 
-    <div class="region-filter-panel" style="margin-bottom:12px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
-        <div class="region-cr-table-meta">
-            Showing CRs assigned to: {{ user_name }}
-            <span style="font-weight:400;">({{ cr_rows|length }} CR{{ cr_rows|length|pluralize }})</span>
-        </div>
-        <button type="button" id="fetch-cr-status-btn" class="action-btn compact-btn apply-filter-btn">
-            Fetch CR Status
-        </button>
-    </div>
-
-    <div id="ne-status-bar" class="region-cr-status-bar hidden"></div>
-
-    <div class="region-cr-data-panel">
-        <div class="region-cr-scroll-wrap">
-            <table class="region-cr-table">
-                <thead>
-                    <tr>
-                        <th class="sticky-col sticky-corner" style="left:0;">CR No</th>
-                        <th>Activity Description</th>
-                        <th>Circle</th>
-                        <th>Region</th>
-                        <th>CR Status</th>
-                        {% for col in task_columns %}
-                            <th>{{ col.label }}</th>
-                        {% endfor %}
-                    </tr>
-                </thead>
-                <tbody>
-                {% for row in cr_rows %}
-                    <tr data-cr-no="{{ row.cr_no }}">
-                        <td class="sticky-col" style="left:0;font-weight:700;">{{ row.cr_no }}</td>
-                        <td style="white-space:normal;max-width:280px;text-align:left;">{{ row.activity_description }}</td>
-                        <td>{{ row.circle }}</td>
-                        <td>{{ row.region }}</td>
-                        <td class="js-cr-status status-badge compact-status">—</td>
-                        {% for col in task_columns %}
-                            <td>
-                                <button type="button"
-                                        class="action-btn start-btn compact-btn ne-start-task"
-                                        data-cr-no="{{ row.cr_no }}"
-                                        data-task-key="{{ col.key }}">
-                                    Start
-                                </button>
-                            </td>
-                        {% endfor %}
-                    </tr>
-                {% empty %}
-                    <tr>
-                        <td colspan="{{ task_columns|length|add:5 }}" class="region-cr-empty-cell">
-                            No CRs assigned to you.
-                        </td>
-                    </tr>
-                {% endfor %}
-                </tbody>
-            </table>
-        </div>
-    </div>
-</div>
-
-<script>
-(function () {
-    "use strict";
-
-    const POLL_INTERVAL_MS = 2000;
-    const MAX_POLL_ATTEMPTS = 150;
-    const CSRF_TOKEN = "{{ csrf_token }}";
-    const USER_EMAIL = "{{ user_email|default:'' }}";
-
-    const START_URL  = "{% url 'start_night_cr_status' %}";
-    const RESULT_URL = "{% url 'night_cr_status_result' %}";
-
-    const statusClass = {
-        "Completed":    "status-cell-success",
-        "Successful":   "status-cell-success",
-        "Pending":      "status-cell-pending",
-        "In Progress":  "status-cell-pending",
-        "Failed":       "status-cell-unsuccessful",
-        "Unsuccessful": "status-cell-unsuccessful",
-    };
-
-    function showBar(message, type) {
-        const bar = document.getElementById("ne-status-bar");
-        if (!bar) return;
-        bar.textContent = message;
-        bar.className = "region-cr-status-bar status-" + (type || "info");
-    }
-
-    function collectCrNumbers() {
-        return Array.from(document.querySelectorAll("tr[data-cr-no]"))
-            .map(row => row.dataset.crNo)
-            .filter(Boolean);
-    }
-
-    function applyStatuses(statuses) {
-        document.querySelectorAll("tr[data-cr-no]").forEach(row => {
-            const crNo = row.dataset.crNo;
-            const cell = row.querySelector(".js-cr-status");
-            if (!cell) return;
-            const status = (statuses && statuses[crNo]) ? statuses[crNo] : "—";
-            cell.textContent = status;
-            cell.className = "js-cr-status status-badge compact-status";
-            const cls = statusClass[status];
-            if (cls) cell.classList.add(cls);
-        });
-    }
-
-    function sleep(ms) {
-        return new Promise(res => setTimeout(res, ms));
-    }
-
-    const fetchBtn = document.getElementById("fetch-cr-status-btn");
-    if (fetchBtn) {
-        fetchBtn.addEventListener("click", async function () {
-            const crNumbers = collectCrNumbers();
-            if (crNumbers.length === 0) {
-                showBar("No CRs to fetch.", "error");
-                return;
-            }
-
-            fetchBtn.disabled = true;
-            fetchBtn.textContent = "Fetching...";
-            showBar("Starting CR status fetch...", "info");
-
-            try {
-                const startResp = await fetch(START_URL, {
-                    method: "POST",
-                    headers: {
-                        "Content-Type": "application/json",
-                        "X-CSRFToken": CSRF_TOKEN,
-                    },
-                    body: JSON.stringify({ cr_numbers: crNumbers, user_email: USER_EMAIL }),
-                });
-                const startData = await startResp.json();
-                if (!startResp.ok || !startData.ok) {
-                    showBar(startData.message || "Failed to start fetch.", "error");
-                    return;
-                }
-
-                const jobId = startData.job_id;
-                const resultUrl = RESULT_URL + "?job_id=" + encodeURIComponent(jobId);
-
-                for (let attempt = 0; attempt < MAX_POLL_ATTEMPTS; attempt++) {
-                    const r = await fetch(resultUrl);
-                    const d = await r.json();
-
-                    if (!r.ok || !d.ok) {
-                        showBar(d.message || "Polling failed.", "error");
-                        return;
-                    }
-
-                    showBar(d.status || "Working...", "info");
-
-                    if (d.done) {
-                        const statuses = (d.payload && d.payload.statuses) || {};
-                        applyStatuses(statuses);
-                        showBar("CR statuses updated.", "success");
-                        return;
-                    }
-
-                    await sleep(POLL_INTERVAL_MS);
-                }
-
-                showBar("Timed out waiting for CR statuses.", "error");
-
-            } catch (err) {
-                console.error(err);
-                showBar("Error fetching CR statuses.", "error");
-            } finally {
-                fetchBtn.disabled = false;
-                fetchBtn.textContent = "Fetch CR Status";
-            }
-        });
-    }
-
-    document.querySelectorAll(".ne-start-task").forEach(btn => {
-        btn.addEventListener("click", function () {
-            const crNo = btn.dataset.crNo;
-            const taskKey = btn.dataset.taskKey;
-            console.log(`Start task: CR=${crNo}, task=${taskKey}`);
-            // TODO: POST to your task-trigger endpoint here.
-        });
-    });
-})();
-</script>
-{% endblock %}
-
+    <script src="{% static 'dashboard/js/dashboard.js' %}"></script>
+</body>
+</html>

@@ -1,30 +1,65 @@
-{% extends 'dashboard/base_main.html' %}
+{% extends 'dashboard/base_module.html' %}
 {% load static %}
 
-{% block main_content %}
-<div class="content-card">
-    <h2>Night Execution</h2>
+{% block module_content %}
+{% csrf_token %}
+<div class="content-card compact-content-card">
+    <div class="page-head compact-page-head">
+        <h2 class="module-page-title compact-module-title">Night Execution</h2>
+    </div>
 
-    <table class="cr-table">
-        <thead>
-            <tr>
-                {% for col in task_columns %}
-                    <th>{{ col.label }}</th>
-                {% endfor %}
-            </tr>
-        </thead>
-        <tbody>
-            {% for row in cr_rows %}
+    <div id="ne-status-bar" class="region-cr-status-bar" style="display: none;"></div>
+
+    <div class="region-filter-panel" style="margin-bottom:16px;padding:14px;border:1px solid #d5dde8;border-radius:10px;background:#f7f9fc;">
+        <div style="margin-bottom:12px;">
+            <span class="cr-history-filter-label">Note:- Select Date to fetch CRs assigned to you.</span>
+        </div>  
+        <div style="display:flex;gap:20px;align-items:center;flex-wrap:wrap;">
+            <div>
+                <label for="execution-date" style="font-weight:700;margin-right:8px;">Date:</label>
+                <input type="date" id="execution-date" name="execution-date" style="padding:5px 8px;border:1px solid #d5dde8;border-radius:5px;font-size:12px;">
+            </div>
+            <div style="display:flex;gap:12px;">
+                <button id="fetch-crs-btn" class="action-btn compact-btn apply-filter-btn">Fetch CRs</button>
+                <button id="fetch-cr-status-btn" class="action-btn compact-btn planning-sort-btn">Fetch CR Status</button>
+            </div>
+        </div> 
+    </div>
+
+    <div id="cr-table-container" class="table-wrap compact-table-wrap" style="display: none;">
+        <table class="task-table compact-task-table ultra-compact-task-table" id="night-execution-table">
+            <thead>
                 <tr>
-                    {% for col in task_columns %}
-                        <td>{{ row|default:"" }}</td>
-                    {% endfor %}
+                    <th>S No</th>
+                    <th>CR No</th>
+                    <th>Circle</th>
+                    <th>Activity Title</th>
+                    <th>Change Responsible</th>
+                    <th>CR Status</th>
+                    <th>Automation Template</th>
+                    <th>Activity HC</th>
+                    <th>Activity CLI</th>
+                    <th>CR Implementation Task</th>
+                    <th>CR Closure</th>
                 </tr>
-            {% empty %}
-                <tr><td colspan="{{ task_columns|length }}">No CRs available.</td></tr>
-            {% endfor %}
-        </tbody>
-    </table>
+            </thead>
+            <tbody id="cr-table-body">
+                <!-- CR rows will be dynamically inserted here -->
+            </tbody>
+        </table>
+    </div>
+
+    <div id="no-crs-message" style="display: none; text-align:center; padding:40px; color:var(--muted); font-weight:700;">
+        <p>No CRs found for the selected date and logged-in user.</p>
+    </div>
+</div>
+
+<!-- Auth / Password / OTP overlay -->
+<div id="auth-overlay" class="auth-overlay" style="display: none;" aria-hidden="true">
+    <div class="auth-modal" role="dialog" aria-modal="true" aria-labelledby="auth-iframe">
+        <button type="button" class="auth-modal-close" id="auth-modal-close" aria-label="Close">&times;</button>
+        <iframe id="auth-iframe" title="ITSM authentication" src=""></iframe>
+    </div>
 </div>
 
 <script src="{% static 'dashboard/js/night_execution.js' %}"></script>

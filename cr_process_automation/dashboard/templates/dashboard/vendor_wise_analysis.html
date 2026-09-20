@@ -1,0 +1,1177 @@
+{% extends "dashboard/base_module.html" %}
+
+{% block module_content %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.6/dist/chart.umd.min.js"></script>
+
+<style>
+    .vendor-analysis-page {
+        width: 100%;
+        padding: 10px 14px 24px;
+        box-sizing: border-box;
+    }
+
+    .vendor-analysis-panel {
+        background: #ffffff;
+        border: 1px solid #d9e1ea;
+        border-radius: 8px;
+        box-shadow: 0 2px 8px rgba(24, 52, 86, 0.08);
+        padding: 18px;
+    }
+
+    .vendor-analysis-filter-row {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        flex-wrap: wrap;
+        margin-bottom: 16px;
+    }
+
+    .vendor-analysis-label {
+        font-weight: 600;
+        color: #31415a;
+    }
+
+    .vendor-analysis-date {
+        min-height: 34px;
+        border: 1px solid #b9c6d5;
+        border-radius: 4px;
+        padding: 5px 8px;
+        color: #27364a;
+    }
+
+    .vendor-analysis-filter-row .action-btn {
+        min-height: 36px;
+        border: 1px solid transparent;
+        border-radius: 6px;
+        padding: 7px 13px;
+        color: #ffffff;
+        font-size: 13px;
+        font-weight: 700;
+        line-height: 1.2;
+        cursor: pointer;
+        box-shadow: 0 2px 5px rgba(38, 55, 77, 0.14);
+        transition:
+            transform 0.16s ease,
+            box-shadow 0.16s ease,
+            filter 0.16s ease,
+            background-color 0.16s ease;
+    }
+
+    .vendor-analysis-filter-row .action-btn:hover {
+        color: #ffffff;
+        filter: brightness(0.94);
+        transform: translateY(-1px);
+        box-shadow: 0 5px 10px rgba(38, 55, 77, 0.2);
+    }
+
+    .vendor-analysis-filter-row .action-btn:focus-visible {
+        outline: 3px solid rgba(91, 33, 182, 0.28);
+        outline-offset: 2px;
+    }
+
+    .vendor-analysis-filter-row .action-btn:active {
+        transform: translateY(0);
+        box-shadow: 0 1px 3px rgba(38, 55, 77, 0.16);
+    }
+
+    /* Blue: run an analysis for the date selected in the date input. */
+    #vendor-analysis-date-btn {
+        background: #0a5ea8 !important;
+        border-color: #084d8a !important;
+    }
+
+    /* Green: Last One Month. */
+    .vendor-period-btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 34px;
+        padding: 8px 14px;
+        border-radius: 6px;
+        border: 2px solid #0474BA;
+        background-color: #00A7E1;
+        color: #ffffff;
+        font-weight: 700;
+        font-size: 12px;
+        white-space: nowrap;
+        transition: all 0.2s ease;
+    }
+
+
+    .vendor-period-btn.active {
+        color: #203040 !important;
+        outline: 3px solid rgba(35, 56, 77, 0.16);
+        outline-offset: 2px;
+        filter: saturate(1.15) brightness(0.94);
+        box-shadow: inset 0 0 0 1px rgba(35, 56, 77, 0.18);
+    }
+
+    .vendor-analysis-filter-row .action-btn:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+        transform: none;
+        box-shadow: none;
+    }
+
+    .vendor-analysis-kpis {
+        display: grid;
+        grid-template-columns: repeat(6, minmax(150px, 1fr));
+        gap: 14px;
+        margin: 18px 0;
+    }
+
+    .vendor-kpi-card {
+        background: #f8fafc;
+        border: 1px solid #dfe7ef;
+        border-radius: 5px;
+        padding: 12px 14px;
+    }
+
+    .vendor-kpi-label {
+        color: #77869a;
+        font-size: 12px;
+        margin-bottom: 4px;
+    }
+
+    .vendor-kpi-value {
+        color: #234e72;
+        font-size: 24px;
+        font-weight: 700;
+        line-height: 1.1;
+    }
+
+    .vendor-kpi-value.success {
+        color: #1f9d67;
+    }
+
+    .vendor-kpi-value.info {
+        color: #3567d6;
+    }
+
+    .vendor-kpi-value.danger {
+        color: #dc2626; /* Red */
+    }
+
+    .vendor-kpi-value.warning {
+        color: #d97706; /* Amber */
+    }
+
+    .vendor-analysis-chart-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 18px;
+        margin-top: 12px;
+    }
+
+    .vendor-analysis-chart-card {
+        min-width: 0;
+        min-height: 350px;
+        background: #ffffff;
+        border: 1px solid #dfe7ef;
+        border-radius: 6px;
+        padding: 14px;
+    }
+
+    .vendor-analysis-chart-card h3 {
+        color: #2d425c;
+        font-size: 15px;
+        margin: 0 0 10px;
+        text-align: center;
+    }
+
+    .vendor-analysis-chart-wrap {
+        height: 285px;
+        position: relative;
+    }
+
+    .vendor-analysis-heatmap-card {
+        background: #ffffff;
+        border: 1px solid #dfe7ef;
+        border-radius: 6px;
+        padding: 14px;
+        margin-top: 18px;
+    }
+
+    .vendor-analysis-heatmap-card h3 {
+        color: #2d425c;
+        font-size: 15px;
+        margin: 0 0 12px;
+        text-align: center;
+    }
+
+    .vendor-heatmap-scroll {
+        overflow-x: auto;
+        width: 100%;
+    }
+
+    .vendor-heatmap {
+        border-collapse: collapse;
+        width: 100%;
+        min-width: 800px;
+    }
+
+    .vendor-heatmap th,
+    .vendor-heatmap td {
+        border: 1px solid #e2e8f0;
+        padding: 8px 6px;
+        text-align: center;
+        font-size: 12px;
+        white-space: nowrap;
+    }
+
+    .vendor-heatmap th {
+        color: #34495e;
+        background: #f6f8fb;
+        font-weight: 600;
+    }
+
+    .vendor-heatmap-vendor {
+        background: #f6f8fb;
+        color: #34495e;
+        font-weight: 600;
+        text-align: left !important;
+    }
+
+    .vendor-heatmap-cell {
+        cursor: default;
+        font-weight: 600;
+        min-width: 56px;
+    }
+
+    .vendor-analysis-summary {
+        margin-top: 18px;
+        padding: 14px;
+        border: 1px solid #dfe7ef;
+        border-radius: 6px;
+        background: #ffffff;
+    }
+
+    .vendor-analysis-summary h3 {
+        margin: 0 0 10px;
+        color: #2d425c;
+        font-size: 15px;
+        text-align: center;
+    }
+
+    .vendor-analysis-table-wrap {
+        overflow-x: auto;
+        width: 100%;
+        border: 1px solid #dfe7ef;
+        border-radius: 6px;
+    }
+
+    .vendor-analysis-table {
+        border-collapse: collapse;
+        width: 100%;
+        min-width: 930px;
+    }
+
+    .vendor-analysis-table th,
+    .vendor-analysis-table td {
+        border: 1px solid #e2e8f0;
+        padding: 8px 9px;
+        text-align: center;
+        font-size: 13px;
+    }
+
+    .vendor-analysis-table th {
+        background: #0a5ea8;
+        color: #ffffff;
+        font-weight: 600;
+    }
+
+    .vendor-analysis-table tbody tr:nth-child(even) {
+        background: #f9fbfd;
+    }
+
+    .vendor-analysis-empty {
+        padding: 20px !important;
+        color: #617085;
+        text-align: center;
+    }
+
+    @media (max-width: 1000px) {
+        .vendor-analysis-kpis {
+            grid-template-columns: repeat(3, minmax(150px, 1fr));
+        }
+
+        .vendor-analysis-chart-grid {
+            grid-template-columns: 1fr;
+        }
+    }
+
+    @media (max-width: 560px) {
+        .vendor-analysis-kpis {
+            grid-template-columns: 1fr;
+        }
+    }
+</style>
+
+<div class="vendor-analysis-page">
+    <div class="vendor-analysis-panel">
+        <h2 class="module-page-title compact-module-title">
+            Vendor Wise Analysis
+        </h2>
+    <br>
+        <div class="vendor-analysis-filter-row">
+            <label
+                for="vendor-analysis-date"
+                class="vendor-analysis-label"
+            >
+                Date
+            </label>
+
+            <input
+                type="date"
+                id="vendor-analysis-date"
+                class="vendor-analysis-date"
+            >
+
+            
+            <button
+                type="button"
+                class="action-btn compact-btn vendor-period-btn"
+                data-range="1m"
+            >
+                Last One Month
+            </button>
+
+            <button
+                type="button"
+                class="action-btn compact-btn vendor-period-btn"
+                data-range="3m"
+            >
+                Last Three Months
+            </button>
+
+            <button
+                type="button"
+                class="action-btn compact-btn vendor-period-btn"
+                data-range="6m"
+            >
+                Last Six Months
+            </button>
+
+            <button
+                type="button"
+                id="vendor-analysis-date-btn"
+                class="action-btn compact-btn apply-filter-btn"
+            >
+                Analysis
+            </button>
+        </div>
+
+        <div
+            id="vendor-analysis-status"
+            class="region-cr-status-bar hidden"
+        ></div>
+
+        <div
+            id="vendor-analysis-meta"
+            class="region-cr-table-meta"
+        >
+            Select one date or a period and click Analysis.
+        </div>
+
+        <div class="vendor-analysis-kpis">
+            <div class="vendor-kpi-card">
+                <div class="vendor-kpi-label">Total CR</div>
+                <div
+                    id="vendor-kpi-total"
+                    class="vendor-kpi-value"
+                >
+                    —
+                </div>
+            </div>
+
+            <div class="vendor-kpi-card">
+                <div class="vendor-kpi-label">Completed</div>
+                <div
+                    id="vendor-kpi-completed"
+                    class="vendor-kpi-value success"
+                >
+                    —
+                </div>
+            </div>
+
+            <div class="vendor-kpi-card">
+                <div class="vendor-kpi-label">Rollback</div>
+                <div
+                    id="vendor-kpi-rollback"
+                    class="vendor-kpi-value danger"
+                >
+                    —
+                </div>
+            </div>
+
+            <div class="vendor-kpi-card">
+                <div class="vendor-kpi-label">Cancelled</div>
+                <div
+                    id="vendor-kpi-cancelled"
+                    class="vendor-kpi-value warning"
+                >
+                    —
+                </div>
+            </div>
+
+            <div class="vendor-kpi-card">
+                <div class="vendor-kpi-label">Completion Rate</div>
+                <div
+                    id="vendor-kpi-completion-rate"
+                    class="vendor-kpi-value success"
+                >
+                    —
+                </div>
+            </div>
+
+            <div class="vendor-kpi-card">
+                <div class="vendor-kpi-label">Automation Rate</div>
+                <div
+                    id="vendor-kpi-automation-rate"
+                    class="vendor-kpi-value info"
+                >
+                    —
+                </div>
+            </div>
+        </div>
+
+        <div class="vendor-analysis-chart-grid">
+            <div class="vendor-analysis-chart-card">
+                <h3>CR Success Rate (Vendor Wise)</h3>
+                <div class="vendor-analysis-chart-wrap">
+                    <canvas id="vendor-status-chart"></canvas>
+                </div>
+            </div>
+
+            <div class="vendor-analysis-chart-card">
+                <h3>Automation (Vendor Wise)</h3>
+                <div class="vendor-analysis-chart-wrap">
+                    <canvas id="vendor-execution-chart"></canvas>
+                </div>
+            </div>
+        </div>
+
+        <div class="vendor-analysis-heatmap-card">
+            <h3>CR Completion Rate (Vendor vs Circle)</h3>
+
+            <div class="vendor-heatmap-scroll">
+                <table class="vendor-heatmap">
+                    <thead id="vendor-heatmap-head">
+                        <tr>
+                            <th>Vendor / Circle</th>
+                        </tr>
+                    </thead>
+
+                    <tbody id="vendor-heatmap-body">
+                        <tr>
+                            <td class="vendor-analysis-empty">
+                                Run analysis to view the heatmap.
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="vendor-analysis-summary">
+            <h3>Vendor Wise Summary</h3>
+
+            <div class="vendor-analysis-table-wrap">
+                <table class="vendor-analysis-table">
+                    <thead>
+                        <tr>
+                            <th>Circle</th>
+                            <th>Region</th>
+                            <th>Vendor</th>
+                            <th>Total Count</th>
+                            <th>Completed</th>
+                            <th>Rollback</th>
+                            <th>Cancelled</th>
+                            <th>Automation</th>
+                            <th>Partial Automation</th>
+                            <th>Manual</th>
+                        </tr>
+                    </thead>
+
+                    <tbody id="vendor-analysis-table-body">
+                        <tr>
+                            <td
+                                colspan="10"
+                                class="vendor-analysis-empty"
+                            >
+                                Run analysis to view summary data.
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+    const dateInput = document.getElementById(
+        "vendor-analysis-date"
+    );
+    const dateButton = document.getElementById(
+        "vendor-analysis-date-btn"
+    );
+    const periodButtons = document.querySelectorAll(
+        ".vendor-period-btn"
+    );
+
+    const statusElement = document.getElementById(
+        "vendor-analysis-status"
+    );
+    const metaElement = document.getElementById(
+        "vendor-analysis-meta"
+    );
+
+    const totalKpi = document.getElementById(
+        "vendor-kpi-total"
+    );
+    const completedKpi = document.getElementById(
+        "vendor-kpi-completed"
+    );
+    const rollbackKpi = document.getElementById(
+        "vendor-kpi-rollback"
+    );
+    const cancelledKpi = document.getElementById(
+        "vendor-kpi-cancelled"
+    );
+    const completionRateKpi = document.getElementById(
+        "vendor-kpi-completion-rate"
+    );
+    const automationRateKpi = document.getElementById(
+        "vendor-kpi-automation-rate"
+    );
+
+    const tableBody = document.getElementById(
+        "vendor-analysis-table-body"
+    );
+    const heatmapHead = document.getElementById(
+        "vendor-heatmap-head"
+    );
+    const heatmapBody = document.getElementById(
+        "vendor-heatmap-body"
+    );
+
+    if (
+        !dateInput ||
+        !dateButton ||
+        !statusElement ||
+        !metaElement ||
+        !tableBody ||
+        !heatmapHead ||
+        !heatmapBody
+    ) {
+        console.error(
+            "Vendor Wise Analysis: required HTML elements are missing."
+        );
+        return;
+    }
+
+    let statusChart = null;
+    let executionChart = null;
+    let statusTimeout = null;
+
+    function escapeHtml(value) {
+        return String(value ?? "")
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;")
+            .replace(/'/g, "&#039;");
+    }
+
+    function showStatus(message, type) {
+        if (statusTimeout) {
+            clearTimeout(statusTimeout);
+            statusTimeout = null;
+        }
+
+        statusElement.textContent = message || "";
+        statusElement.className = (
+            `region-cr-status-bar status-${type}`
+        );
+
+        if (!message) {
+            statusElement.classList.add("hidden");
+            return;
+        }
+
+        if (type === "success" || type === "error") {
+            statusTimeout = setTimeout(function () {
+                statusElement.textContent = "";
+                statusElement.className =
+                    "region-cr-status-bar hidden";
+            }, 5000);
+        }
+    }
+
+    function setActivePeriodButton(selectedRange) {
+        periodButtons.forEach(function (button) {
+            button.classList.toggle(
+                "active",
+                button.dataset.range === selectedRange
+            );
+        });
+    }
+
+    function setSummaryMessage(message) {
+        tableBody.innerHTML = `
+            <tr>
+                <td colspan="10" class="vendor-analysis-empty">
+                    ${escapeHtml(message)}
+                </td>
+            </tr>
+        `;
+    }
+
+    function resetKpis() {
+        totalKpi.textContent = "—";
+        completedKpi.textContent = "—";
+        rollbackKpi.textContent = "—";
+        cancelledKpi.textContent = "—";
+        completionRateKpi.textContent = "—";
+        automationRateKpi.textContent = "—";
+    }
+
+    function updateKpis(kpis) {
+        totalKpi.textContent = kpis.total_cr ?? 0;
+        completedKpi.textContent = kpis.completed ?? 0;
+        rollbackKpi.textContent = kpis.rollback ?? 0;
+        cancelledKpi.textContent = kpis.cancelled ?? 0;
+        completionRateKpi.textContent = (
+            `${kpis.completion_rate ?? 0}%`
+        );
+        automationRateKpi.textContent = (
+            `${kpis.automation_rate ?? 0}%`
+        );
+    }
+
+    function renderSummary(rows) {
+        if (!Array.isArray(rows) || rows.length === 0) {
+            setSummaryMessage(
+                "No active CR records found for the selected period."
+            );
+            return;
+        }
+
+        tableBody.innerHTML = rows.map(function (row) {
+            return `
+                <tr>
+                    <td>${escapeHtml(row.circle)}</td>
+                    <td>${escapeHtml(row.region)}</td>
+                    <td>${escapeHtml(row.vendor)}</td>
+                    <td>${escapeHtml(row.total_count)}</td>
+                    <td>${escapeHtml(row.completed)}</td>
+                    <td>${escapeHtml(row.rollback)}</td>
+                    <td>${escapeHtml(row.cancelled)}</td>
+                    <td>${escapeHtml(row.automation)}</td>
+                    <td>${escapeHtml(row.partial_automation)}</td>
+                    <td>${escapeHtml(row.manual)}</td>
+                </tr>
+            `;
+        }).join("");
+    }
+
+    function destroyCharts() {
+        if (statusChart) {
+            statusChart.destroy();
+            statusChart = null;
+        }
+
+        if (executionChart) {
+            executionChart.destroy();
+            executionChart = null;
+        }
+    }
+
+    function renderStatusChart(vendorRows) {
+        const context = document.getElementById(
+            "vendor-status-chart"
+        ).getContext("2d");
+
+        const labels = vendorRows.map(function (row) {
+            return row.vendor;
+        });
+
+        statusChart = new Chart(context, {
+            type: "bar",
+            data: {
+                labels: labels,
+                datasets: [
+                    {
+                        label: "Completed",
+                        data: vendorRows.map(function (row) {
+                            return row.completed;
+                        }),
+                        backgroundColor: "#24a36b",
+                        borderColor: "#1d8858",
+                        borderWidth: 1,
+                    },
+                    {
+                        label: "Rollback",
+                        data: vendorRows.map(function (row) {
+                            return row.rollback;
+                        }),
+                        backgroundColor: "#f2a93b",
+                        borderColor: "#d99022",
+                        borderWidth: 1,
+                    },
+                    {
+                        label: "Cancelled",
+                        data: vendorRows.map(function (row) {
+                            return row.cancelled;
+                        }),
+                        backgroundColor: "#e85b5b",
+                        borderColor: "#ce4343",
+                        borderWidth: 1,
+                    },
+                ],
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: {
+                        position: "top",
+                        labels: {
+                            boxWidth: 12,
+                            font: {
+                                size: 11,
+                            },
+                        },
+                    },
+                    tooltip: {
+                        mode: "index",
+                        intersect: false,
+                    },
+                },
+                scales: {
+                    x: {
+                        stacked: true,
+                        title: {
+                            display: true,
+                            text: "Vendor",
+                        },
+                    },
+                    y: {
+                        stacked: true,
+                        beginAtZero: true,
+                        title: {
+                            display: true,
+                            text: "CR Count",
+                        },
+                    },
+                },
+            },
+        });
+    }
+
+    function renderExecutionChart(vendorRows) {
+        const context = document.getElementById(
+            "vendor-execution-chart"
+        ).getContext("2d");
+
+        const labels = vendorRows.map(function (row) {
+            return row.vendor;
+        });
+
+        executionChart = new Chart(context, {
+            type: "bar",
+            data: {
+                labels: labels,
+                datasets: [
+                    {
+                        label: "Automation",
+                        data: vendorRows.map(function (row) {
+                            return row.automation;
+                        }),
+                        backgroundColor: "#2f67dc",
+                    },
+                    {
+                        label: "Partial Automation",
+                        data: vendorRows.map(function (row) {
+                            return row.partial_automation;
+                        }),
+                        backgroundColor: "#8558e8",
+                    },
+                    {
+                        label: "Manual",
+                        data: vendorRows.map(function (row) {
+                            return row.manual;
+                        }),
+                        backgroundColor: "#6e7e91",
+                    },
+                ],
+            },
+            options: {
+                indexAxis: "y",
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: {
+                        position: "top",
+                        labels: {
+                            boxWidth: 12,
+                            font: {
+                                size: 11,
+                            },
+                        },
+                    },
+                    tooltip: {
+                        mode: "index",
+                        intersect: false,
+                        callbacks: {
+                            label: function (context) {
+                                const row =
+                                    vendorRows[context.dataIndex];
+
+                                const total = row.total_count || 0;
+                                const count = context.raw || 0;
+
+                                const percentage = total
+                                    ? ((count / total) * 100).toFixed(1)
+                                    : "0.0";
+
+                                return (
+                                    `${context.dataset.label}: ` +
+                                    `${count} (${percentage}%)`
+                                );
+                            },
+                        },
+                    },
+                },
+                scales: {
+                    x: {
+                        stacked: true,
+                        min: 0,
+                        suggestedMax: Math.max(
+                            ...vendorRows.map(function (row) {
+                                return row.total_count || 0;
+                            }),
+                            1
+                        ),
+                        title: {
+                            display: true,
+                            text: "CR Count",
+                        },
+                    },
+                    y: {
+                        stacked: true,
+                        title: {
+                            display: true,
+                            text: "Vendor",
+                        },
+                    },
+                },
+            },
+        });
+    }
+
+    function heatmapColor(rate) {
+        if (rate === null || rate === undefined) {
+            return {
+                background: "#f3f5f8",
+                color: "#8190a3",
+            };
+        }
+
+        if (rate >= 90) {
+            return {
+                background: "#268f5c",
+                color: "#ffffff",
+            };
+        }
+
+        if (rate >= 80) {
+            return {
+                background: "#62b37e",
+                color: "#ffffff",
+            };
+        }
+
+        if (rate >= 70) {
+            return {
+                background: "#a8cf84",
+                color: "#263a2b",
+            };
+        }
+
+        if (rate >= 60) {
+            return {
+                background: "#f7cf77",
+                color: "#5f4717",
+            };
+        }
+
+        return {
+            background: "#ed9441",
+            color: "#ffffff",
+        };
+    }
+
+    function renderHeatmap(heatmap) {
+        const circles = Array.isArray(heatmap.circles)
+            ? heatmap.circles
+            : [];
+
+        const vendors = Array.isArray(heatmap.vendors)
+            ? heatmap.vendors
+            : [];
+
+        if (!circles.length || !vendors.length) {
+            heatmapHead.innerHTML = `
+                <tr>
+                    <th>Vendor / Circle</th>
+                </tr>
+            `;
+
+            heatmapBody.innerHTML = `
+                <tr>
+                    <td class="vendor-analysis-empty">
+                        No heatmap data available.
+                    </td>
+                </tr>
+            `;
+
+            return;
+        }
+
+        heatmapHead.innerHTML = `
+            <tr>
+                <th>Vendor / Circle</th>
+                ${circles.map(function (circle) {
+                    return `<th>${escapeHtml(circle)}</th>`;
+                }).join("")}
+            </tr>
+        `;
+
+        heatmapBody.innerHTML = vendors.map(function (vendorRow) {
+            const cells = vendorRow.values.map(function (cell) {
+                const colors = heatmapColor(
+                    cell.completion_rate
+                );
+
+                const value = cell.completion_rate === null
+                    ? "—"
+                    : `${cell.completion_rate}%`;
+
+                const tooltip = cell.total_count
+                    ? (
+                        `${vendorRow.vendor} / ${cell.circle}: ` +
+                        `${cell.completed} completed out of ` +
+                        `${cell.total_count} CR(s), ` +
+                        `${cell.completion_rate}%`
+                    )
+                    : (
+                        `${vendorRow.vendor} / ${cell.circle}: ` +
+                        "No CR records"
+                    );
+
+                return `
+                    <td
+                        class="vendor-heatmap-cell"
+                        style="
+                            background:${colors.background};
+                            color:${colors.color};
+                        "
+                        title="${escapeHtml(tooltip)}"
+                    >
+                        ${escapeHtml(value)}
+                    </td>
+                `;
+            }).join("");
+
+            return `
+                <tr>
+                    <td class="vendor-heatmap-vendor">
+                        ${escapeHtml(vendorRow.vendor)}
+                    </td>
+                    ${cells}
+                </tr>
+            `;
+        }).join("");
+    }
+
+    function renderCharts(charts) {
+        destroyCharts();
+
+        const vendorRows = Array.isArray(charts.vendor_status)
+            ? charts.vendor_status
+            : [];
+
+        renderHeatmap(charts.heatmap || {});
+
+        if (!vendorRows.length) {
+            return;
+        }
+
+        if (typeof Chart === "undefined") {
+            console.warn(
+                "Chart.js is unavailable. Summary table and heatmap "
+                + "will still be displayed."
+            );
+
+            showStatus(
+                "Analysis data loaded. Charts are unavailable because "
+                + "Chart.js did not load.",
+                "info"
+            );
+
+            return;
+        }
+
+        renderStatusChart(vendorRows);
+        renderExecutionChart(vendorRows);
+    }
+
+    function resetVisuals(message) {
+        destroyCharts();
+        resetKpis();
+        setSummaryMessage(message);
+
+        heatmapHead.innerHTML = `
+            <tr>
+                <th>Vendor / Circle</th>
+            </tr>
+        `;
+
+        heatmapBody.innerHTML = `
+            <tr>
+                <td class="vendor-analysis-empty">
+                    ${escapeHtml(message)}
+                </td>
+            </tr>
+        `;
+    }
+
+    function setLoadingState() {
+        resetVisuals("Loading analysis data...");
+        showStatus("Generating vendor-wise analysis...", "info");
+        metaElement.textContent = "Loading analysis data...";
+    }
+
+    function runAnalysis(params) {
+        const queryString = new URLSearchParams(
+            params
+        ).toString();
+
+        const analysisApiUrl = "{% url 'fetch_vendor_wise_analysis' %}";
+        
+        setLoadingState();
+
+        fetch(`${analysisApiUrl}?${queryString}`, {
+            method: "GET",
+            headers: {
+                "X-Requested-With": "XMLHttpRequest",
+            },
+        })
+            .then(function (response) {
+                return response.text().then(function (body) {
+                    let data = {};
+
+                    try {
+                        data = body ? JSON.parse(body) : {};
+                    } catch (error) {
+                        data = {
+                            message: (
+                                "The analysis endpoint returned a non-JSON response. "
+                                + body.slice(0, 250)
+                            ),
+                        };
+                    }
+
+                    return {
+                        responseOk: response.ok,
+                        statusCode: response.status,
+                        data: data,
+                    };
+                });
+            })
+
+            .then(function (result) {
+                const data = result.data;
+
+                if (!result.responseOk || !data.ok) {
+                    const message = (
+                        data.message ||
+                        `Unable to generate vendor-wise analysis. `
+                        + `HTTP status: ${result.statusCode}.`
+                    );
+
+                    console.error(
+                        "Vendor Wise Analysis API response:",
+                        result
+                    );
+
+                    showStatus(message, "error");
+                    metaElement.textContent = message;
+                    resetVisuals(message);
+                    return;
+                }
+
+                updateKpis(data.kpis || {});
+                renderSummary(data.rows || []);
+                renderCharts(data.charts || {});
+
+                metaElement.textContent = (
+                    `${data.message} Period: ${data.period_label}.`
+                );
+
+                showStatus(
+                    "Vendor-wise analysis generated successfully.",
+                    "success"
+                );
+            })
+            .catch(function (error) {
+                console.error(
+                    "Vendor-wise analysis request failed:",
+                    error
+                );
+
+                const message = (
+                    "Unable to generate vendor-wise analysis. "
+                    + "Please try again."
+                );
+
+                showStatus(message, "error");
+                metaElement.textContent = message;
+                resetVisuals(message);
+            });
+    }
+
+    dateButton.addEventListener("click", function () {
+        const selectedDate = dateInput.value;
+
+        if (!selectedDate) {
+            const message = "Please select an execution date.";
+            showStatus(message, "error");
+            metaElement.textContent = message;
+            return;
+        }
+
+        setActivePeriodButton("");
+        runAnalysis({
+            date: selectedDate,
+        });
+    });
+
+    periodButtons.forEach(function (button) {
+        button.addEventListener("click", function () {
+            const rangeKey = button.dataset.range;
+
+            dateInput.value = "";
+            setActivePeriodButton(rangeKey);
+
+            runAnalysis({
+                range: rangeKey,
+            });
+        });
+    });
+});
+</script>
+{% endblock %}

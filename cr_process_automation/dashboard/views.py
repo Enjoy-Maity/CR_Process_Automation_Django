@@ -3,6 +3,7 @@ from dateutil import parser
 from datetime import datetime, timedelta
 import sqlite3
 import sys
+import re
 import traceback
 import threading
 from importlib import import_module
@@ -878,26 +879,53 @@ def dashboard_view(request):
     ctx = _common_context(request)
     ctx["selected_option"] = "dashboard"
 
+    # ctx["dashboard_options"] = [
+    #     {
+    #         "key": "vendor_wise",
+    #         "label": "Vendor Wise",
+    #         "description": "Review Vendor wise CR distribution and planning analysis.",
+    #     },
+    #     {
+    #         "key": "cr_success_rate",
+    #         "label": "CR Success Rate",
+    #         "description": "Review Successful, Cancelled and Rollback CR outcomes.",
+    #     },
+    #     {
+    #         "key": "team_performance",
+    #         "label": "Team Performance",
+    #         "description": "Review CR workload and execution performance by team.",
+    #     },
+    #     {
+    #         "key": "automation_cr",
+    #         "label": "Automation CR",
+    #         "description": "Review Automation coverage and CR analysis.",
+    #     },
+    # ]
+
     ctx["dashboard_options"] = [
         {
-            "key": "vendor_wise",
+            "key": "vendor_wise_analysis",
             "label": "Vendor Wise",
             "description": "Review Vendor wise CR distribution and planning analysis.",
+            "url_name": "vendor_wise_analysis",
         },
         {
-            "key": "cr_success_rate",
+            "key": "cr_success_rate_analysis",
             "label": "CR Success Rate",
             "description": "Review Successful, Cancelled and Rollback CR outcomes.",
+            "url_name": "cr_success_rate_analysis",
         },
         {
-            "key": "team_performance",
+            "key": "team_performance_analysis",
             "label": "Team Performance",
             "description": "Review CR workload and execution performance by team.",
+            "url_name": "team_performance_analysis"
         },
         {
-            "key": "automation_cr",
+            "key": "automation_cr_analysis",
             "label": "Automation CR",
             "description": "Review Automation coverage and CR analysis.",
+            "url_name": "automation_cr_analysis"
         },
     ]
 
@@ -919,5 +947,1674 @@ def fetch_user_options(request):
     return JsonResponse({"ok": True, "users": users})
 
 
+VENDOR_ANALYSIS_FIELDS = [
+    "circle",
+    "region",
+    "cr_no",
+    "activity_status",
+    "vendor",
+    "execution_type",
+    "planning_status",
+]
 
+def _vendor_analysis_dates(date_str="", range_key=""):
+    """
+    Return (start_date, end_date, error_message).
+
+    A user may choose:
+      - one exact date: YYYY-MM-DD;
+      - Last One Month: 30 calendar days including today;
+      - Last Three Months: 90 calendar days including today;
+      - Last Six Months: 180 calendar days including today.
+    """
+    date_str = (date_str or "").strip()
+    range_key = (range_key or "").strip()
+
+    if date_str:
+        try:
+            selected_date = datetime.strptime(
+                date_str,
+                "%Y-%m-%d",
+            ).date()
+        except ValueError:
+            return None, None, "Invalid date format. Use YYYY-MM-DD."
+
+        return selected_date, selected_date, None
+
+    today = datetime.today().date()
+
+    range_days = {
+        "1m": 30,
+        "3m": 90,
+        "6m": 180,
+    }
+
+    if range_key not in range_days:
+        return (
+            None,
+            None,
+            "Select one date or choose Last One Month, "
+            "Last Three Months, or Last Six Months.",
+        )
+
+    return (
+        today - timedelta(days=range_days[range_key]),
+        today,
+        None,
+    )
+
+def _vendor_analysis_text(value, fallback="Not Mentioned"):
+    """
+    Normalize blank, null, pandas-like, and inconsistent text values.
+    """
+    if value is None:
+        return fallback
+
+    text = str(value).strip()
+
+    if text.lower() in {
+        "",
+        "nan",
+        "na",
+        "n/a",
+        "n.a",
+        "n.a.",
+        "none",
+        "null",
+        "nat",
+        "<na>",
+    }:
+        return fallback
+
+    return text
+
+def _analysis_status_key(value):
+    """
+    Convert Activity Status variants into the three displayed buckets.
+    """
+    status = _vendor_analysis_text(
+        value,
+        fallback="",
+    ).lower()
+
+    if status == "completed":
+        return "completed"
+
+    if status in {
+        "rollback",
+        "rolled back",
+        "rolled-back",
+    }:
+        return "rollback"
+
+    if status in {
+        "cancelled",
+        "canceled",
+        "cancel",
+    }:
+        return "cancelled"
+
+    return "other"
+
+def _analysis_execution_type_key(value):
+    """
+    Convert Execution Type variants into the three displayed buckets.
+    """
+    execution_type = _vendor_analysis_text(
+        value,
+        fallback="",
+    ).lower()
+
+    if execution_type in {
+        "partial automation",
+        "partial_automation",
+        "partial-automation",
+        "partialautomation",
+    }:
+        return "partial_automation"
+
+    if execution_type == "automation":
+        return "automation"
+
+    if execution_type == "manual":
+        return "manual"
+
+    return "other"
+
+def _vendor_analysis_vendor_bucket(value):
+    """
+    Normalize the vendor value.
+
+    If the raw vendor text contains more than one vendor separated
+    by "/" or ",", the row is grouped under a single "Combination"
+    bucket. Otherwise the cleaned single vendor name is returned.
+    """
+    vendor_text = _vendor_analysis_text(value)
+
+    # Split on "/" or "," (any surrounding spaces are ignored).
+    parts = [
+        part.strip()
+        for part in re.split(r"[/,]", vendor_text)
+        if part.strip()
+    ]
+
+    # More than one distinct vendor -> Combination bucket.
+    if len(parts) > 1:
+        return "Combination"
+
+    # Single vendor (or fallback text) returned as-is.
+    return parts[0] if parts else vendor_text
+
+@login_required(login_url="login")
+def vendor_wise_analysis_view(request):
+    """
+    Render Vendor Wise Analysis page.
+    """
+    ctx = _common_context(request)
+    ctx["selected_option"] = "vendor_wise_analysis"
+
+    return render(
+        request,
+        "dashboard/vendor_wise_analysis.html",
+        ctx,
+    )
+
+@require_GET
+@login_required(login_url="login")
+def fetch_vendor_wise_analysis(request):
+    """
+    Return table and chart-ready Vendor Wise Analysis data.
+
+    The summary grouping is:
+        Circle + Vendor
+
+    Only active master records are included, preventing historical
+    Copy-on-Write versions from being counted.
+    """
+    date_str = request.GET.get("date", "")
+    range_key = request.GET.get("range", "")
+
+    start_date, end_date, error_message = _vendor_analysis_dates(
+        date_str=date_str,
+        range_key=range_key,
+    )
+
+    if error_message:
+        return JsonResponse(
+            {
+                "ok": False,
+                "message": error_message,
+            },
+            status=400,
+        )
+
+    # Requirement: query master_cr_database.
+    #
+    # If your project requires report reads to occur through replica,
+    # change only "default" to "replica" below.
+    raw_rows = list(
+        MasterCRDatabase.objects
+        .using("default")
+        .filter(
+            execution_date__isnull=False,
+            execution_date__gte=start_date,
+            execution_date__lte=end_date,
+            is_active=True,
+            planning_status__iexact="planned",
+        )
+        .values(*VENDOR_ANALYSIS_FIELDS)
+        .order_by(
+            "circle",
+            "vendor",
+            "cr_no",
+        )
+    )
+
+    grouped = {}
+    vendor_totals = {}
+    heatmap = {}
+
+    totals = {
+        "total_cr": 0,
+        "completed": 0,
+        "rollback": 0,
+        "cancelled": 0,
+        "automation": 0,
+        "partial_automation": 0,
+        "manual": 0,
+    }
+
+    for raw_row in raw_rows:
+
+        planning_status = _vendor_analysis_text(
+                    raw_row.get("planning_status"),
+                    fallback="",
+                ).lower()
+
+        if planning_status != "planned":
+            continue
+
+        circle = _vendor_analysis_text(
+            raw_row.get("circle"),
+        )
+        vendor = _vendor_analysis_vendor_bucket(
+            raw_row.get("vendor"),
+        )
+        region = _vendor_analysis_text(
+            raw_row.get("region"),
+        )
+
+        activity_status_key = _analysis_status_key(
+            raw_row.get("activity_status"),
+        )
+        execution_type_key = _analysis_execution_type_key(
+            raw_row.get("execution_type"),
+        )
+
+        circle_vendor_key = (circle, vendor)
+
+        if circle_vendor_key not in grouped:
+            grouped[circle_vendor_key] = {
+                "circle": circle,
+                "vendor": vendor,
+                "regions": set(),
+                "total_count": 0,
+                "completed": 0,
+                "rollback": 0,
+                "cancelled": 0,
+                "automation": 0,
+                "partial_automation": 0,
+                "manual": 0,
+            }
+
+        summary = grouped[circle_vendor_key]
+        summary["regions"].add(region)
+        summary["total_count"] += 1
+
+        totals["total_cr"] += 1
+
+        if activity_status_key == "completed":
+            summary["completed"] += 1
+            totals["completed"] += 1
+
+        elif activity_status_key == "rollback":
+            summary["rollback"] += 1
+            totals["rollback"] += 1
+
+        elif activity_status_key == "cancelled":
+            summary["cancelled"] += 1
+            totals["cancelled"] += 1
+
+        if execution_type_key == "automation":
+            summary["automation"] += 1
+            totals["automation"] += 1
+
+        elif execution_type_key == "partial_automation":
+            summary["partial_automation"] += 1
+            totals["partial_automation"] += 1
+
+        elif execution_type_key == "manual":
+            summary["manual"] += 1
+            totals["manual"] += 1
+
+        if vendor not in vendor_totals:
+            vendor_totals[vendor] = {
+                "vendor": vendor,
+                "total_count": 0,
+                "completed": 0,
+                "rollback": 0,
+                "cancelled": 0,
+                "automation": 0,
+                "partial_automation": 0,
+                "manual": 0,
+            }
+
+        vendor_summary = vendor_totals[vendor]
+        vendor_summary["total_count"] += 1
+
+        if activity_status_key == "completed":
+            vendor_summary["completed"] += 1
+
+        elif activity_status_key == "rollback":
+            vendor_summary["rollback"] += 1
+
+        elif activity_status_key == "cancelled":
+            vendor_summary["cancelled"] += 1
+
+        if execution_type_key == "automation":
+            vendor_summary["automation"] += 1
+
+        elif execution_type_key == "partial_automation":
+            vendor_summary["partial_automation"] += 1
+
+        elif execution_type_key == "manual":
+            vendor_summary["manual"] += 1
+
+        if vendor not in heatmap:
+            heatmap[vendor] = {}
+
+        if circle not in heatmap[vendor]:
+            heatmap[vendor][circle] = {
+                "total_count": 0,
+                "completed": 0,
+            }
+
+        heatmap[vendor][circle]["total_count"] += 1
+
+        if activity_status_key == "completed":
+            heatmap[vendor][circle]["completed"] += 1
+
+    summary_rows = []
+
+    for value in grouped.values():
+        summary_rows.append({
+            "circle": value["circle"],
+            "region": ", ".join(sorted(value["regions"])),
+            "vendor": value["vendor"],
+            "total_count": value["total_count"],
+            "completed": value["completed"],
+            "rollback": value["rollback"],
+            "cancelled": value["cancelled"],
+            "automation": value["automation"],
+            "partial_automation": value["partial_automation"],
+            "manual": value["manual"],
+        })
+
+    summary_rows.sort(
+        key=lambda row: (
+            row["circle"].lower(),
+            row["vendor"].lower() == "combination",  # False sorts before True
+            row["vendor"].lower(),
+        )
+    )
+
+    vendor_rows = list(vendor_totals.values())
+    vendor_rows.sort(
+        key=lambda row: row["vendor"].lower()
+    )
+
+    circles = sorted({
+        row["circle"]
+        for row in summary_rows
+    }, key=str.lower)
+
+    vendors = sorted(
+        {row["vendor"] for row in summary_rows},
+        key=lambda v: (v.lower() == "combination", v.lower()),
+    )
+
+    heatmap_rows = []
+
+    for vendor in vendors:
+        values = []
+
+        for circle in circles:
+            counts = heatmap.get(vendor, {}).get(
+                circle,
+                {
+                    "total_count": 0,
+                    "completed": 0,
+                },
+            )
+
+            total_count = counts["total_count"]
+            completed_count = counts["completed"]
+
+            completion_rate = (
+                round((completed_count / total_count) * 100, 1)
+                if total_count
+                else None
+            )
+
+            values.append({
+                "circle": circle,
+                "total_count": total_count,
+                "completed": completed_count,
+                "completion_rate": completion_rate,
+            })
+
+        heatmap_rows.append({
+            "vendor": vendor,
+            "values": values,
+        })
+
+    total_cr = totals["total_cr"]
+
+    completion_rate = (
+        round((totals["completed"] / total_cr) * 100, 1)
+        if total_cr
+        else 0
+    )
+
+    automation_rate = (
+        round((totals["automation"] / total_cr) * 100, 1)
+        if total_cr
+        else 0
+    )
+
+    if date_str:
+        period_label = start_date.strftime("%d-%m-%Y")
+    else:
+        range_labels = {
+            "1m": "Last One Month",
+            "3m": "Last Three Months",
+            "6m": "Last Six Months",
+        }
+
+        period_label = (
+            f"{range_labels.get(range_key, 'Selected Period')} "
+            f"({start_date.strftime('%d-%m-%Y')} to "
+            f"{end_date.strftime('%d-%m-%Y')})"
+        )
+
+    return JsonResponse({
+        "ok": True,
+        "message": (
+            f"Analysis generated for {total_cr} active planned CR(s), "
+            f"with {len(summary_rows)} Circle/Vendor group(s)."
+        ),
+        "period_label": period_label,
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+
+        "kpis": {
+            "total_cr": total_cr,
+            "completed": totals["completed"],
+            "rollback": totals["rollback"],
+            "cancelled": totals["cancelled"],
+            "completion_rate": completion_rate,
+            "automation_rate": automation_rate,
+        },
+
+        "rows": summary_rows,
+
+        "charts": {
+            "vendor_status": vendor_rows,
+            "vendor_execution_type": vendor_rows,
+            "heatmap": {
+                "circles": circles,
+                "vendors": heatmap_rows,
+            },
+        },
+    })
+
+
+CR_SUCCESS_ANALYSIS_FIELDS = [
+    "circle",
+    "region",
+    "cr_no",
+    "activity_description",
+    "activity_status",
+    "planning_status",
+]
+
+
+@login_required(login_url="login")
+def cr_success_rate_analysis_view(request):
+    """
+    Render the CR Success Rate Analysis page.
+    """
+    context = _common_context(request)
+    context["selected_option"] = "cr_success_rate_analysis"
+
+    return render(
+        request,
+        "dashboard/cr_success_rate_analysis.html",
+        context,
+    )
+
+
+@require_GET
+@login_required(login_url="login")
+def fetch_cr_success_rate_analysis(request):
+    """
+    Build CR Success Rate analysis from active, planned MasterCRDatabase
+    records for one selected execution date or one selected date range.
+
+    Summary outputs:
+    - Circle + Region status counts and total CR count.
+    - Circle-only status counts for the Circle chart.
+    - Region-only status counts and total CR count.
+    - Overall KPI values and chart-ready status counts.
+    """
+    date_str = request.GET.get("date", "")
+    range_key = request.GET.get("range", "")
+
+    start_date, end_date, error_message = _vendor_analysis_dates(
+        date_str=date_str,
+        range_key=range_key,
+    )
+
+    if error_message:
+        return JsonResponse(
+            {
+                "ok": False,
+                "message": error_message,
+            },
+            status=400,
+        )
+
+    raw_rows = list(
+        MasterCRDatabase.objects
+        .using("default")
+        .filter(
+            execution_date__isnull=False,
+            execution_date__gte=start_date,
+            execution_date__lte=end_date,
+            is_active=True,
+            planning_status__iexact="planned",
+        )
+        .values(*CR_SUCCESS_ANALYSIS_FIELDS)
+        .order_by(
+            "region",
+            "circle",
+            "cr_no",
+        )
+    )
+
+    circle_summary = {}
+    circle_region_summary = {}
+    region_summary = {}
+
+    total_cr = 0
+    total_completed = 0
+    total_rollback = 0
+    total_cancelled = 0
+
+    for raw_row in raw_rows:
+        planning_status = _vendor_analysis_text(
+                    raw_row.get("planning_status"),
+                    fallback="",
+                ).lower()
+
+        if planning_status != "planned":
+            continue
+        circle = _vendor_analysis_text(
+            raw_row.get("circle"),
+            fallback="Not Mentioned",
+        )
+        region = _vendor_analysis_text(
+            raw_row.get("region"),
+            fallback="Not Mentioned",
+        )
+        status_key = _analysis_status_key(
+            raw_row.get("activity_status"),
+        )
+
+        total_cr += 1
+
+        if circle not in circle_summary:
+            circle_summary[circle] = {
+                "circle": circle,
+                "total_count": 0,
+                "completed": 0,
+                "rollback": 0,
+                "cancelled": 0,
+            }
+
+        circle_region_key = (circle, region)
+
+        if circle_region_key not in circle_region_summary:
+            circle_region_summary[circle_region_key] = {
+                "circle": circle,
+                "region": region,
+                "total_count": 0,
+                "completed": 0,
+                "rollback": 0,
+                "cancelled": 0,
+            }
+
+        if region not in region_summary:
+            region_summary[region] = {
+                "region": region,
+                "total_count": 0,
+                "completed": 0,
+                "rollback": 0,
+                "cancelled": 0,
+            }
+
+        circle_row = circle_summary[circle]
+        circle_region_row = circle_region_summary[circle_region_key]
+        region_row = region_summary[region]
+
+        circle_row["total_count"] += 1
+        circle_region_row["total_count"] += 1
+        region_row["total_count"] += 1
+
+        if status_key == "completed":
+            circle_row["completed"] += 1
+            circle_region_row["completed"] += 1
+            region_row["completed"] += 1
+            total_completed += 1
+
+        elif status_key == "rollback":
+            circle_row["rollback"] += 1
+            circle_region_row["rollback"] += 1
+            region_row["rollback"] += 1
+            total_rollback += 1
+
+        elif status_key == "cancelled":
+            circle_row["cancelled"] += 1
+            circle_region_row["cancelled"] += 1
+            region_row["cancelled"] += 1
+            total_cancelled += 1
+
+    circle_rows = list(circle_summary.values())
+    circle_rows.sort(
+        key=lambda row: row["circle"].lower()
+    )
+
+    circle_region_rows = list(circle_region_summary.values())
+    circle_region_rows.sort(
+        key=lambda row: (
+            row["region"].lower(),
+            row["circle"].lower(),
+        )
+    )
+
+    region_rows = list(region_summary.values())
+    region_rows.sort(
+        key=lambda row: row["region"].lower()
+    )
+
+    completion_rate = (
+        round((total_completed / total_cr) * 100, 1)
+        if total_cr
+        else 0
+    )
+
+    if date_str:
+        period_label = start_date.strftime("%d-%m-%Y")
+    else:
+        range_labels = {
+            "1m": "Last One Month",
+            "3m": "Last Three Months",
+            "6m": "Last Six Months",
+        }
+        period_label = (
+            f"{range_labels.get(range_key, 'Selected Period')} "
+            f"({start_date.strftime('%d-%m-%Y')} to "
+            f"{end_date.strftime('%d-%m-%Y')})"
+        )
+
+    return JsonResponse({
+        "ok": True,
+        "message": (
+            f"CR Success Rate Analysis generated for {total_cr} "
+            f"active planned CR(s)."
+        ),
+        "period_label": period_label,
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+        "kpis": {
+            "total_cr": total_cr,
+            "completed": total_completed,
+            "completion_rate": completion_rate,
+            "rollback": total_rollback,
+            "cancelled": total_cancelled,
+        },
+        "circle_region_rows": circle_region_rows,
+        "region_rows": region_rows,
+        "charts": {
+            "by_circle": circle_rows,
+            "by_region": region_rows,
+        },
+    })
+
+TEAM_PERFORMANCE_FIELDS = [
+    "circle",
+    "region",
+    "cr_no",
+    "activity_executor",
+    "risk",
+    "vendor",
+    "execution_type",
+    "activity_status",
+]
+
+def _team_risk_level(value):
+    """
+    Map MasterCRDatabase risk values into requested risk buckets.
+
+    Level-1:
+        1-Extensive/Widespread
+
+    Level-2:
+        2-Significant/Large
+
+    Values outside these definitions are excluded from Level-1/Level-2
+    counts but remain included in Total CRs.
+    """
+    risk_value = _vendor_analysis_text(
+        value,
+        fallback="",
+    ).lower()
+
+    if risk_value in {
+        "1-extensive/widespread",
+        "1 - extensive/widespread",
+        "1-extensive / widespread",
+        "1 - extensive / widespread",
+        "level-1",
+        "level 1",
+        "l1",
+    }:
+        return "level_1"
+
+    if risk_value in {
+        "2-significant/large",
+        "2 - significant/large",
+        "2-significant / large",
+        "2 - significant / large",
+        "level-2",
+        "level 2",
+        "l2",
+    }:
+        return "level_2"
+
+    return "other"
+
+def _empty_team_status_summary():
+    """
+    Standard count structure for Circle/Region team summaries.
+    """
+    return {
+        "total_count": 0,
+        "level_1": 0,
+        "level_2": 0,
+        "completed": 0,
+        "rollback": 0,
+        "cancelled": 0,
+    }
+
+def _empty_team_execution_summary():
+    """
+    Standard count structure for Activity Executor + Execution Type summary.
+    """
+    return {
+        "total_count": 0,
+        "level_1": 0,
+        "level_2": 0,
+        "completed": 0,
+        "automation": 0,
+        "partial_automation": 0,
+        "manual": 0,
+    }
+
+
+def _empty_team_vendor_summary():
+    """
+    Standard count structure for Activity Executor + Vendor summary.
+    """
+    return {
+        "total_count": 0,
+        "ericsson": 0,
+        "nokia": 0,
+        "cisco": 0,
+        "huawei": 0,
+        "combination": 0,
+        "completed": 0,
+        "rollback": 0,
+        "cancelled": 0,
+    }
+
+@login_required(login_url="login")
+def team_performance_analysis_view(request):
+    """
+    Render Team Performance Analysis page.
+    """
+    context = _common_context(request)
+    context["selected_option"] = "team_performance_analysis"
+
+    return render(
+        request,
+        "dashboard/team_performance_analysis.html",
+        context,
+    )
+
+@require_GET
+@login_required(login_url="login")
+def fetch_team_performance_analysis(request):
+    """
+    Build Team Performance Analysis from active planned MasterCRDatabase
+    records for one selected date or selected date range.
+
+    Returned summaries:
+    - Activity Executor consolidated summary.
+    - Region + Activity Executor summary.
+    - Activity Executor + Execution Type summary.
+    - Activity Executor + Vendor summary.
+    - Activity Executor × Circle completion-rate heatmap.
+    - Activity Executor × Region completion-rate heatmap.
+    """
+    date_str = request.GET.get("date", "")
+    range_key = request.GET.get("range", "")
+
+    start_date, end_date, error_message = _vendor_analysis_dates(
+        date_str=date_str,
+        range_key=range_key,
+    )
+
+    if error_message:
+        return JsonResponse(
+            {
+                "ok": False,
+                "message": error_message,
+            },
+            status=400,
+        )
+
+    raw_rows = list(
+        MasterCRDatabase.objects
+        .using("default")
+        .filter(
+            execution_date__isnull=False,
+            execution_date__gte=start_date,
+            execution_date__lte=end_date,
+            is_active=True,
+            planning_status__iexact="planned",
+        )
+        .values(*TEAM_PERFORMANCE_FIELDS)
+        .order_by(
+            "activity_executor",
+            "region",
+            "circle",
+            "cr_no",
+        )
+    )
+
+    executor_summary = {}
+    region_executor_summary = {}
+    executor_execution_summary = {}
+    executor_vendor_summary = {}
+    executor_totals = {}
+
+    executor_risk_heatmap = {}
+    region_executor_heatmap = {}
+
+    total_cr = 0
+    total_completed = 0
+    total_rollback = 0
+    total_cancelled = 0
+    total_automation = 0
+
+    for raw_row in raw_rows:
+        circle = _vendor_analysis_text(
+            raw_row.get("circle"),
+            fallback="Not Mentioned",
+        )
+        region = _vendor_analysis_text(
+            raw_row.get("region"),
+            fallback="Not Mentioned",
+        )
+        executor = _vendor_analysis_text(
+            raw_row.get("activity_executor"),
+            fallback="Not Mentioned",
+        )
+
+        risk_level = _team_risk_level(
+            raw_row.get("risk"),
+        )
+        status_key = _analysis_status_key(
+            raw_row.get("activity_status"),
+        )
+        execution_key = _analysis_execution_type_key(
+            raw_row.get("execution_type"),
+        )
+        vendor_bucket = _vendor_analysis_vendor_bucket(
+            raw_row.get("vendor"),
+        )
+
+        total_cr += 1
+
+        # ------------------------------------------------------------
+        # 1. Consolidated Activity Executor Summary
+        # ------------------------------------------------------------
+        if executor not in executor_summary:
+            executor_summary[executor] = {
+                "activity_executor": executor,
+                "total_count": 0,
+                "level_1": 0,
+                "level_2": 0,
+                "completed": 0,
+                "rollback": 0,
+                "cancelled": 0,
+            }
+
+        executor_summary_row = executor_summary[executor]
+        executor_summary_row["total_count"] += 1
+
+        # ------------------------------------------------------------
+        # 2. Region + Activity Executor Summary
+        # ------------------------------------------------------------
+        region_executor_key = (region, executor)
+
+        if region_executor_key not in region_executor_summary:
+            region_executor_summary[region_executor_key] = {
+                "region": region,
+                "activity_executor": executor,
+                **_empty_team_status_summary(),
+            }
+
+        region_executor_row = region_executor_summary[
+            region_executor_key
+        ]
+        region_executor_row["total_count"] += 1
+
+        # ------------------------------------------------------------
+        # 3. Activity Executor + Execution Type Summary
+        # ------------------------------------------------------------
+        if executor not in executor_execution_summary:
+            executor_execution_summary[executor] = {
+                "activity_executor": executor,
+                **_empty_team_execution_summary(),
+            }
+
+        executor_execution_row = executor_execution_summary[
+            executor
+        ]
+        executor_execution_row["total_count"] += 1
+
+        # ------------------------------------------------------------
+        # 4. Activity Executor + Vendor Summary
+        # ------------------------------------------------------------
+        if executor not in executor_vendor_summary:
+            executor_vendor_summary[executor] = {
+                "activity_executor": executor,
+                **_empty_team_vendor_summary(),
+            }
+
+        executor_vendor_row = executor_vendor_summary[
+            executor
+        ]
+        executor_vendor_row["total_count"] += 1
+
+        # ------------------------------------------------------------
+        # 5. Executor totals for stacked status/execution charts
+        # ------------------------------------------------------------
+        if executor not in executor_totals:
+            executor_totals[executor] = {
+                "activity_executor": executor,
+                "total_count": 0,
+                "completed": 0,
+                "rollback": 0,
+                "cancelled": 0,
+                "automation": 0,
+                "partial_automation": 0,
+                "manual": 0,
+            }
+
+        executor_total_row = executor_totals[executor]
+        executor_total_row["total_count"] += 1
+
+        # ------------------------------------------------------------
+        # 6. Activity Executor × Risk heatmap aggregation.
+        #
+        # Rows: Level-1, Level-2
+        # Columns: Activity Executor
+        # Values: completion percentage
+        # ------------------------------------------------------------
+        if risk_level in {"level_1", "level_2"}:
+            if risk_level not in executor_risk_heatmap:
+                executor_risk_heatmap[risk_level] = {}
+
+            if executor not in executor_risk_heatmap[risk_level]:
+                executor_risk_heatmap[risk_level][executor] = {
+                    "total_count": 0,
+                    "completed": 0,
+                }
+
+            executor_risk_heatmap[risk_level][executor][
+                "total_count"
+            ] += 1
+
+        # ------------------------------------------------------------
+        # 7. Region × Activity Executor heatmap aggregation.
+        #
+        # Rows: Region
+        # Columns: Activity Executor
+        # Values: completion percentage
+        # ------------------------------------------------------------
+        if region not in region_executor_heatmap:
+            region_executor_heatmap[region] = {}
+
+        if executor not in region_executor_heatmap[region]:
+            region_executor_heatmap[region][executor] = {
+                "total_count": 0,
+                "completed": 0,
+            }
+
+        region_executor_heatmap[region][executor][
+            "total_count"
+        ] += 1
+
+        # ------------------------------------------------------------
+        # Risk-level counts
+        # ------------------------------------------------------------
+        if risk_level == "level_1":
+            executor_summary_row["level_1"] += 1
+            region_executor_row["level_1"] += 1
+            executor_execution_row["level_1"] += 1
+
+        elif risk_level == "level_2":
+            executor_summary_row["level_2"] += 1
+            region_executor_row["level_2"] += 1
+            executor_execution_row["level_2"] += 1
+
+        # ------------------------------------------------------------
+        # Activity-status counts
+        # ------------------------------------------------------------
+        if status_key == "completed":
+            executor_summary_row["completed"] += 1
+            region_executor_row["completed"] += 1
+            executor_execution_row["completed"] += 1
+            executor_vendor_row["completed"] += 1
+            executor_total_row["completed"] += 1
+
+            if risk_level in {"level_1", "level_2"}:
+                executor_risk_heatmap[risk_level][executor][
+                    "completed"
+                ] += 1
+
+            region_executor_heatmap[region][executor][
+                "completed"
+            ] += 1
+
+
+            total_completed += 1
+
+        elif status_key == "rollback":
+            executor_summary_row["rollback"] += 1
+            region_executor_row["rollback"] += 1
+            executor_vendor_row["rollback"] += 1
+            executor_total_row["rollback"] += 1
+            total_rollback += 1
+
+        elif status_key == "cancelled":
+            executor_summary_row["cancelled"] += 1
+            region_executor_row["cancelled"] += 1
+            executor_vendor_row["cancelled"] += 1
+            executor_total_row["cancelled"] += 1
+            total_cancelled += 1
+
+        # ------------------------------------------------------------
+        # Execution-type counts
+        # ------------------------------------------------------------
+        if execution_key == "automation":
+            executor_execution_row["automation"] += 1
+            executor_total_row["automation"] += 1
+            total_automation += 1
+
+        elif execution_key == "partial_automation":
+            executor_execution_row["partial_automation"] += 1
+            executor_total_row["partial_automation"] += 1
+
+        elif execution_key == "manual":
+            executor_execution_row["manual"] += 1
+            executor_total_row["manual"] += 1
+
+        # ------------------------------------------------------------
+        # Vendor-bucket counts
+        # ------------------------------------------------------------
+
+        vendor_bucket_key = vendor_bucket.strip().lower()
+
+        if vendor_bucket_key == "ericsson":
+            executor_vendor_row["ericsson"] += 1
+
+        elif vendor_bucket_key == "nokia":
+            executor_vendor_row["nokia"] += 1
+        
+        elif vendor_bucket_key == "cisco":
+            executor_vendor_row["cisco"] += 1
+        
+        elif vendor_bucket_key == "huawei":
+            executor_vendor_row["huawei"] += 1
+
+        elif vendor_bucket == "combination":
+            executor_vendor_row["combination"] += 1
+
+    # ------------------------------------------------------------
+    # Build sorted output tables
+    # ------------------------------------------------------------
+    executor_summary_rows = list(executor_summary.values())
+    executor_summary_rows.sort(
+        key=lambda row: row["activity_executor"].lower()
+    )
+
+    region_executor_rows = list(region_executor_summary.values())
+    region_executor_rows.sort(
+        key=lambda row: (
+            row["region"].lower(),
+            row["activity_executor"].lower(),
+        )
+    )
+
+    executor_execution_rows = list(
+        executor_execution_summary.values()
+    )
+    executor_execution_rows.sort(
+        key=lambda row: row["activity_executor"].lower()
+    )
+
+    executor_vendor_rows = list(executor_vendor_summary.values())
+    executor_vendor_rows.sort(
+        key=lambda row: row["activity_executor"].lower()
+    )
+
+    executor_total_rows = list(executor_totals.values())
+    executor_total_rows.sort(
+        key=lambda row: row["activity_executor"].lower()
+    )
+
+    executor_labels = sorted(
+        executor_summary.keys(),
+        key=str.lower,
+    )
+
+    executor_labels = sorted(
+        executor_summary.keys(),
+        key=str.lower,
+    )
+
+    risk_labels = ["level_1", "level_2"]
+
+    risk_label_map = {
+        "level_1": "Level-1",
+        "level_2": "Level-2",
+    }
+
+    region_labels = sorted(
+        region_executor_heatmap.keys(),
+        key=str.lower,
+    )
+
+    # ------------------------------------------------------------
+    # Build Risk × Activity Executor heatmap:
+    # rows = risk levels; columns = executors.
+    # ------------------------------------------------------------
+    risk_heatmap_rows = []
+
+    for risk_key in risk_labels:
+        values = []
+
+        for executor in executor_labels:
+            counts = executor_risk_heatmap.get(
+                risk_key,
+                {},
+            ).get(
+                executor,
+                {
+                    "total_count": 0,
+                    "completed": 0,
+                },
+            )
+
+            total_count = counts["total_count"]
+            completed = counts["completed"]
+
+            completion_rate = (
+                round((completed / total_count) * 100, 1)
+                if total_count
+                else None
+            )
+
+            values.append({
+                "activity_executor": executor,
+                "total_count": total_count,
+                "completed": completed,
+                "completion_rate": completion_rate,
+            })
+
+        risk_heatmap_rows.append({
+            "risk_key": risk_key,
+            "risk_label": risk_label_map[risk_key],
+            "values": values,
+        })
+
+    # ------------------------------------------------------------
+    # Build Region × Activity Executor heatmap:
+    # rows = regions; columns = executors.
+    # ------------------------------------------------------------
+    region_executor_heatmap_rows = []
+
+    for region in region_labels:
+        values = []
+
+        for executor in executor_labels:
+            counts = region_executor_heatmap.get(
+                region,
+                {},
+            ).get(
+                executor,
+                {
+                    "total_count": 0,
+                    "completed": 0,
+                },
+            )
+
+            total_count = counts["total_count"]
+            completed = counts["completed"]
+
+            completion_rate = (
+                round((completed / total_count) * 100, 1)
+                if total_count
+                else None
+            )
+
+            values.append({
+                "activity_executor": executor,
+                "total_count": total_count,
+                "completed": completed,
+                "completion_rate": completion_rate,
+            })
+
+        region_executor_heatmap_rows.append({
+            "region": region,
+            "values": values,
+        })
+
+    completion_rate = (
+        round((total_completed / total_cr) * 100, 1)
+        if total_cr
+        else 0
+    )
+
+    automation_rate = (
+        round((total_automation / total_cr) * 100, 1)
+        if total_cr
+        else 0
+    )
+
+    if date_str:
+        period_label = start_date.strftime("%d-%m-%Y")
+    else:
+        range_labels = {
+            "1m": "Last One Month",
+            "3m": "Last Three Months",
+            "6m": "Last Six Months",
+        }
+
+        period_label = (
+            f"{range_labels.get(range_key, 'Selected Period')} "
+            f"({start_date.strftime('%d-%m-%Y')} to "
+            f"{end_date.strftime('%d-%m-%Y')})"
+        )
+
+    return JsonResponse({
+        "ok": True,
+        "message": (
+            f"Team Performance Analysis generated for {total_cr} "
+            f"active planned CR(s)."
+        ),
+        "period_label": period_label,
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+
+        "kpis": {
+            "total_cr": total_cr,
+            "completed": total_completed,
+            "completion_rate": completion_rate,
+            "automation_rate": automation_rate,
+            "rollback": total_rollback,
+            "cancelled": total_cancelled,
+        },
+
+        "executor_summary_rows": executor_summary_rows,
+        "region_executor_rows": region_executor_rows,
+        "executor_execution_rows": executor_execution_rows,
+        "executor_vendor_rows": executor_vendor_rows,
+
+        "charts": {
+            "executor_status": executor_total_rows,
+
+            # Use execution-specific rows. This guarantees all executors,
+            # including those without a completed/rollback/cancelled record,
+            # are represented with their execution-type counters.
+            "executor_execution": executor_total_rows,
+
+            "risk_executor_heatmap": {
+                "executors": executor_labels,
+                "risks": risk_heatmap_rows,
+            },
+
+            "region_executor_heatmap": {
+                "executors": executor_labels,
+                "regions": region_executor_heatmap_rows,
+            },
+        },
+    })
+
+
+AUTOMATION_CR_FIELDS = [
+    "region",
+    "cr_no",
+    "bpms_cr_yes_no",
+    "activity_type",
+    "vendor",
+    "execution_type",
+    "activity_status",
+    "planning_status",
+]
+
+
+def _automation_bpms_key(value):
+    """Normalize BPMS CR Yes/No text into 'yes' / 'no' / 'other'."""
+    bpms = _vendor_analysis_text(value, fallback="").lower()
+
+    if bpms in {"yes", "y", "true", "1"}:
+        return "yes"
+
+    if bpms in {"no", "n", "false", "0"}:
+        return "no"
+
+    return "other"
+
+
+@login_required(login_url="login")
+def automation_cr_analysis_view(request):
+    """Render Automation CR Analysis page."""
+    ctx = _common_context(request)
+    ctx["selected_option"] = "automation_cr_analysis"
+
+    return render(
+        request,
+        "dashboard/automation_cr_analysis.html",
+        ctx,
+    )
+
+
+@require_GET
+@login_required(login_url="login")
+def fetch_automation_cr_analysis(request):
+    """
+    Return table and chart-ready Automation CR Analysis data.
+
+    Filter:
+        - execution date (single) or date range
+        - planning_status = planned
+        - activity_status = completed
+
+    Summary grouping:
+        Region + Activity Type + Vendor + Execution Type,
+        with BPMS Yes / No / Total counts.
+
+    Only active master records are included, preventing historical
+    Copy-on-Write versions from being counted.
+    """
+    date_str = request.GET.get("date", "")
+    range_key = request.GET.get("range", "")
+
+    start_date, end_date, error_message = _vendor_analysis_dates(
+        date_str=date_str,
+        range_key=range_key,
+    )
+
+    if error_message:
+        return JsonResponse(
+            {"ok": False, "message": error_message},
+            status=400,
+        )
+
+    raw_rows = list(
+        MasterCRDatabase.objects
+        .using("default")
+        .filter(
+            execution_date__isnull=False,
+            execution_date__gte=start_date,
+            execution_date__lte=end_date,
+            is_active=True,
+            planning_status__iexact="planned",
+            activity_status__iexact="completed",
+        )
+        .values(*AUTOMATION_CR_FIELDS)
+        .order_by(
+            "region",
+            "activity_type",
+            "vendor",
+            "cr_no",
+        )
+    )
+
+    grouped = {}
+    vendor_totals = {}
+    heatmap = {}
+
+    totals = {
+        "total_cr": 0,
+        "bpms_yes": 0,
+        "bpms_no": 0,
+        "automation": 0,
+        "partial_automation": 0,
+        "manual": 0,
+    }
+
+    for raw_row in raw_rows:
+
+        # Defensive re-check (queryset already filters these).
+        planning_status = _vendor_analysis_text(
+            raw_row.get("planning_status"), fallback="",
+        ).lower()
+        activity_status = _vendor_analysis_text(
+            raw_row.get("activity_status"), fallback="",
+        ).lower()
+
+        if planning_status != "planned" or activity_status != "completed":
+            continue
+
+        region = _vendor_analysis_text(raw_row.get("region"))
+        activity_type = _vendor_analysis_text(raw_row.get("activity_type"))
+        vendor = _vendor_analysis_vendor_bucket(raw_row.get("vendor"))
+
+        bpms_key = _automation_bpms_key(raw_row.get("bpms_cr_yes_no"))
+        execution_type_key = _analysis_execution_type_key(
+            raw_row.get("execution_type"),
+        )
+
+        group_key = (region, activity_type, vendor, execution_type_key)
+
+        if group_key not in grouped:
+            grouped[group_key] = {
+                "region": region,
+                "activity_type": activity_type,
+                "vendor": vendor,
+                "execution_type": execution_type_key,
+                "total_count": 0,
+                "bpms_yes": 0,
+                "bpms_no": 0,
+            }
+
+        summary = grouped[group_key]
+        summary["total_count"] += 1
+        totals["total_cr"] += 1
+
+        if bpms_key == "yes":
+            summary["bpms_yes"] += 1
+            totals["bpms_yes"] += 1
+        elif bpms_key == "no":
+            summary["bpms_no"] += 1
+            totals["bpms_no"] += 1
+
+        if execution_type_key == "automation":
+            totals["automation"] += 1
+        elif execution_type_key == "partial_automation":
+            totals["partial_automation"] += 1
+        elif execution_type_key == "manual":
+            totals["manual"] += 1
+
+        # Vendor rollup for the execution-type chart.
+        if vendor not in vendor_totals:
+            vendor_totals[vendor] = {
+                "vendor": vendor,
+                "total_count": 0,
+                "automation": 0,
+                "partial_automation": 0,
+                "manual": 0,
+            }
+
+        vendor_summary = vendor_totals[vendor]
+        vendor_summary["total_count"] += 1
+
+        if execution_type_key == "automation":
+            vendor_summary["automation"] += 1
+        elif execution_type_key == "partial_automation":
+            vendor_summary["partial_automation"] += 1
+        elif execution_type_key == "manual":
+            vendor_summary["manual"] += 1
+
+        # Heatmap: Vendor (rows) x Region (columns), automation rate.
+        if vendor not in heatmap:
+            heatmap[vendor] = {}
+
+        if region not in heatmap[vendor]:
+            heatmap[vendor][region] = {
+                "total_count": 0,
+                "automation": 0,
+            }
+
+        heatmap[vendor][region]["total_count"] += 1
+
+        if execution_type_key == "automation":
+            heatmap[vendor][region]["automation"] += 1
+
+    # ------------------------------------------------------------
+    # Summary rows
+    # ------------------------------------------------------------
+    summary_rows = []
+
+    for value in grouped.values():
+        summary_rows.append({
+            "region": value["region"],
+            "activity_type": value["activity_type"],
+            "vendor": value["vendor"],
+            "execution_type": value["execution_type"],
+            "total_count": value["total_count"],
+            "bpms_yes": value["bpms_yes"],
+            "bpms_no": value["bpms_no"],
+        })
+
+    summary_rows.sort(
+        key=lambda row: (
+            row["region"].lower(),
+            row["activity_type"].lower(),
+            row["vendor"].lower() == "combination",  # False sorts first
+            row["vendor"].lower(),
+            row["execution_type"].lower(),
+        )
+    )
+
+    vendor_rows = list(vendor_totals.values())
+    vendor_rows.sort(
+        key=lambda row: (
+            row["vendor"].lower() == "combination",
+            row["vendor"].lower(),
+        )
+    )
+
+    # ------------------------------------------------------------
+    # Heatmap (Vendor x Region -> automation rate)
+    # ------------------------------------------------------------
+    regions = sorted(
+        {row["region"] for row in summary_rows},
+        key=str.lower,
+    )
+
+    vendors = sorted(
+        {row["vendor"] for row in summary_rows},
+        key=lambda v: (v.lower() == "combination", v.lower()),
+    )
+
+    heatmap_rows = []
+
+    for vendor in vendors:
+        values = []
+
+        for region in regions:
+            counts = heatmap.get(vendor, {}).get(
+                region,
+                {"total_count": 0, "automation": 0},
+            )
+
+            total_count = counts["total_count"]
+            automation_count = counts["automation"]
+
+            automation_rate = (
+                round((automation_count / total_count) * 100, 1)
+                if total_count
+                else None
+            )
+
+            values.append({
+                "region": region,
+                "total_count": total_count,
+                "automation": automation_count,
+                "automation_rate": automation_rate,
+            })
+
+        heatmap_rows.append({
+            "vendor": vendor,
+            "values": values,
+        })
+
+    # ------------------------------------------------------------
+    # KPIs
+    # ------------------------------------------------------------
+    total_cr = totals["total_cr"]
+
+    automation_rate = (
+        round((totals["automation"] / total_cr) * 100, 1)
+        if total_cr
+        else 0
+    )
+
+    partial_rate = (
+        round((totals["partial_automation"] / total_cr) * 100, 1)
+        if total_cr
+        else 0
+    )
+
+    if date_str:
+        period_label = start_date.strftime("%d-%m-%Y")
+    else:
+        range_labels = {
+            "1m": "Last One Month",
+            "3m": "Last Three Months",
+            "6m": "Last Six Months",
+        }
+
+        period_label = (
+            f"{range_labels.get(range_key, 'Selected Period')} "
+            f"({start_date.strftime('%d-%m-%Y')} to "
+            f"{end_date.strftime('%d-%m-%Y')})"
+        )
+
+    return JsonResponse({
+        "ok": True,
+        "message": (
+            f"Automation analysis generated for {total_cr} active, "
+            f"planned & completed CR(s), with {len(summary_rows)} group(s)."
+        ),
+        "period_label": period_label,
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+
+        "kpis": {
+            "total_cr": total_cr,
+            "bpms_yes": totals["bpms_yes"],
+            "bpms_no": totals["bpms_no"],
+            "automation": totals["automation"],
+            "automation_rate": automation_rate,
+            "partial_rate": partial_rate,
+        },
+
+        "rows": summary_rows,
+
+        "charts": {
+            "vendor_execution_type": vendor_rows,
+            "heatmap": {
+                "regions": regions,
+                "vendors": heatmap_rows,
+            },
+        },
+    })
 

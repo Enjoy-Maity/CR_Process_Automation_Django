@@ -2296,45 +2296,143 @@ def new_page_opener(context: BrowserContext, logs: list) -> Tuple[Page|None, Lis
     return result, logs
 
 
-def fetch_cr_status(page: Page, cr: str, logs: list) -> str:
+def fetch_status_for_one_cr(cr: str, page:Page, logs: List[str]) -> Tuple[str, str, List[str]]:
+    """
+    Runs on ONE CR using its OWN page inside the shared authenticated context.
+    Returns (cr, status).
+
+    WARNING: Playwright's sync API is not guaranteed thread-safe. If you hit
+    greenlet / event-loop errors when running this under ThreadPoolExecutor,
+    switch to the sequential loop (set STATUS_BATCH_SIZE = 1) or migrate to the
+    async Playwright API with an asyncio.Semaphore(3).
+    """
+
+    try:
+        page.goto(str(os.getenv("LOGGED_ITSM_URL")), wait_until="load")
+        safe_evaluate(page, settings.BMC_REMEDY_IFRAME_MODAL_WATCHER_JS)
+        navigate_to_change_management(page)
+
+        search_for_cr(page, cr, logs)
+        status, logs = fetch_cr_status(page, cr, logs)
+        return cr, status, logs
+    
+    except Exception as e:
+        logs.append(
+            f"{_timestamp()} -- Error processing CR '{cr}': "
+            f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+        )
+        return cr, "Error", logs
+    
+
+
+
+def fetch_cr_status(page: Page, cr: str, logs: list) -> Tuple[str, List[str]]:
     """
     Reads the CR status from an already-open ITSM CR page.
-
     Assumes the CR has already been searched/opened (call search_for_cr first).
-
     NOTE: Replace STATUS_TEXTAREA_XPATH with the real read-only textarea/field
     XPath that holds the CR status on the ITSM CR page.
     """
     # ── PLACEHOLDER: replace with the actual read-only status field XPath ──
-    STATUS_TEXTAREA_XPATH = "//textarea[@id='REPLACE_WITH_STATUS_FIELD_ID']"
+    STATUS_TEXTAREA_XPATH_1 = "//textarea[@id='arid_WIN_4_303502600']"
+    STATUS_TEXTAREA_XPATH_2 = "//textarea[@id='arid_WIN_3_303502600']"
     # ──────────────────────────────────────────────────────────────────────
-
-    status = "Unknown"
+    status = None
     try:
         page.wait_for_load_state("domcontentloaded")
         page.wait_for_load_state("load")
 
-        locator = page.locator(STATUS_TEXTAREA_XPATH)
-        locator.first.wait_for(state="visible", timeout=30000)
+        wait_var = True
+        while wait_var:
+            if (
+                page.locator(
+                    "//div[@class='PageBody pbChrome']/div[@id='WIN_3_301389923']/div[@class='TableHdr']/table[@class='TableHdr']/tbody/tr/td[@class='TableHdrL']"
+                ).text_content()
+                == "Table has Not been Loaded"
+            ):
+                page.wait_for_timeout(1000)
+            else:
+                wait_var = False
+        
+        # Define a function to wait for an element to become visible
+        # def wait_for_visible_element(xpath):
+        #     locator = page.locator(xpath)
+        #     expect(locator).to_be_visible(timeout=30000)
+        #     return locator
+        
+        # Try both XPath expressions and wait for visibility
+        # try:
+        #     status_locator = wait_for_visible_element(STATUS_TEXTAREA_XPATH_1)
+        # except Exception:
+        #     try:
+        #         status_locator = wait_for_visible_element(STATUS_TEXTAREA_XPATH_2)
+        #     except Exception as e:
+        #         logs.append(f"{_timestamp()} -- Failed to fetch status: {type(e).__name__}: {e}")
+        #         status = "Unknown"
+        #         return status, logs
+        
+        # Scroll down by 200 pixels
+        page.mouse.wheel(0, 2000)   
 
-        # textarea -> input_value(); if it's a span/div, use inner_text() instead.
-        try:
-            status = locator.first.input_value().strip()
-        except Exception:
-            status = locator.first.inner_text().strip()
-
+        status_locator = page.locator(STATUS_TEXTAREA_XPATH_1).or_(page.locator(STATUS_TEXTAREA_XPATH_2))
+        page.wait_for_selector(f"{STATUS_TEXTAREA_XPATH_1} | {STATUS_TEXTAREA_XPATH_2}")
+        while not status_locator.is_visible():
+            page.wait_for_timeout(2000)
+        
+        page.keyboard.press("PageDown")
+        page.keyboard.press("End")
+        
+        # Debugging: Check if the locator is found
+        if status_locator.count() == 0:
+            logs.append(f"{_timestamp()} -- Locator not found for XPath: {STATUS_TEXTAREA_XPATH_1} or {STATUS_TEXTAREA_XPATH_2}")
+            return "Unknown", logs
+        
+        # Debugging: Check the title attribute
+        status_locator.hover()
+        title = None
+        while title is None:
+            page.wait_for_timeout(1000)
+            title = status_locator.get_attribute('title')
+        logs.append(f"{_timestamp()} -- Title attribute: {title}")
+        
+        if title == "Closed":
+            status = "Closed"
+        else:
+            try:
+                # Try to get the text using different methods
+                status = status_locator.first.get_attribute("title").strip()
+                logs.append(f"{_timestamp()} -- Attribute 'title': {status}")
+                
+                if not status:
+                    status = status_locator.first.input_value().strip()
+                    logs.append(f"{_timestamp()} -- Input value: {status}")
+                
+                if not status:
+                    status = status_locator.first.inner_text().strip()
+                    logs.append(f"{_timestamp()} -- Inner text: {status}")
+                
+                if not status:
+                    status = status_locator.first.text_content().strip()
+                    logs.append(f"{_timestamp()} -- Text content: {status}")
+                
+                if not status:
+                    status = "Unknown"
+                
+            except Exception as e:
+                logs.append(f"{_timestamp()} -- Failed to fetch status: {type(e).__name__}: {e}")
+                status = "Unknown"
+        
         if not status:
             status = "Unknown"
-
+        
         logs.append(f"{_timestamp()} -- Fetched status for CR '{cr}': {status}")
-
     except Exception as e:
         logs.append(
             f"{_timestamp()} -- Failed to fetch status for CR '{cr}': "
             f"{type(e).__name__}: {e}"
         )
         status = "Error"
-
+    
     return status, logs
 
 

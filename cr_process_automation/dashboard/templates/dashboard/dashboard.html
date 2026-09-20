@@ -1,70 +1,285 @@
 {% extends "dashboard/base_main.html" %}
 
 {% block main_content %}
-<section class="dashboard-page" aria-labelledby="dashboard-title">
 
-    <div class="dashboard-page-head">
-        <h2 id="dashboard-title" class="dashboard-title">
-            Analytics Workspace
-        </h2>
 
-        <p class="dashboard-description">
-            Select an analysis view to review CR execution, Performance,
-            Automation, and Vendor-level insights.
+<style>
+    .analytics-workspace {
+        width: 100%;
+        max-width: 1220px;
+        margin: 0 auto;
+        padding: 24px;
+        box-sizing: border-box;
+    }
+
+    .analytics-workspace-header {
+        margin-bottom: 24px;
+    }
+
+    .analytics-workspace-header h1 {
+        margin: 0 0 8px;
+        color: #23384d;
+        font-size: 28px;
+        font-weight: 700;
+        letter-spacing: -0.2px;
+    }
+
+    .analytics-workspace-header p {
+        margin: 0;
+        color: #718096;
+        font-size: 16px;
+        line-height: 1.5;
+    }
+
+    .dashboard-option-grid {
+        display: grid;
+        grid-template-columns: repeat(
+            auto-fit,
+            minmax(270px, 1fr)
+        );
+        gap: 20px;
+    }
+
+    .dashboard-option-card {
+        --card-main: #2563eb;
+        --card-dark: #1d4ed8;
+        --card-light: #eff6ff;
+        --card-border: #bfdbfe;
+        --card-text: #1e3a8a;
+
+        display: flex;
+        flex-direction: column;
+        min-height: 205px;
+        padding: 20px;
+        border: 1px solid var(--card-border);
+        border-top: 5px solid var(--card-main);
+        border-radius: 10px;
+        background: linear-gradient(
+            145deg,
+            #ffffff 0%,
+            var(--card-light) 160%
+        );
+        box-shadow: 0 3px 12px rgba(31, 56, 88, 0.08);
+        box-sizing: border-box;
+        transition:
+            transform 0.18s ease,
+            box-shadow 0.18s ease,
+            border-color 0.18s ease;
+    }
+
+    .dashboard-option-card:hover {
+        transform: translateY(-4px);
+        border-color: var(--card-main);
+        box-shadow: 0 10px 22px rgba(31, 56, 88, 0.16);
+    }
+
+    .dashboard-option-card-header {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 13px;
+    }
+
+    .dashboard-option-icon {
+        display: inline-flex;
+        width: 38px;
+        height: 38px;
+        align-items: center;
+        justify-content: center;
+        flex: 0 0 38px;
+        border-radius: 9px;
+        color: #ffffff;
+        background: var(--card-main);
+        font-size: 12px;
+        font-weight: 800;
+        letter-spacing: 0.4px;
+        box-shadow: 0 3px 8px color-mix(
+            in srgb,
+            var(--card-main) 35%,
+            transparent
+        );
+    }
+
+    .dashboard-option-card h2 {
+        margin: 0;
+        color: var(--card-text);
+        font-size: 19px;
+        font-weight: 700;
+        line-height: 1.25;
+    }
+
+    .dashboard-option-card p {
+        flex: 1;
+        margin: 0 0 20px;
+        color: #586b7e;
+        font-size: 14px;
+        line-height: 1.55;
+    }
+
+    .dashboard-option-link,
+    .dashboard-option-disabled {
+        display: inline-flex;
+        width: fit-content;
+        min-height: 38px;
+        align-items: center;
+        justify-content: center;
+        gap: 9px;
+        padding: 0 15px;
+        border-radius: 6px;
+        box-sizing: border-box;
+        font-size: 13px;
+        font-weight: 700;
+        text-decoration: none;
+    }
+
+    .dashboard-option-link {
+        color: #ffffff;
+        background: var(--card-main);
+        border: 1px solid var(--card-main);
+        cursor: pointer;
+        transition:
+            background 0.18s ease,
+            border-color 0.18s ease,
+            transform 0.18s ease;
+    }
+
+    .dashboard-option-link:hover {
+        color: #ffffff;
+        background: var(--card-dark);
+        border-color: var(--card-dark);
+        transform: translateX(2px);
+    }
+
+    .dashboard-option-disabled {
+        color: #7c8b9b;
+        background: #f3f6f9;
+        border: 1px solid #dfe6ed;
+        cursor: not-allowed;
+    }
+
+    /*
+     * Vendor Wise Analysis: violet / indigo.
+     * This is the primary requested visual identity.
+     */
+    .dashboard-option-card--vendor_wise_analysis {
+        --card-main: #7c3aed;
+        --card-dark: #5b21b6;
+        --card-light: #f5f3ff;
+        --card-border: #ddd6fe;
+        --card-text: #4c1d95;
+    }
+
+    /*
+     * CR Execution Analysis: blue.
+     */
+    .dashboard-option-card--cr_success_rate_analysis {
+        --card-main: #1e40af;
+        --card-dark: #1e3a8a;
+        --card-light: #f8fafc;
+        --card-border: #cbd5e1;
+        --card-text: #1e293b;
+    }
+
+    /*
+     * Automation Analysis: emerald green.
+     */
+    .dashboard-option-card--automation_cr_analysis {
+        --card-main: #0284c7;
+        --card-dark: #0369a1;
+        --card-light: #f0f9ff;
+        --card-border: #bae6fd;
+        --card-text: #075985;
+    }
+
+    /*
+     * Optional themes for future dashboard options.
+     */
+    .dashboard-option-card--team_performance_analysis {
+        --card-main: #0d9488;
+        --card-dark: #0f766e;
+        --card-light: #f0fdfa;
+        --card-border: #99f6e4;
+        --card-text: #115e59;
+    }
+
+    .dashboard-option-card--exception_analysis {
+        --card-main: #dc2626;
+        --card-dark: #b91c1c;
+        --card-light: #fef2f2;
+        --card-border: #fecaca;
+        --card-text: #991b1b;
+    }
+
+    @media (max-width: 640px) {
+        .analytics-workspace {
+            padding: 16px;
+        }
+
+        .dashboard-option-grid {
+            grid-template-columns: 1fr;
+        }
+    }
+</style>
+
+<div class="analytics-workspace">
+    <div class="analytics-workspace-header">
+        <h1>Analytics Workspace</h1>
+        <p>
+            Select an analysis view to review CR execution, performance,
+            automation, and vendor-level insights.
         </p>
     </div>
 
-    <div class="dashboard-options-grid">
-        {% for option in dashboard_options %}
-            <article
-                class="dashboard-option-card dashboard-option-{{ option.key }}"
-            >
-                <h3>{{ option.label }}</h3>
+    <div class="dashboard-option-grid">
+    {% for option in dashboard_options %}
+        <article
+            class="dashboard-option-card dashboard-option-card--{{ option.key }}"
+        >
+            <div class="dashboard-option-card-header">
+                <div
+                    class="dashboard-option-icon"
+                    aria-hidden="true"
+                >
+                    {% if option.key == "vendor_wise_analysis" %}
+                        VW
+                    {% elif option.key == "cr_success_rate_analysis" %}
+                        CSR
+                    {% elif option.key == "team_performance_analysis" %}
+                        TPA
+                    {% elif option.key == "automation_cr_analysis" %}
+                        AU
+                    {% else %}
+                        AN
+                    {% endif %}
+                </div>
 
-                <p>{{ option.description }}</p>
+                <h2>{{ option.label }}</h2>
+            </div>
 
-                <button
-                    type="button"
-                    class="dashboard-option-btn"
-                    data-dashboard-option="{{ option.key }}"
+            <p>{{ option.description }}</p>
+
+            {% if option.url_name %}
+                <a
+                    href="{% url option.url_name %}"
+                    class="dashboard-option-link"
                 >
                     {{ option.label }} Analysis
-                </button>
-            </article>
-        {% empty %}
-            <div class="dashboard-option-empty">
-                No dashboard options are available.
-            </div>
-        {% endfor %}
+                    <span aria-hidden="true">→</span>
+                </a>
+            {% else %}
+                <span class="dashboard-option-disabled">
+                    {{ option.label }} Analysis 
+                </span>
+            {% endif %}
+        </article>
+    {% empty %}
+        <div class="dashboard-option-card">
+            <h2>No Dashboard Options</h2>
+            <p>
+                No dashboard analysis options are available currently.
+            </p>
+        </div>
+    {% endfor %}
     </div>
-
-    <p
-        id="dashboard-option-status"
-        class="dashboard-option-status"
-        aria-live="polite"
-    ></p>
-</section>
-
-<script>
-document.querySelectorAll("[data-dashboard-option]").forEach(button => {
-    button.addEventListener("click", function () {
-        const option = this.dataset.dashboardOption;
-        if (option === "vendor_wise") {
-            window.location.href = "{% url 'vendor_dashboard_view' %}";
-            return;
-        }
-
-        const status = document.getElementById("dashboard-option-status");
-        const labels = {
-            vendor_wise: "Vendor Wise",
-            cr_success_rate: "CR Success Rate",
-            team_performance: "Team Performance",
-            automation_cr_analysis: "Automation CR Analysis",
-        };
-
-        status.textContent =
-            `${labels[option] || "Selected"} dashboard has been selected.`;
-    });
-});
-</script>
+</div>
 {% endblock %}

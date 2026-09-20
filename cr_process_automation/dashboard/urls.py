@@ -3,7 +3,7 @@ from . import views
 from dashboard.Region_CRs import views as Region_views
 from dashboard.CR_Wise_Status import views as CR_Wise_Status_views
 # from dashboard.vendor_dashboard import views as VendorDashboard_views
-from dashboard.vendor_dashboard.views import vendor_dashboard_view, vendor_dashboard_data
+# from dashboard.vendor_dashboard.views import vendor_dashboard_view, vendor_dashboard_data
 from dashboard.Night_Execution import views as NightExecution_views
 
 
@@ -48,14 +48,28 @@ urlpatterns = [
 
     #  path('dashboard/vendor-wise/', VendorDashboard_views.vendor_dashboard_view, name='vendor_dashboard'),
     # path('api/dashboard/vendor-wise-data/', VendorDashboard_views.vendor_dashboard_data, name='vendor_dashboard_data'),
-    path("vendor-dashboard/", vendor_dashboard_view, name="vendor_dashboard_view"),
-    path("api/dashboard/vendor-wise-data/", vendor_dashboard_data, name="vendor_dashboard_data"),
+    # path("vendor-dashboard/", vendor_dashboard_view, name="vendor_dashboard_view"),
+    # path("api/dashboard/vendor-wise-data/", vendor_dashboard_data, name="vendor_dashboard_data"),
 
     path('night-execution/', NightExecution_views.night_execution, name='night_execution'),
+    path('night-execution/fetch-crs/', NightExecution_views.fetch_night_execution_crs, name='fetch_night_execution_crs'),
     path('night-execution/fetch-cr-status/', NightExecution_views.fetch_night_cr_status, name='fetch_night_cr_status'),
+    path('night-execution/start-task/', NightExecution_views.start_night_execution_task, name='start_night_execution_task'),
 
     # path('night-execution/start-status/', NightExecution_views.start_night_cr_status, name='start_night_cr_status'),
     path('night-execution/status-result/', NightExecution_views.night_cr_status_result, name='night_cr_status_result'),
     path('night-execution/submit-password/', NightExecution_views.submit_night_password, name='submit_night_password'),
     path('night-execution/submit-otp/', NightExecution_views.submit_night_otp, name='submit_night_otp'),
+    path('night-execution/password-iframe/', NightExecution_views.night_password_iframe, name='night_password_iframe'),
+    path('night-execution/otp-iframe/', NightExecution_views.night_otp_iframe, name='night_otp_iframe'),
+
+
+    path("vendor-wise-analysis/", views.vendor_wise_analysis_view, name="vendor_wise_analysis"),
+    path("fetch-vendor-wise-analysis/", views.fetch_vendor_wise_analysis, name="fetch_vendor_wise_analysis"),
+    path("cr-success-rate-analysis/", views.cr_success_rate_analysis_view,name="cr_success_rate_analysis"),
+    path("fetch-cr-success-rate-analysis/", views.fetch_cr_success_rate_analysis, name="fetch_cr_success_rate_analysis"),
+    path("team-performance-analysis/", views.team_performance_analysis_view, name="team_performance_analysis"),
+    path("fetch-team-performance-analysis/", views.fetch_team_performance_analysis, name="fetch_team_performance_analysis"),
+    path("automation-cr-analysis/", views.automation_cr_analysis_view, name="automation_cr_analysis"),
+    path("fetch-automation-cr-analysis/", views.fetch_automation_cr_analysis, name="fetch_automation_cr_analysis"),
 ]

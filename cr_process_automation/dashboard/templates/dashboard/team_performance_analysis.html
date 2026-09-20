@@ -1,0 +1,1548 @@
+{% extends "dashboard/base_module.html" %}
+
+{% block module_content %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.6/dist/chart.umd.min.js"></script>
+
+<style>
+    .team-analysis-page {
+        width: 100%;
+        padding: 10px 14px 24px;
+        box-sizing: border-box;
+    }
+
+    .team-analysis-panel {
+        background: #ffffff;
+        border: 1px solid #d9e1ea;
+        border-radius: 8px;
+        box-shadow: 0 2px 8px rgba(24, 52, 86, 0.08);
+        padding: 18px;
+    }
+
+    .team-analysis-filter-row {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        flex-wrap: wrap;
+        margin-bottom: 16px;
+    }
+
+    .team-analysis-label {
+        color: #31415a;
+        font-weight: 600;
+    }
+
+    .team-analysis-date {
+        min-height: 36px;
+        padding: 5px 8px;
+        border: 1px solid #b9c6d5;
+        border-radius: 5px;
+        color: #27364a;
+    }
+
+    .team-analysis-filter-row .action-btn {
+        min-height: 36px;
+        padding: 7px 13px;
+        border: 1px solid transparent;
+        border-radius: 6px;
+        font-size: 13px;
+        font-weight: 700;
+        cursor: pointer;
+        box-shadow: 0 2px 5px rgba(38, 55, 77, 0.14);
+        transition:
+            transform 0.16s ease,
+            filter 0.16s ease,
+            box-shadow 0.16s ease;
+    }
+
+    .team-analysis-filter-row .action-btn:hover {
+        transform: translateY(-1px);
+        filter: brightness(0.97);
+        box-shadow: 0 5px 10px rgba(38, 55, 77, 0.18);
+    }
+
+    .team-analysis-filter-row .action-btn:focus-visible {
+        outline: 3px solid rgba(37, 99, 235, 0.25);
+        outline-offset: 2px;
+    }
+
+    .team-analysis-filter-row .action-btn:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+        transform: none;
+        box-shadow: none;
+    }
+
+    #team-analysis-date-btn {
+        color: #ffffff !important;
+        background: #0a5ea8 !important;
+        border-color: #084d8a !important;
+    }
+
+    .team-period-btn[data-range="1m"] {
+        display:inline-flex; 
+        align-items:center; 
+        justify-content:center; min-height:34px; 
+        padding:8px 14px; 
+        border-radius:6px; 
+        border:2px solid #0474BA; 
+        background:#00A7E1; 
+        color:#fff; 
+        font-weight:700; 
+        font-size:12px; 
+        white-space:nowrap; 
+        transition:all .2s ease; 
+    }
+
+    .team-period-btn[data-range="3m"] {
+        display:inline-flex; 
+        align-items:center; 
+        justify-content:center; min-height:34px; 
+        padding:8px 14px; 
+        border-radius:6px; 
+        border:2px solid #0474BA; 
+        background:#00A7E1; 
+        color:#fff; 
+        font-weight:700; 
+        font-size:12px; 
+        white-space:nowrap; 
+        transition:all .2s ease; 
+    }
+
+    .team-period-btn[data-range="6m"] {
+        display:inline-flex; 
+        align-items:center; 
+        justify-content:center; min-height:34px; 
+        padding:8px 14px; 
+        border-radius:6px; 
+        border:2px solid #0474BA; 
+        background:#00A7E1; 
+        color:#fff; 
+        font-weight:700; 
+        font-size:12px; 
+        white-space:nowrap; 
+        transition:all .2s ease; 
+    }
+
+    .team-period-btn.active {
+        color: #203040 !important;
+        outline: 3px solid rgba(35, 56, 77, 0.16);
+        outline-offset: 2px;
+        filter: saturate(1.15) brightness(0.94);
+        box-shadow: inset 0 0 0 1px rgba(35, 56, 77, 0.18);
+    }
+
+    .team-kpi-grid {
+        display: grid;
+        grid-template-columns: repeat(6, minmax(140px, 1fr));
+        gap: 14px;
+        margin: 18px 0;
+    }
+
+    .team-kpi-card {
+        padding: 12px 14px;
+        border: 1px solid #dfe7ef;
+        border-radius: 5px;
+        background: #f8fafc;
+    }
+
+    .team-kpi-label {
+        margin-bottom: 4px;
+        color: #77869a;
+        font-size: 12px;
+    }
+
+    .team-kpi-value {
+        color: #234e72;
+        font-size: 22px;
+        font-weight: 700;
+        line-height: 1.1;
+    }
+
+    .team-kpi-value.completed {
+        color: #1f9d67;
+    }
+
+    .team-kpi-value.automation {
+        color: #2f67dc;
+    }
+
+    .team-kpi-value.rollback {
+        color: #d54848;
+    }
+
+    .team-kpi-value.cancelled {
+        color: #d98916;
+    }
+
+    .team-chart-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 18px;
+        margin-top: 18px;
+    }
+
+    .team-heatmap-grid {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 18px;
+        width: 100%;
+        margin-top: 18px;
+    }
+
+    .team-chart-card {
+        min-width: 0;
+        min-height: 350px;
+        padding: 14px;
+        border: 1px solid #dfe7ef;
+        border-radius: 6px;
+        background: #ffffff;
+    }
+
+    .team-chart-card h3,
+    .team-summary-section h3 {
+        margin: 0 0 10px;
+        color: #2d425c;
+        font-size: 15px;
+        text-align: center;
+    }
+
+    .team-chart-wrap {
+        position: relative;
+        height: 285px;
+    }
+
+    .team-heatmap-card {
+        width: 100%;
+        min-height: auto;
+        box-sizing: border-box;
+    }
+
+    .team-heatmap-scroll {
+        width: 100%;
+        overflow-x: auto;
+        overflow-y: hidden;
+        padding-bottom: 4px;
+    }
+
+    .team-heatmap-card {
+        width: 100%;
+        min-height: auto;
+        padding: 14px;
+        border: 1px solid #b9c8d8;
+        border-radius: 7px;
+        background: #ffffff;
+        box-sizing: border-box;
+    }
+
+    .team-heatmap-scroll {
+        width: 100%;
+        overflow-x: auto;
+        overflow-y: hidden;
+        padding: 0;
+        border: 1px solid #cbd7e3;
+        border-radius: 5px;
+        box-sizing: border-box;
+        background: #ffffff;
+    }
+
+    .team-heatmap {
+        width: 100%;
+        min-width: 0;
+        border-collapse: collapse;
+        table-layout: auto;
+        border: 1px solid #b9c8d8;
+        background: #ffffff;
+    }
+
+    .team-heatmap th,
+    .team-heatmap td {
+        min-width: 72px;
+        padding: 9px 7px;
+        border: 1px solid #d4dee8;
+        text-align: center;
+        vertical-align: middle;
+        font-size: clamp(10px, 0.82vw, 12px);
+        line-height: 1.25;
+        white-space: normal;
+        overflow-wrap: break-word;
+        word-break: normal;
+        box-sizing: border-box;
+    }
+
+    .team-heatmap th {
+        color: #33475b;
+        background: #f3f6fb;
+        font-weight: 700;
+    }
+
+    /*
+    * Data columns: browser decides their width according to available
+    * table space and the Activity Executor text length. Names can wrap
+    * over words rather than showing one character per line.
+    */
+    .team-heatmap th:not(:first-child),
+    .team-heatmap td:not(:first-child) {
+        width: auto;
+        min-width: 72px;
+        max-width: 125px;
+        white-space: normal;
+        overflow-wrap: break-word;
+        word-break: normal;
+    }
+
+    /*
+    * First column is fixed enough for readable Risk/Region labels.
+    * It does not collapse or split text character-by-character.
+    */
+    .team-heatmap th:first-child,
+    .team-heatmap td:first-child,
+    .team-heatmap-row-label,
+    .team-heatmap-executor {
+        width: auto !important;
+        min-width: auto !important;
+        max-width: auto !important;
+        padding: 9px 12px !important;
+        background: #f3f6fb;
+        color: #33475b;
+        font-weight: 700;
+        text-align: center !important;
+        vertical-align: middle;
+        white-space: normal !important;
+        overflow-wrap: break-word !important;
+        word-break: normal !important;
+        hyphens: none;
+    }
+
+    .team-heatmap-cell {
+        min-width: 72px;
+        height: 54px;
+        padding: 8px 6px !important;
+        border: 1px solid #d4dee8 !important;
+        font-weight: 700;
+        vertical-align: middle;
+    }
+
+    .team-summary-section {
+        margin-top: 18px;
+        padding: 14px;
+        border: 1px solid #dfe7ef;
+        border-radius: 6px;
+        background: #ffffff;
+    }
+
+    .team-table-wrap {
+        width: 100%;
+        overflow-x: auto;
+    }
+
+    .team-summary-table {
+        width: 100%;
+        min-width: 850px;
+        border-collapse: collapse;
+    }
+
+    .team-summary-table th,
+    .team-summary-table td {
+        padding: 8px 9px;
+        border: 1px solid #e2e8f0;
+        text-align: center;
+        font-size: 13px;
+    }
+
+    .team-summary-table th {
+        background: #2563eb;
+        color: #ffffff;
+        font-weight: 600;
+    }
+
+    .team-summary-table tbody tr:nth-child(even) {
+        background: #f9fbfd;
+    }
+
+    .team-empty {
+        padding: 20px !important;
+        color: #617085;
+        text-align: center;
+    }
+
+    @media (max-width: 1250px) {
+        .team-kpi-grid {
+            grid-template-columns: repeat(3, minmax(140px, 1fr));
+        }
+    }
+
+    @media (max-width: 900px) {
+        .team-chart-grid {
+            grid-template-columns: 1fr;
+        }
+    }
+
+    @media (max-width: 600px) {
+        .team-kpi-grid {
+            grid-template-columns: 1fr;
+        }
+    }
+
+    @media (max-width: 760px) {
+        .team-heatmap th,
+        .team-heatmap td {
+            min-width: 72px;
+            padding: 8px 4px;
+            font-size: 10px;
+        }
+
+        .team-heatmap th:first-child,
+        .team-heatmap td:first-child,
+        .team-heatmap-row-label {
+            width: 165px !important;
+            min-width: 165px !important;
+            max-width: 165px !important;
+            white-space: normal !important;
+        }
+    }
+</style>
+
+<div class="team-analysis-page">
+    <div class="team-analysis-panel">
+        <h2 class="module-page-title compact-module-title">
+            Team Performance Analysis
+        </h2>
+
+        <br>
+        <div class="team-analysis-filter-row">
+            <label
+                for="team-analysis-date"
+                class="team-analysis-label"
+            >
+                Date
+            </label>
+
+            <input
+                type="date"
+                id="team-analysis-date"
+                class="team-analysis-date"
+            >
+
+            <button
+                type="button"
+                class="action-btn compact-btn team-period-btn"
+                data-range="1m"
+            >
+                Last One Month
+            </button>
+
+            <button
+                type="button"
+                class="action-btn compact-btn team-period-btn"
+                data-range="3m"
+            >
+                Last Three Months
+            </button>
+
+            <button
+                type="button"
+                class="action-btn compact-btn team-period-btn"
+                data-range="6m"
+            >
+                Last Six Months
+            </button>
+
+            <button
+                type="button"
+                id="team-analysis-date-btn"
+                class="action-btn compact-btn"
+            >
+                Analysis
+            </button>
+        </div>
+
+        <div
+            id="team-analysis-status"
+            class="region-cr-status-bar hidden"
+        ></div>
+
+        <div
+            id="team-analysis-meta"
+            class="region-cr-table-meta"
+        >
+            Select one date or a period and click Analysis.
+        </div>
+
+        <div class="team-kpi-grid">
+            <div class="team-kpi-card">
+                <div class="team-kpi-label">Total CRs</div>
+                <div
+                    id="team-kpi-total"
+                    class="team-kpi-value"
+                >
+                    —
+                </div>
+            </div>
+
+            <div class="team-kpi-card">
+                <div class="team-kpi-label">Completed</div>
+                <div
+                    id="team-kpi-completed"
+                    class="team-kpi-value completed"
+                >
+                    —
+                </div>
+            </div>
+
+            <div class="team-kpi-card">
+                <div class="team-kpi-label">Completion Rate</div>
+                <div
+                    id="team-kpi-completion-rate"
+                    class="team-kpi-value completed"
+                >
+                    —
+                </div>
+            </div>
+
+            <div class="team-kpi-card">
+                <div class="team-kpi-label">Automation Rate</div>
+                <div
+                    id="team-kpi-automation-rate"
+                    class="team-kpi-value automation"
+                >
+                    —
+                </div>
+            </div>
+
+            <div class="team-kpi-card">
+                <div class="team-kpi-label">Rollback</div>
+                <div
+                    id="team-kpi-rollback"
+                    class="team-kpi-value rollback"
+                >
+                    —
+                </div>
+            </div>
+
+            <div class="team-kpi-card">
+                <div class="team-kpi-label">Cancelled</div>
+                <div
+                    id="team-kpi-cancelled"
+                    class="team-kpi-value cancelled"
+                >
+                    —
+                </div>
+            </div>
+        </div>
+
+        <div class="team-chart-grid">
+            <div class="team-chart-card">
+                <h3>CR Sucess rate (Executor Wise)</h3>
+
+                <div class="team-chart-wrap">
+                    <canvas id="team-status-chart"></canvas>
+                </div>
+            </div>
+
+            <div class="team-chart-card">
+                <h3>Automation (Executor Wise)</h3>
+
+                <div class="team-chart-wrap">
+                    <canvas id="team-execution-chart"></canvas>
+                </div>
+            </div>
+        </div>
+
+        <div class="team-heatmap-grid">
+            <div class="team-chart-card team-heatmap-card">
+                <h3>
+                    CR Completion Rate (Risk vs Executor)
+                </h3>
+
+                <div class="team-heatmap-scroll">
+                    <table class="team-heatmap">
+                        <thead id="team-risk-heatmap-head">
+                            <tr>
+                                <th>Risk / Executor</th>
+                            </tr>
+                        </thead>
+
+                        <tbody id="team-risk-heatmap-body">
+                            <tr>
+                                <td class="team-empty">
+                                    Run analysis to view the Risk heatmap.
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div class="team-chart-card team-heatmap-card">
+                <h3>
+                    CR Completion Rate (Region vs Executor)
+                </h3>
+
+                <div class="team-heatmap-scroll">
+                    <table class="team-heatmap">
+                        <thead id="team-region-heatmap-head">
+                            <tr>
+                                <th>Region / Executor</th>
+                            </tr>
+                        </thead>
+
+                        <tbody id="team-region-heatmap-body">
+                            <tr>
+                                <td class="team-empty">
+                                    Run analysis to view the Region heatmap.
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <div class="team-summary-section">
+            <h3>Activity Executor Summary</h3>
+
+            <div class="team-table-wrap">
+                <table class="team-summary-table">
+                    <thead>
+                        <tr>
+                            <th>Activity Executor</th>
+                            <th>Total CRs</th>
+                            <th>Level-1</th>
+                            <th>Level-2</th>
+                            <th>Completed</th>
+                            <th>Rollback</th>
+                            <th>Cancelled</th>
+                        </tr>
+                    </thead>
+
+                    <tbody id="team-executor-summary-table-body">
+                        <tr>
+                            <td colspan="7" class="team-empty">
+                                Run analysis to view summary data.
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="team-summary-section">
+            <h3>Automation Summary by Activity Executor</h3>
+
+            <div class="team-table-wrap">
+                <table class="team-summary-table">
+                    <thead>
+                        <tr>
+                            <th>Activity Executor</th>
+                            <th>Total CRs</th>
+                            <th>Level-1</th>
+                            <th>Level-2</th>
+                            <th>Completed</th>
+                            <th>Automation</th>
+                            <th>Partial Automation</th>
+                            <th>Manual</th>
+                        </tr>
+                    </thead>
+
+                    <tbody id="team-executor-execution-table-body">
+                        <tr>
+                            <td colspan="8" class="team-empty">
+                                Run analysis to view summary data.
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="team-summary-section">
+            <h3>Vendor Summary by Activity Executor</h3>
+
+            <div class="team-table-wrap">
+                <table class="team-summary-table">
+                    <thead>
+                        <tr>
+                            <th>Activity Executor</th>
+                            <th>Total CRs</th>
+                            <th>Ericsson</th>
+                            <th>Nokia</th>
+                            <th>Cisco</th>
+                            <th>Huawei</th>
+                            <th>Combination</th>
+                            <th>Completed</th>
+                            <th>Rollback</th>
+                            <th>Cancelled</th>
+                        </tr>
+                    </thead>
+
+                    <tbody id="team-executor-vendor-table-body">
+                        <tr>
+                            <td colspan="8" class="team-empty">
+                                Run analysis to view summary data.
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+    const dateInput = document.getElementById(
+        "team-analysis-date"
+    );
+    const dateButton = document.getElementById(
+        "team-analysis-date-btn"
+    );
+    const periodButtons = document.querySelectorAll(
+        ".team-period-btn"
+    );
+
+    const statusElement = document.getElementById(
+        "team-analysis-status"
+    );
+    const metaElement = document.getElementById(
+        "team-analysis-meta"
+    );
+
+    const totalKpi = document.getElementById(
+        "team-kpi-total"
+    );
+    const completedKpi = document.getElementById(
+        "team-kpi-completed"
+    );
+    const completionRateKpi = document.getElementById(
+        "team-kpi-completion-rate"
+    );
+    const automationRateKpi = document.getElementById(
+        "team-kpi-automation-rate"
+    );
+    const rollbackKpi = document.getElementById(
+        "team-kpi-rollback"
+    );
+    const cancelledKpi = document.getElementById(
+        "team-kpi-cancelled"
+    );
+
+    const executorSummaryTableBody = document.getElementById(
+        "team-executor-summary-table-body"
+    );
+
+    const executorExecutionTableBody = document.getElementById(
+        "team-executor-execution-table-body"
+    );
+    const executorVendorTableBody = document.getElementById(
+        "team-executor-vendor-table-body"
+    );
+
+    const riskHeatmapHead = document.getElementById(
+        "team-risk-heatmap-head"
+    );
+
+    const riskHeatmapBody = document.getElementById(
+        "team-risk-heatmap-body"
+    );
+    const regionHeatmapHead = document.getElementById(
+        "team-region-heatmap-head"
+    );
+    const regionHeatmapBody = document.getElementById(
+        "team-region-heatmap-body"
+    );
+
+    const apiUrl = "{% url 'fetch_team_performance_analysis' %}";
+
+    if (
+        !dateInput ||
+        !dateButton ||
+        !statusElement ||
+        !metaElement ||
+        !executorSummaryTableBody ||
+        !executorExecutionTableBody ||
+        !executorVendorTableBody ||
+        !riskHeatmapHead ||
+        !riskHeatmapBody ||
+        !regionHeatmapHead ||
+        !regionHeatmapBody
+    ) {
+        console.error(
+            "Team Performance Analysis: required HTML elements are missing."
+        );
+        return;
+    }
+
+    let statusChart = null;
+    let executionChart = null;
+    let statusTimeout = null;
+
+    function escapeHtml(value) {
+        return String(value ?? "")
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;")
+            .replace(/'/g, "&#039;");
+    }
+
+    function showStatus(message, type) {
+        if (statusTimeout) {
+            clearTimeout(statusTimeout);
+            statusTimeout = null;
+        }
+
+        statusElement.textContent = message || "";
+        statusElement.className =
+            `region-cr-status-bar status-${type}`;
+
+        if (!message) {
+            statusElement.classList.add("hidden");
+            return;
+        }
+
+        if (type === "success" || type === "error") {
+            statusTimeout = setTimeout(function () {
+                statusElement.textContent = "";
+                statusElement.className =
+                    "region-cr-status-bar hidden";
+            }, 5000);
+        }
+    }
+
+    function setActivePeriodButton(selectedRange) {
+        periodButtons.forEach(function (button) {
+            button.classList.toggle(
+                "active",
+                button.dataset.range === selectedRange
+            );
+        });
+    }
+
+    function setTableMessage(tableBody, colspan, message) {
+        tableBody.innerHTML = `
+            <tr>
+                <td colspan="${colspan}" class="team-empty">
+                    ${escapeHtml(message)}
+                </td>
+            </tr>
+        `;
+    }
+
+    function updateKpis(kpis) {
+        totalKpi.textContent = kpis.total_cr ?? 0;
+        completedKpi.textContent = kpis.completed ?? 0;
+        completionRateKpi.textContent =
+            `${kpis.completion_rate ?? 0}%`;
+        automationRateKpi.textContent =
+            `${kpis.automation_rate ?? 0}%`;
+        rollbackKpi.textContent = kpis.rollback ?? 0;
+        cancelledKpi.textContent = kpis.cancelled ?? 0;
+    }
+
+    function resetKpis() {
+        totalKpi.textContent = "—";
+        completedKpi.textContent = "—";
+        completionRateKpi.textContent = "—";
+        automationRateKpi.textContent = "—";
+        rollbackKpi.textContent = "—";
+        cancelledKpi.textContent = "—";
+    }
+
+    function renderExecutorSummaryTable(rows) {
+        if (!Array.isArray(rows) || !rows.length) {
+            setTableMessage(
+                executorSummaryTableBody,
+                7,
+                "No active planned CR records found for the selected period."
+            );
+            return;
+        }
+
+        executorSummaryTableBody.innerHTML = rows.map(
+            function (row) {
+                return `
+                    <tr>
+                        <td>${escapeHtml(row.activity_executor)}</td>
+                        <td>${escapeHtml(row.total_count)}</td>
+                        <td>${escapeHtml(row.level_1)}</td>
+                        <td>${escapeHtml(row.level_2)}</td>
+                        <td>${escapeHtml(row.completed)}</td>
+                        <td>${escapeHtml(row.rollback)}</td>
+                        <td>${escapeHtml(row.cancelled)}</td>
+                    </tr>
+                `;
+            }
+        ).join("");
+    }
+
+    function renderExecutorExecutionTable(rows) {
+        if (!Array.isArray(rows) || !rows.length) {
+            setTableMessage(
+                executorExecutionTableBody,
+                8,
+                "No active planned CR records found for the selected period."
+            );
+            return;
+        }
+
+        executorExecutionTableBody.innerHTML = rows.map(
+            function (row) {
+                return `
+                    <tr>
+                        <td>${escapeHtml(row.activity_executor)}</td>
+                        <td>${escapeHtml(row.total_count)}</td>
+                        <td>${escapeHtml(row.level_1)}</td>
+                        <td>${escapeHtml(row.level_2)}</td>
+                        <td>${escapeHtml(row.completed)}</td>
+                        <td>${escapeHtml(row.automation)}</td>
+                        <td>${escapeHtml(row.partial_automation)}</td>
+                        <td>${escapeHtml(row.manual)}</td>
+                    </tr>
+                `;
+            }
+        ).join("");
+    }
+
+    function renderExecutorVendorTable(rows) {
+        if (!Array.isArray(rows) || !rows.length) {
+            setTableMessage(
+                executorVendorTableBody,
+                10,
+                "No active planned CR records found for the selected period."
+            );
+            return;
+        }
+
+        executorVendorTableBody.innerHTML = rows.map(
+            function (row) {
+                return `
+                    <tr>
+                        <td>${escapeHtml(row.activity_executor)}</td>
+                        <td>${escapeHtml(row.total_count)}</td>
+                        <td>${escapeHtml(row.ericsson)}</td>
+                        <td>${escapeHtml(row.nokia)}</td>
+                        <td>${escapeHtml(row.cisco)}</td>
+                        <td>${escapeHtml(row.huawei)}</td>
+                        <td>${escapeHtml(row.combination)}</td>
+                        <td>${escapeHtml(row.completed)}</td>
+                        <td>${escapeHtml(row.rollback)}</td>
+                        <td>${escapeHtml(row.cancelled)}</td>
+                    </tr>
+                `;
+            }
+        ).join("");
+    }
+
+    function heatmapColor(rate) {
+        if (rate === null || rate === undefined) {
+            return {
+                background: "#f3f5f8",
+                color: "#8190a3",
+            };
+        }
+
+        if (rate >= 90) {
+            return {
+                background: "#268f5c",
+                color: "#ffffff",
+            };
+        }
+
+        if (rate >= 80) {
+            return {
+                background: "#62b37e",
+                color: "#ffffff",
+            };
+        }
+
+        if (rate >= 70) {
+            return {
+                background: "#a8cf84",
+                color: "#263a2b",
+            };
+        }
+
+        if (rate >= 60) {
+            return {
+                background: "#f7cf77",
+                color: "#5f4717",
+            };
+        }
+
+        return {
+            background: "#ed9441",
+            color: "#ffffff",
+        };
+    }
+
+    function renderRiskExecutorHeatmap(heatmap) {
+        const executors = Array.isArray(heatmap.executors)
+            ? heatmap.executors
+            : [];
+
+        const risks = Array.isArray(heatmap.risks)
+            ? heatmap.risks
+            : [];
+
+        if (!executors.length || !risks.length) {
+            riskHeatmapHead.innerHTML = `
+                <tr>
+                    <th>Risk / Activity Executor</th>
+                </tr>
+            `;
+
+            riskHeatmapBody.innerHTML = `
+                <tr>
+                    <td class="team-empty">
+                        No Risk heatmap data available.
+                    </td>
+                </tr>
+            `;
+
+            return;
+        }
+
+        riskHeatmapHead.innerHTML = `
+            <tr>
+                <th>Risk / Activity Executor</th>
+                ${executors.map(function (executor) {
+                    return `<th>${escapeHtml(executor)}</th>`;
+                }).join("")}
+            </tr>
+        `;
+
+        riskHeatmapBody.innerHTML = risks.map(function (riskRow) {
+            const cells = riskRow.values.map(function (cell) {
+                const colors = heatmapColor(cell.completion_rate);
+
+                const value = cell.completion_rate === null
+                    ? "—"
+                    : `${cell.completion_rate}%`;
+
+                const tooltip = cell.total_count
+                    ? (
+                        `${riskRow.risk_label} / `
+                        + `${cell.activity_executor}: `
+                        + `${cell.completed} completed out of `
+                        + `${cell.total_count} CR(s), `
+                        + `${cell.completion_rate}%`
+                    )
+                    : (
+                        `${riskRow.risk_label} / `
+                        + `${cell.activity_executor}: No CR records`
+                    );
+
+                return `
+                    <td
+                        class="team-heatmap-cell"
+                        style="
+                            background: ${colors.background};
+                            color: ${colors.color};
+                        "
+                        title="${escapeHtml(tooltip)}"
+                    >
+                        ${escapeHtml(value)}
+                    </td>
+                `;
+            }).join("");
+
+            return `
+                <tr>
+                    <td class="team-heatmap-row-label">
+                        ${escapeHtml(riskRow.risk_label)}
+                    </td>
+                    ${cells}
+                </tr>
+            `;
+        }).join("");
+    }
+    
+    function renderRegionExecutorHeatmap(heatmap) {
+        const executors = Array.isArray(heatmap.executors)
+            ? heatmap.executors
+            : [];
+
+        const regions = Array.isArray(heatmap.regions)
+            ? heatmap.regions
+            : [];
+
+        if (!executors.length || !regions.length) {
+            regionHeatmapHead.innerHTML = `
+                <tr>
+                    <th class="team-heatmap-first-header">
+                        Region / Activity Executor
+                    </th>
+                </tr>
+            `;
+
+            regionHeatmapBody.innerHTML = `
+                <tr>
+                    <td class="team-empty">
+                        No Region heatmap data available.
+                    </td>
+                </tr>
+            `;
+
+            return;
+        }
+
+        regionHeatmapHead.innerHTML = `
+            <tr>
+                <th>Region / Activity Executor</th>
+                ${executors.map(function (executor) {
+                    return `<th>${escapeHtml(executor)}</th>`;
+                }).join("")}
+            </tr>
+        `;
+
+        regionHeatmapBody.innerHTML = regions.map(function (regionRow) {
+            const cells = regionRow.values.map(function (cell) {
+                const colors = heatmapColor(cell.completion_rate);
+
+                const value = cell.completion_rate === null
+                    ? "—"
+                    : `${cell.completion_rate}%`;
+
+                const tooltip = cell.total_count
+                    ? (
+                        `${regionRow.region} / `
+                        + `${cell.activity_executor}: `
+                        + `${cell.completed} completed out of `
+                        + `${cell.total_count} CR(s), `
+                        + `${cell.completion_rate}%`
+                    )
+                    : (
+                        `${regionRow.region} / `
+                        + `${cell.activity_executor}: No CR records`
+                    );
+
+                return `
+                    <td
+                        class="team-heatmap-cell"
+                        style="
+                            background: ${colors.background};
+                            color: ${colors.color};
+                        "
+                        title="${escapeHtml(tooltip)}"
+                    >
+                        ${escapeHtml(value)}
+                    </td>
+                `;
+            }).join("");
+
+            return `
+                <tr>
+                    <td class="team-heatmap-row-label">
+                        ${escapeHtml(regionRow.region)}
+                    </td>
+                    ${cells}
+                </tr>
+            `;
+        }).join("");
+    }
+
+    function destroyCharts() {
+        [statusChart, executionChart].forEach(function (chart) {
+            if (chart) {
+                chart.destroy();
+            }
+        });
+
+        statusChart = null;
+        executionChart = null;
+    }
+
+    function statusDatasets(rows) {
+        return [
+            {
+                label: "Completed",
+                data: rows.map(function (row) {
+                    return row.completed || 0;
+                }),
+                backgroundColor: "#24a36b",
+                borderColor: "#1d8858",
+                borderWidth: 1,
+            },
+            {
+                label: "Rollback",
+                data: rows.map(function (row) {
+                    return row.rollback || 0;
+                }),
+                backgroundColor: "#f2a93b",
+                borderColor: "#d99022",
+                borderWidth: 1,
+            },
+            {
+                label: "Cancelled",
+                data: rows.map(function (row) {
+                    return row.cancelled || 0;
+                }),
+                backgroundColor: "#e85b5b",
+                borderColor: "#ce4343",
+                borderWidth: 1,
+            },
+        ];
+    }
+
+    function stackedVerticalOptions(xAxisTitle) {
+        return {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: {
+                    position: "top",
+                    labels: {
+                        boxWidth: 12,
+                        font: {
+                            size: 11,
+                        },
+                    },
+                },
+                tooltip: {
+                    mode: "index",
+                    intersect: false,
+                },
+            },
+            scales: {
+                x: {
+                    stacked: true,
+                    title: {
+                        display: true,
+                        text: xAxisTitle,
+                    },
+                },
+                y: {
+                    stacked: true,
+                    beginAtZero: true,
+                    title: {
+                        display: true,
+                        text: "CR Count",
+                    },
+                },
+            },
+        };
+    }
+
+    function stackedHorizontalOptions(xAxisTitle) {
+        return {
+            indexAxis: "y",
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: {
+                    position: "top",
+                    labels: {
+                        boxWidth: 12,
+                        font: {
+                            size: 11,
+                        },
+                    },
+                },
+                tooltip: {
+                    mode: "index",
+                    intersect: false,
+                },
+            },
+            scales: {
+                x: {
+                    stacked: true,
+                    beginAtZero: true,
+                    title: {
+                        display: true,
+                        text: xAxisTitle,
+                    },
+                },
+                y: {
+                    stacked: true,
+                    title: {
+                        display: true,
+                        text: "Activity Executor",
+                    },
+                },
+            },
+        };
+    }
+
+    function renderCharts(charts) {
+        destroyCharts();
+
+        if (typeof Chart === "undefined") {
+            console.warn(
+                "Chart.js is not available. Tables and heatmaps remain available."
+            );
+
+            showStatus(
+                "Analysis data loaded, but stacked charts are unavailable because Chart.js did not load.",
+                "info"
+            );
+        } else {
+            const statusRows = Array.isArray(
+                charts.executor_status
+            )
+                ? charts.executor_status
+                : [];
+
+            const executionRows = Array.isArray(
+                charts.executor_execution
+            )
+                ? charts.executor_execution
+                : [];
+
+            const statusContext = document
+                .getElementById("team-status-chart")
+                .getContext("2d");
+
+            statusChart = new Chart(statusContext, {
+                type: "bar",
+                data: {
+                    labels: statusRows.map(function (row) {
+                        return row.activity_executor;
+                    }),
+                    datasets: statusDatasets(statusRows),
+                },
+                options: stackedVerticalOptions(
+                    "Activity Executor"
+                ),
+            });
+
+            const executionContext = document
+                .getElementById("team-execution-chart")
+                .getContext("2d");
+
+            executionChart = new Chart(executionContext, {
+                type: "bar",
+                data: {
+                    labels: executionRows.map(function (row) {
+                        return row.activity_executor;
+                    }),
+                    datasets: [
+                        {
+                            label: "Automation",
+                            data: executionRows.map(
+                                function (row) {
+                                    return row.automation || 0;
+                                }
+                            ),
+                            backgroundColor: "#2f67dc",
+                        },
+                        {
+                            label: "Partial Automation",
+                            data: executionRows.map(
+                                function (row) {
+                                    return (
+                                        row.partial_automation || 0
+                                    );
+                                }
+                            ),
+                            backgroundColor: "#8558e8",
+                        },
+                        {
+                            label: "Manual",
+                            data: executionRows.map(
+                                function (row) {
+                                    return row.manual || 0;
+                                }
+                            ),
+                            backgroundColor: "#6e7e91",
+                        },
+                    ],
+                },
+                options: stackedHorizontalOptions("CR Count"),
+            });
+        }
+
+        renderRiskExecutorHeatmap(
+            charts.risk_executor_heatmap || {}
+        );
+
+        renderRegionExecutorHeatmap(
+            charts.region_executor_heatmap || {}
+        );
+    }
+
+    function resetHeatmaps(message) {
+        riskHeatmapHead.innerHTML = `
+            <tr>
+                <th class="team-heatmap-first-header">
+                    Risk / Activity Executor
+                </th>
+            </tr>
+        `;
+
+        riskHeatmapBody.innerHTML = `
+            <tr>
+                <td class="team-empty">${escapeHtml(message)}</td>
+            </tr>
+        `;
+
+        regionHeatmapHead.innerHTML = `
+            <tr>
+                <th>Region / Activity Executor</th>
+            </tr>
+        `;
+
+        regionHeatmapBody.innerHTML = `
+            <tr>
+                <td class="team-empty">${escapeHtml(message)}</td>
+            </tr>
+        `;
+    }
+
+    function resetVisuals(message) {
+        destroyCharts();
+        resetKpis();
+
+        setTableMessage(
+            executorSummaryTableBody,
+            7,
+            message
+        );
+        
+        setTableMessage(
+            executorExecutionTableBody,
+            8,
+            message
+        );
+        setTableMessage(
+            executorVendorTableBody,
+            10,
+            message
+        );
+
+        resetHeatmaps(message);
+    }
+
+    function runAnalysis(params) {
+        const queryString = new URLSearchParams(
+            params
+        ).toString();
+
+        resetVisuals("Loading analysis data...");
+        showStatus(
+            "Generating Team Performance Analysis...",
+            "info"
+        );
+        metaElement.textContent = "Loading analysis data...";
+
+        fetch(`${apiUrl}?${queryString}`, {
+            method: "GET",
+            headers: {
+                "X-Requested-With": "XMLHttpRequest",
+            },
+        })
+            .then(function (response) {
+                return response.text().then(function (body) {
+                    let data = {};
+
+                    try {
+                        data = body ? JSON.parse(body) : {};
+                    } catch (error) {
+                        data = {
+                            message: (
+                                "Analysis endpoint returned a non-JSON "
+                                + "response: "
+                                + body.slice(0, 250)
+                            ),
+                        };
+                    }
+
+                    return {
+                        responseOk: response.ok,
+                        statusCode: response.status,
+                        data: data,
+                    };
+                });
+            })
+            .then(function (result) {
+                const data = result.data;
+
+                if (!result.responseOk || !data.ok) {
+                    const message = (
+                        data.message
+                        || `Unable to generate analysis. `
+                        + `HTTP ${result.statusCode}.`
+                    );
+
+                    console.error(
+                        "Team Performance API response:",
+                        result
+                    );
+
+                    showStatus(message, "error");
+                    metaElement.textContent = message;
+                    resetVisuals(message);
+                    return;
+                }
+
+                updateKpis(data.kpis || {});
+                renderExecutorSummaryTable(
+                    data.executor_summary_rows || []
+                );
+            
+                renderExecutorExecutionTable(
+                    data.executor_execution_rows || []
+                );
+                renderExecutorVendorTable(
+                    data.executor_vendor_rows || []
+                );
+                renderCharts(data.charts || {});
+
+                metaElement.textContent = (
+                    `${data.message} Period: ${data.period_label}.`
+                );
+
+                showStatus(
+                    "Team Performance Analysis generated successfully.",
+                    "success"
+                );
+            })
+            .catch(function (error) {
+                console.error(
+                    "Team Performance request failed:",
+                    error
+                );
+
+                const message = (
+                    "Unable to generate Team Performance Analysis. "
+                    + "Please try again."
+                );
+
+                showStatus(message, "error");
+                metaElement.textContent = message;
+                resetVisuals(message);
+            });
+    }
+
+    dateButton.addEventListener("click", function () {
+        const selectedDate = dateInput.value;
+
+        if (!selectedDate) {
+            const message = "Please select an execution date.";
+
+            showStatus(message, "error");
+            metaElement.textContent = message;
+            return;
+        }
+
+        setActivePeriodButton("");
+
+        runAnalysis({
+            date: selectedDate,
+        });
+    });
+
+    periodButtons.forEach(function (button) {
+        button.addEventListener("click", function () {
+            const rangeKey = button.dataset.range;
+
+            dateInput.value = "";
+            setActivePeriodButton(rangeKey);
+
+            runAnalysis({
+                range: rangeKey,
+            });
+        });
+    });
+});
+</script>
+{% endblock %}

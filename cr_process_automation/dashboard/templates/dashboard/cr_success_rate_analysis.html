@@ -1,0 +1,877 @@
+{% extends "dashboard/base_module.html" %}
+
+{% block module_content %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.6/dist/chart.umd.min.js"></script>
+
+<style>
+    .success-analysis-page {
+        width: 100%;
+        padding: 10px 14px 24px;
+        box-sizing: border-box;
+    }
+
+    .success-analysis-panel {
+        background: #ffffff;
+        border: 1px solid #d9e1ea;
+        border-radius: 8px;
+        box-shadow: 0 2px 8px rgba(24, 52, 86, 0.08);
+        padding: 18px;
+    }
+
+    .success-analysis-filter-row {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        flex-wrap: wrap;
+        margin-bottom: 16px;
+    }
+
+    .success-analysis-label {
+        color: #31415a;
+        font-weight: 600;
+    }
+
+    .success-analysis-date {
+        min-height: 36px;
+        padding: 5px 8px;
+        border: 1px solid #b9c6d5;
+        border-radius: 5px;
+        color: #27364a;
+    }
+
+    .success-analysis-filter-row .action-btn {
+        min-height: 36px;
+        padding: 7px 13px;
+        border: 1px solid transparent;
+        border-radius: 6px;
+        color: #ffffff;
+        font-size: 13px;
+        font-weight: 700;
+        cursor: pointer;
+        box-shadow: 0 2px 5px rgba(38, 55, 77, 0.14);
+        transition: transform 0.16s ease, filter 0.16s ease, box-shadow 0.16s ease;
+    }
+
+    .success-analysis-filter-row .action-btn:focus-visible {
+        outline: 3px solid rgba(15, 118, 110, 0.28);
+        outline-offset: 2px;
+    }
+
+    .success-analysis-filter-row .action-btn:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+        transform: none;
+        box-shadow: none;
+    }
+
+    #success-analysis-date-btn {
+        color: #ffffff !important;
+        background: #0a5ea8 !important;
+        border-color: #084d8a !important;
+    }
+
+    .success-period-btn[data-range="1m"] {
+        display:inline-flex; 
+        align-items:center; 
+        justify-content:center; min-height:34px; 
+        padding:8px 14px; 
+        border-radius:6px; 
+        border:2px solid #0474BA; 
+        background:#00A7E1; 
+        color:#fff; 
+        font-weight:700; 
+        font-size:12px; 
+        white-space:nowrap; 
+        transition:all .2s ease; 
+    }
+
+    .success-period-btn[data-range="3m"] {
+        display:inline-flex; 
+        align-items:center; 
+        justify-content:center; min-height:34px; 
+        padding:8px 14px; 
+        border-radius:6px; 
+        border:2px solid #0474BA; 
+        background:#00A7E1; 
+        color:#fff; 
+        font-weight:700; 
+        font-size:12px; 
+        white-space:nowrap; 
+        transition:all .2s ease; 
+    }
+
+    .success-period-btn[data-range="6m"] {
+        display:inline-flex; 
+        align-items:center; 
+        justify-content:center; min-height:34px; 
+        padding:8px 14px; 
+        border-radius:6px; 
+        border:2px solid #0474BA; 
+        background:#00A7E1; 
+        color:#fff; 
+        font-weight:700; 
+        font-size:12px; 
+        white-space:nowrap; 
+        transition:all .2s ease; 
+    }
+
+    .success-analysis-filter-row .action-btn:hover {
+        filter: brightness(0.94);
+        transform: translateY(-1px);
+        box-shadow: 0 5px 10px rgba(38, 55, 77, 0.18);
+    }
+
+    .success-period-btn.active {
+        color: #203040 !important;
+        outline: 3px solid rgba(35, 56, 77, 0.16);
+        outline-offset: 2px;
+        filter: saturate(1.15) brightness(0.94);
+        box-shadow: inset 0 0 0 1px rgba(35, 56, 77, 0.18);
+    }
+
+    .success-kpi-grid {
+        display: grid;
+        grid-template-columns: repeat(5, minmax(145px, 1fr));
+        gap: 14px;
+        margin: 18px 0;
+    }
+
+    .success-kpi-card {
+        padding: 12px 14px;
+        border: 1px solid #dfe7ef;
+        border-radius: 5px;
+        background: #f8fafc;
+    }
+
+    .success-kpi-label {
+        margin-bottom: 4px;
+        color: #77869a;
+        font-size: 12px;
+    }
+
+    .success-kpi-value {
+        color: #234e72;
+        font-size: 23px;
+        font-weight: 700;
+        line-height: 1.1;
+    }
+
+    .success-kpi-value.completed {
+        color: #1f9d67;
+    }
+
+    .success-kpi-value.rollback {
+        color: #d54848;
+    }
+
+    .success-kpi-value.cancelled {
+        color: #d98916;
+    }
+
+    .success-chart-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 18px;
+        margin-top: 12px;
+    }
+
+    .success-single-chart-grid {
+        grid-template-columns: minmax(0, 520px);
+        justify-content: center;
+    }
+
+    .success-chart-card {
+        min-width: 0;
+        min-height: 350px;
+        padding: 14px;
+        border: 1px solid #dfe7ef;
+        border-radius: 6px;
+        background: #ffffff;
+    }
+
+    .success-chart-card h3,
+    .success-summary-section h3 {
+        margin: 0 0 10px;
+        color: #2d425c;
+        font-size: 15px;
+        text-align: center;
+    }
+
+    .success-chart-wrap {
+        position: relative;
+        height: 285px;
+    }
+
+    .success-summary-section {
+        margin-top: 18px;
+        padding: 14px;
+        border: 1px solid #dfe7ef;
+        border-radius: 6px;
+        background: #ffffff;
+    }
+
+    .success-table-wrap {
+        width: 100%;
+        overflow-x: auto;
+    }
+
+    .success-summary-table {
+        width: 100%;
+        min-width: 700px;
+        border-collapse: collapse;
+    }
+
+    .success-summary-table th,
+    .success-summary-table td {
+        padding: 8px 9px;
+        border: 1px solid #e2e8f0;
+        text-align: center;
+        font-size: 13px;
+    }
+
+    .success-summary-table th {
+        background: #0f766e;
+        color: #ffffff;
+        font-weight: 600;
+    }
+
+    .success-summary-table tbody tr:nth-child(even) {
+        background: #f9fbfd;
+    }
+
+    .success-empty {
+        padding: 20px !important;
+        color: #617085;
+        text-align: center;
+    }
+
+    @media (max-width: 1100px) {
+        .success-kpi-grid {
+            grid-template-columns: repeat(3, minmax(145px, 1fr));
+        }
+    }
+
+    @media (max-width: 900px) {
+        .success-chart-grid {
+            grid-template-columns: 1fr;
+        }
+
+        .success-single-chart-grid {
+            grid-template-columns: 1fr;
+        }
+    }
+
+    @media (max-width: 600px) {
+        .success-kpi-grid {
+            grid-template-columns: 1fr;
+        }
+    }
+</style>
+
+<div class="success-analysis-page">
+    <div class="success-analysis-panel">
+        <h2 class="module-page-title compact-module-title">
+            CR Success Rate Analysis
+        </h2>
+        <br>
+
+        <div class="success-analysis-filter-row">
+            <label for="success-analysis-date" class="success-analysis-label">
+                Date
+            </label>
+
+            <input
+                type="date"
+                id="success-analysis-date"
+                class="success-analysis-date"
+            >
+
+            <button
+                type="button"
+                class="action-btn compact-btn success-period-btn"
+                data-range="1m"
+            >
+                Last One Month
+            </button>
+
+            <button
+                type="button"
+                class="action-btn compact-btn success-period-btn"
+                data-range="3m"
+            >
+                Last Three Months
+            </button>
+
+            <button
+                type="button"
+                class="action-btn compact-btn success-period-btn"
+                data-range="6m"
+            >
+                Last Six Months
+            </button>
+            <button
+                type="button"
+                id="success-analysis-date-btn"
+                class="action-btn compact-btn"
+            >
+                Analysis
+            </button>
+        </div>
+
+        <div id="success-analysis-status" class="region-cr-status-bar hidden"></div>
+
+        <div id="success-analysis-meta" class="region-cr-table-meta">
+            Select one date or a period and click Analysis.
+        </div>
+
+        <div class="success-kpi-grid">
+            <div class="success-kpi-card">
+                <div class="success-kpi-label">Total CRs</div>
+                <div id="success-kpi-total" class="success-kpi-value">—</div>
+            </div>
+
+            <div class="success-kpi-card">
+                <div class="success-kpi-label">Completed</div>
+                <div id="success-kpi-completed" class="success-kpi-value completed">—</div>
+            </div>
+
+            <div class="success-kpi-card">
+                <div class="success-kpi-label">Rollback</div>
+                <div id="success-kpi-rollback" class="success-kpi-value rollback">—</div>
+            </div>
+
+            <div class="success-kpi-card">
+                <div class="success-kpi-label">Cancelled</div>
+                <div id="success-kpi-cancelled" class="success-kpi-value cancelled">—</div>
+            </div>
+
+            <div class="success-kpi-card">
+                <div class="success-kpi-label">Completion Rate</div>
+                <div id="success-kpi-completion-rate" class="success-kpi-value completed">—</div>
+            </div>
+        </div>
+
+        <div class="success-chart-grid">
+            <div class="success-chart-card">
+                <h3>CR Sucess Rate (Circle Wise)</h3>
+                <div class="success-chart-wrap">
+                    <canvas id="success-circle-chart"></canvas>
+                </div>
+            </div>
+
+            <div class="success-chart-card">
+                <h3>CR Sucess Rate (Region Wise)</h3>
+                <div class="success-chart-wrap">
+                    <canvas id="success-region-chart"></canvas>
+                </div>
+            </div>
+        </div>
+
+        <div class="success-chart-grid success-single-chart-grid">
+            <div class="success-chart-card">
+                <h3>Overall CR Sucess Rate</h3>
+                <div class="success-chart-wrap">
+                    <canvas id="success-rate-chart"></canvas>
+                </div>
+            </div>
+        </div>
+
+        <div class="success-summary-section">
+            <h3>Circle and Region Summary</h3>
+
+            <div class="success-table-wrap">
+                <table class="success-summary-table">
+                    <thead>
+                        <tr>
+                            <th>Circle</th>
+                            <th>Region</th>
+                            <th>Total CRs</th>
+                            <th>Completed</th>
+                            <th>Rollback</th>
+                            <th>Cancelled</th>
+                        </tr>
+                    </thead>
+                    <tbody id="success-circle-region-table-body">
+                        <tr>
+                            <td colspan="6" class="success-empty">
+                                Run analysis to view summary data.
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="success-summary-section">
+            <h3>Region Summary</h3>
+
+            <div class="success-table-wrap">
+                <table class="success-summary-table">
+                    <thead>
+                        <tr>
+                            <th>Region</th>
+                            <th>Total CRs</th>
+                            <th>Completed</th>
+                            <th>Rollback</th>
+                            <th>Cancelled</th>
+                        </tr>
+                    </thead>
+                    <tbody id="success-region-table-body">
+                        <tr>
+                            <td colspan="5" class="success-empty">
+                                Run analysis to view summary data.
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+    const dateInput = document.getElementById("success-analysis-date");
+    const dateButton = document.getElementById("success-analysis-date-btn");
+    const periodButtons = document.querySelectorAll(".success-period-btn");
+    const statusElement = document.getElementById("success-analysis-status");
+    const metaElement = document.getElementById("success-analysis-meta");
+    const totalKpi = document.getElementById("success-kpi-total");
+    const completedKpi = document.getElementById("success-kpi-completed");
+    const completionRateKpi = document.getElementById("success-kpi-completion-rate");
+    const rollbackKpi = document.getElementById("success-kpi-rollback");
+    const cancelledKpi = document.getElementById("success-kpi-cancelled");
+    const circleRegionTableBody = document.getElementById("success-circle-region-table-body");
+    const regionTableBody = document.getElementById("success-region-table-body");
+    const apiUrl = "{% url 'fetch_cr_success_rate_analysis' %}";
+
+    if (!dateInput || !dateButton || !statusElement || !metaElement || !circleRegionTableBody || !regionTableBody) {
+        console.error("CR Success Rate Analysis: required HTML elements are missing.");
+        return;
+    }
+
+    let circleChart = null;
+    let regionChart = null;
+    let rateChart = null;
+    let statusTimeout = null;
+
+    function escapeHtml(value) {
+        return String(value ?? "")
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/\"/g, "&quot;")
+            .replace(/'/g, "&#039;");
+    }
+
+    function showStatus(message, type) {
+        if (statusTimeout) {
+            clearTimeout(statusTimeout);
+            statusTimeout = null;
+        }
+
+        statusElement.textContent = message || "";
+        statusElement.className = `region-cr-status-bar status-${type}`;
+
+        if (!message) {
+            statusElement.classList.add("hidden");
+            return;
+        }
+
+        if (type === "success" || type === "error") {
+            statusTimeout = setTimeout(function () {
+                statusElement.textContent = "";
+                statusElement.className = "region-cr-status-bar hidden";
+            }, 5000);
+        }
+    }
+
+    function setActivePeriodButton(selectedRange) {
+        periodButtons.forEach(function (button) {
+            button.classList.toggle(
+                "active",
+                button.dataset.range === selectedRange
+            );
+        });
+    }
+
+    function setTableMessage(tableBody, colspan, message) {
+        tableBody.innerHTML = `
+            <tr>
+                <td colspan="${colspan}" class="success-empty">
+                    ${escapeHtml(message)}
+                </td>
+            </tr>
+        `;
+    }
+
+    function updateKpis(kpis) {
+        totalKpi.textContent = kpis.total_cr ?? 0;
+        completedKpi.textContent = kpis.completed ?? 0;
+        completionRateKpi.textContent = `${kpis.completion_rate ?? 0}%`;
+        rollbackKpi.textContent = kpis.rollback ?? 0;
+        cancelledKpi.textContent = kpis.cancelled ?? 0;
+    }
+
+    function resetKpis() {
+        totalKpi.textContent = "—";
+        completedKpi.textContent = "—";
+        completionRateKpi.textContent = "—";
+        rollbackKpi.textContent = "—";
+        cancelledKpi.textContent = "—";
+    }
+
+    function renderCircleRegionTable(rows) {
+        if (!Array.isArray(rows) || !rows.length) {
+            setTableMessage(
+                circleRegionTableBody,
+                6,
+                "No active planned CR records found for the selected period."
+            );
+            return;
+        }
+
+        circleRegionTableBody.innerHTML = rows.map(function (row) {
+            return `
+                <tr>
+                    <td>${escapeHtml(row.circle)}</td>
+                    <td>${escapeHtml(row.region)}</td>
+                    <td>${escapeHtml(row.total_count)}</td>
+                    <td>${escapeHtml(row.completed)}</td>
+                    <td>${escapeHtml(row.rollback)}</td>
+                    <td>${escapeHtml(row.cancelled)}</td>
+                </tr>
+            `;
+        }).join("");
+    }
+
+    function renderRegionTable(rows) {
+        if (!Array.isArray(rows) || !rows.length) {
+            setTableMessage(
+                regionTableBody,
+                5,
+                "No active planned CR records found for the selected period."
+            );
+            return;
+        }
+
+        regionTableBody.innerHTML = rows.map(function (row) {
+            return `
+                <tr>
+                    <td>${escapeHtml(row.region)}</td>
+                    <td>${escapeHtml(row.total_count)}</td>
+                    <td>${escapeHtml(row.completed)}</td>
+                    <td>${escapeHtml(row.rollback)}</td>
+                    <td>${escapeHtml(row.cancelled)}</td>
+                </tr>
+            `;
+        }).join("");
+    }
+
+    function destroyCharts() {
+        [circleChart, regionChart, rateChart].forEach(function (chart) {
+            if (chart) {
+                chart.destroy();
+            }
+        });
+
+        circleChart = null;
+        regionChart = null;
+        rateChart = null;
+    }
+
+    function statusDatasets(rows) {
+        return [
+            {
+                label: "Completed",
+                data: rows.map(function (row) {
+                    return row.completed;
+                }),
+                backgroundColor: "#24a36b",
+                borderColor: "#1d8858",
+                borderWidth: 1,
+            },
+            {
+                label: "Rollback",
+                data: rows.map(function (row) {
+                    return row.rollback;
+                }),
+                backgroundColor: "#f2a93b",
+                borderColor: "#d99022",
+                borderWidth: 1,
+            },
+            {
+                label: "Cancelled",
+                data: rows.map(function (row) {
+                    return row.cancelled;
+                }),
+                backgroundColor: "#e85b5b",
+                borderColor: "#ce4343",
+                borderWidth: 1,
+            },
+        ];
+    }
+
+    function stackedBarOptions(titleText) {
+        return {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: {
+                    position: "top",
+                    labels: {
+                        boxWidth: 12,
+                        font: {
+                            size: 11,
+                        },
+                    },
+                },
+                tooltip: {
+                    mode: "index",
+                    intersect: false,
+                },
+            },
+            scales: {
+                x: {
+                    stacked: true,
+                    title: {
+                        display: true,
+                        text: titleText,
+                    },
+                },
+                y: {
+                    stacked: true,
+                    beginAtZero: true,
+                    title: {
+                        display: true,
+                        text: "CR Count",
+                    },
+                },
+            },
+        };
+    }
+
+    function renderCharts(charts, kpis) {
+        destroyCharts();
+
+        if (typeof Chart === "undefined") {
+            console.warn("Chart.js is not available. Tables remain available.");
+            showStatus(
+                "Analysis data loaded, but charts are unavailable because Chart.js did not load.",
+                "info"
+            );
+            return;
+        }
+
+        const circleRows = Array.isArray(charts.by_circle)
+            ? charts.by_circle
+            : [];
+        const regionRows = Array.isArray(charts.by_region)
+            ? charts.by_region
+            : [];
+
+        const circleContext = document
+            .getElementById("success-circle-chart")
+            .getContext("2d");
+
+        circleChart = new Chart(circleContext, {
+            type: "bar",
+            data: {
+                labels: circleRows.map(function (row) {
+                    return row.circle;
+                }),
+                datasets: statusDatasets(circleRows),
+            },
+            options: stackedBarOptions("Circle"),
+        });
+
+        const regionContext = document
+            .getElementById("success-region-chart")
+            .getContext("2d");
+
+        regionChart = new Chart(regionContext, {
+            type: "bar",
+            data: {
+                labels: regionRows.map(function (row) {
+                    return row.region;
+                }),
+                datasets: statusDatasets(regionRows),
+            },
+            options: stackedBarOptions("Region"),
+        });
+
+        const completed = kpis.completed || 0;
+        const rollback = kpis.rollback || 0;
+        const cancelled = kpis.cancelled || 0;
+        const other = Math.max(
+            0,
+            (kpis.total_cr || 0) - completed - rollback - cancelled
+        );
+
+        const rateContext = document
+            .getElementById("success-rate-chart")
+            .getContext("2d");
+
+        rateChart = new Chart(rateContext, {
+            type: "doughnut",
+            data: {
+                labels: [
+                    "Completed",
+                    "Rollback",
+                    "Cancelled",
+                    "Other / In Progress",
+                ],
+                datasets: [
+                    {
+                        data: [completed, rollback, cancelled, other],
+                        backgroundColor: [
+                            "#24a36b",
+                            "#f2a93b",
+                            "#e85b5b",
+                            "#94a3b8",
+                        ],
+                        borderWidth: 1,
+                    },
+                ],
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: {
+                        position: "bottom",
+                        labels: {
+                            boxWidth: 12,
+                            font: {
+                                size: 11,
+                            },
+                        },
+                    },
+                    tooltip: {
+                        callbacks: {
+                            label: function (context) {
+                                const total = kpis.total_cr || 0;
+                                const count = context.raw || 0;
+                                const percentage = total
+                                    ? ((count / total) * 100).toFixed(1)
+                                    : "0.0";
+
+                                return `${context.label}: ${count} (${percentage}%)`;
+                            },
+                        },
+                    },
+                },
+            },
+        });
+    }
+
+    function resetVisuals(message) {
+        destroyCharts();
+        resetKpis();
+        setTableMessage(circleRegionTableBody, 6, message);
+        setTableMessage(regionTableBody, 5, message);
+    }
+
+    function runAnalysis(params) {
+        const queryString = new URLSearchParams(params).toString();
+
+        resetVisuals("Loading analysis data...");
+        showStatus("Generating CR Success Rate Analysis...", "info");
+        metaElement.textContent = "Loading analysis data...";
+
+        fetch(`${apiUrl}?${queryString}`, {
+            method: "GET",
+            headers: {
+                "X-Requested-With": "XMLHttpRequest",
+            },
+        })
+            .then(function (response) {
+                return response.text().then(function (body) {
+                    let data = {};
+
+                    try {
+                        data = body ? JSON.parse(body) : {};
+                    } catch (error) {
+                        data = {
+                            message: (
+                                "Analysis endpoint returned a non-JSON response: "
+                                + body.slice(0, 250)
+                            ),
+                        };
+                    }
+
+                    return {
+                        responseOk: response.ok,
+                        statusCode: response.status,
+                        data: data,
+                    };
+                });
+            })
+            .then(function (result) {
+                const data = result.data;
+
+                if (!result.responseOk || !data.ok) {
+                    const message = (
+                        data.message
+                        || `Unable to generate analysis. HTTP ${result.statusCode}.`
+                    );
+
+                    console.error("CR Success Rate API response:", result);
+                    showStatus(message, "error");
+                    metaElement.textContent = message;
+                    resetVisuals(message);
+                    return;
+                }
+
+                updateKpis(data.kpis || {});
+                renderCircleRegionTable(data.circle_region_rows || []);
+                renderRegionTable(data.region_rows || []);
+                renderCharts(data.charts || {}, data.kpis || {});
+
+                metaElement.textContent = (
+                    `${data.message} Period: ${data.period_label}.`
+                );
+
+                showStatus(
+                    "CR Success Rate Analysis generated successfully.",
+                    "success"
+                );
+            })
+            .catch(function (error) {
+                console.error("CR Success Rate request failed:", error);
+
+                const message = (
+                    "Unable to generate CR Success Rate Analysis. Please try again."
+                );
+
+                showStatus(message, "error");
+                metaElement.textContent = message;
+                resetVisuals(message);
+            });
+    }
+
+    dateButton.addEventListener("click", function () {
+        const selectedDate = dateInput.value;
+
+        if (!selectedDate) {
+            const message = "Please select an execution date.";
+            showStatus(message, "error");
+            metaElement.textContent = message;
+            return;
+        }
+
+        setActivePeriodButton("");
+        runAnalysis({ date: selectedDate });
+    });
+
+    periodButtons.forEach(function (button) {
+        button.addEventListener("click", function () {
+            const rangeKey = button.dataset.range;
+            dateInput.value = "";
+            setActivePeriodButton(rangeKey);
+            runAnalysis({ range: rangeKey });
+        });
+    });
+});
+</script>
+{% endblock %}

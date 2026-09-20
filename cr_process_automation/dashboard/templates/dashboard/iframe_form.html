@@ -2,49 +2,133 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Provide Authenticator Code</title>
+    <title>Authentication Required</title>
     <style>
-        body { 
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; 
-            padding: 20px; 
-            background: #ffffff; 
-            color: #333;
+        * { box-sizing: border-box; }
+        html, body {
             margin: 0;
+            padding: 0;
+            background: #ffffff;
+            color: #1f2937;
+            font-family: Arial, sans-serif;
         }
-        h3 { margin-top: 0; font-size: 18px; color: #1a1a1a; }
-        p.text-muted { color: #666; font-size: 14px; margin-bottom: 20px; }
-        .form-group { margin-bottom: 15px; }
-        .form-control { 
-            width: 100%; 
-            padding: 10px; 
-            box-sizing: border-box; 
-            border: 1px solid #ccc;
-            border-radius: 4px;
+        .auth-form {
+            padding: 22px 24px 20px;
+        }
+        .auth-form-title {
+            margin: 0 0 8px;
             font-size: 16px;
-            letter-spacing: 2px;
+            font-weight: 700;
+            color: #0a5ea8;
         }
-        .btn { 
-            background: #0056b3; /* Adjust to match your dashboard's primary color */
-            color: white; 
-            padding: 10px 15px; 
-            border: none; 
-            border-radius: 4px;
-            cursor: pointer; 
+        .auth-form-description {
+            margin: 0 0 16px;
+            color: #6b7280;
+            font-size: 13px;
+            line-height: 1.45;
+        }
+        .form-group { margin-bottom: 12px; }
+        .form-label {
+            display: block;
+            margin-bottom: 6px;
+            font-weight: 700;
+            color: #1f2937;
+            font-size: 13px;
+        }
+        .form-control {
             width: 100%;
-            font-size: 16px;
-            font-weight: bold;
+            padding: 8px 10px;
+            border: 1px solid #d5dde8;
+            border-radius: 5px;
+            font-size: 13px;
+            font-family: Arial, sans-serif;
+            background: #fff;
         }
-        .btn:hover { background: #004494; }
+        .form-control:focus {
+            outline: none;
+            border-color: #0a5ea8;
+            box-shadow: 0 0 0 3px rgba(10, 94, 168, 0.12);
+        }
+        .form-control.otp {
+            letter-spacing: 2px;
+            font-family: monospace;
+            text-align: center;
+        }
+        .btn {
+            width: 100%;
+            margin-top: 4px;
+            background: #0a5ea8;
+            color: #fff;
+            padding: 9px 14px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 700;
+            font-family: Arial, sans-serif;
+        }
+        .btn:hover { background: #08457a; }
+        .status-message {
+            margin: 28px 0 8px;
+            text-align: center;
+            font-weight: 700;
+            font-size: 14px;
+        }
+        .status-message.success { color: #1f9d55; }
+        .status-message.error { color: #dc2626; }
     </style>
 </head>
 <body>
-    <h3>Action Required: Authenticator Verification</h3>
-    <p class="text-muted">The automation bot is paused. Please enter the 6-digit authenticator code to continue.</p>
-    
-    <form method="POST" action="">
-        {% csrf_token %}
-        {{ form.as_p }} 
-        <button type="submit" class="btn">Submit & Resume Task</button>
-    </form>
+    <div class="auth-form">
+        {% if success %}
+            <p class="status-message success">{{ message }}</p>
+            <script>
+                setTimeout(function () {
+                    window.parent.postMessage({
+                        type: 'auth-success',
+                        status: 'success',
+                        action: 'close_iframe'
+                    }, '*');
+                }, 400);
+            </script>
+        {% elif error %}
+            <h2 class="auth-form-title">Authentication Error</h2>
+            <p class="status-message error">{{ error }}</p>
+        {% else %}
+            <h2 class="auth-form-title">
+                {% if form.fields.password %}
+                    Enter your ITSM Password
+                {% else %}
+                    Enter your ITSM OTP
+                {% endif %}
+            </h2>
+            <p class="auth-form-description">
+                {% if form.fields.password %}
+                    The task is waiting for your ITSM Password to continue.
+                {% else %}
+                    The task is waiting for your ITSM OTP to continue.
+                {% endif %}
+            </p>
+
+            <form method="POST" action="">
+                {% csrf_token %}
+                <div class="form-group">
+                    <label class="form-label" for="{% if form.fields.password %}{{ form.password.id_for_label }}{% else %}{{ form.two_factor_code.id_for_label }}{% endif %}">
+                        {% if form.fields.password %}Password{% else %}OTP Code{% endif %}
+                    </label>
+                    {% for field in form %}
+                        {% if field.name != 'job_id' and field.name != 'task_id' %}
+                            {{ field }}
+                        {% endif %}
+                    {% endfor %}
+                    {% if form.job_id %}{{ form.job_id }}{% endif %}
+                    {% if form.task_id %}{{ form.task_id }}{% endif %}
+                </div>
+                <button type="submit" class="btn">
+                    {% if form.fields.password %}Submit Password{% else %}Submit OTP{% endif %}
+                </button>
+            </form>
+        {% endif %}
+    </div>
 </body>
 </html>
