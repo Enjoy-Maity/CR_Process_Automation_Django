@@ -2303,12 +2303,28 @@ def _automation_bpms_key(value):
     bpms = _vendor_analysis_text(value, fallback="").lower()
 
     if bpms in {"yes", "y", "true", "1"}:
-        return "yes"
+        return "bpms"
 
     if bpms in {"no", "n", "false", "0"}:
-        return "no"
+        return "non_bpms"
 
     return "other"
+
+def _automation_activity_identity(value):
+    """
+    Create a normalized identity for Activity Type grouping.
+
+    Handles differences in:
+    - letter case
+    - leading/trailing spaces
+    - multiple spaces between words
+    """
+    text = _vendor_analysis_text(
+        value,
+        fallback="Not Mentioned",
+    )
+
+    return re.sub(r"\s+", " ", text).strip().lower()
 
 
 @login_required(login_url="login")
@@ -2324,26 +2340,32 @@ def automation_cr_analysis_view(request):
     )
 
 
+
 @require_GET
 @login_required(login_url="login")
 def fetch_automation_cr_analysis(request):
     """
-    Return table and chart-ready Automation CR Analysis data.
+    Return chart-ready Automation CR Analysis data.
 
-    Filter:
-        - execution date (single) or date range
-        - planning_status = planned
-        - activity_status = completed
+    Filters:
+        - One selected execution date or a date range.
+        - planning_status = planned.
+        - activity_status = completed.
+        - is_active = True.
 
-    Summary grouping:
-        Region + Activity Type + Vendor + Execution Type,
-        with BPMS Yes / No / Total counts.
+    Summary:
+        - One unique row per Activity Type.
+        - Duplicate Activity Type records are merged.
+        - Counts are aggregated for BPMS, Non-BPMS, Automation,
+          Partial Automation and Manual.
 
-    Only active master records are included, preventing historical
-    Copy-on-Write versions from being counted.
+    Charts:
+        - Vendor Execution Type chart.
+        - Vendor versus Region Automation Rate heatmap.
+        - Activity Type versus Execution Type Automation Rate heatmap.
     """
-    date_str = request.GET.get("date", "")
-    range_key = request.GET.get("range", "")
+    date_str = request.GET.get("date", "").strip()
+    range_key = request.GET.get("range", "").strip()
 
     start_date, end_date, error_message = _vendor_analysis_dates(
         date_str=date_str,
@@ -2352,7 +2374,10 @@ def fetch_automation_cr_analysis(request):
 
     if error_message:
         return JsonResponse(
-            {"ok": False, "message": error_message},
+            {
+                "ok": False,
+                "message": error_message,
+            },
             status=400,
         )
 
@@ -2376,73 +2401,111 @@ def fetch_automation_cr_analysis(request):
         )
     )
 
-    grouped = {}
+    activity_summary = {}
     vendor_totals = {}
-    heatmap = {}
+    vendor_region_heatmap = {}
+    activity_execution_heatmap = {}
 
     totals = {
         "total_cr": 0,
-        "bpms_yes": 0,
-        "bpms_no": 0,
+        "bpms": 0,
+        "non_bpms": 0,
         "automation": 0,
         "partial_automation": 0,
         "manual": 0,
     }
 
     for raw_row in raw_rows:
-
-        # Defensive re-check (queryset already filters these).
+        # Defensive validation even though the queryset already filters
+        # these values.
         planning_status = _vendor_analysis_text(
-            raw_row.get("planning_status"), fallback="",
-        ).lower()
-        activity_status = _vendor_analysis_text(
-            raw_row.get("activity_status"), fallback="",
+            raw_row.get("planning_status"),
+            fallback="",
         ).lower()
 
-        if planning_status != "planned" or activity_status != "completed":
+        activity_status = _vendor_analysis_text(
+            raw_row.get("activity_status"),
+            fallback="",
+        ).lower()
+
+        if planning_status != "planned":
             continue
 
-        region = _vendor_analysis_text(raw_row.get("region"))
-        activity_type = _vendor_analysis_text(raw_row.get("activity_type"))
-        vendor = _vendor_analysis_vendor_bucket(raw_row.get("vendor"))
+        if activity_status != "completed":
+            continue
 
-        bpms_key = _automation_bpms_key(raw_row.get("bpms_cr_yes_no"))
-        execution_type_key = _analysis_execution_type_key(
-            raw_row.get("execution_type"),
+        # Display value and normalized grouping key.
+        activity_type_label = _vendor_analysis_text(
+            raw_row.get("activity_type"),
+            fallback="Not Mentioned",
         )
 
-        group_key = (region, activity_type, vendor, execution_type_key)
+        activity_type_key = _automation_activity_identity(
+            activity_type_label
+        )
 
-        if group_key not in grouped:
-            grouped[group_key] = {
-                "region": region,
-                "activity_type": activity_type,
-                "vendor": vendor,
-                "execution_type": execution_type_key,
+        region = _vendor_analysis_text(
+            raw_row.get("region"),
+            fallback="Not Mentioned",
+        )
+
+        vendor = _vendor_analysis_vendor_bucket(
+            raw_row.get("vendor")
+        )
+
+        bpms_key = _automation_bpms_key(
+            raw_row.get("bpms_cr_yes_no")
+        )
+
+        execution_type_key = _analysis_execution_type_key(
+            raw_row.get("execution_type")
+        )
+
+        # ------------------------------------------------------------
+        # 1. Activity Type summary
+        #
+        # One row is created for each normalized Activity Type.
+        # Duplicate Activity Type rows are merged here.
+        # ------------------------------------------------------------
+        if activity_type_key not in activity_summary:
+            activity_summary[activity_type_key] = {
+                "activity_type": activity_type_label,
                 "total_count": 0,
-                "bpms_yes": 0,
-                "bpms_no": 0,
+                "bpms": 0,
+                "non_bpms": 0,
+                "automation": 0,
+                "partial_automation": 0,
+                "manual": 0,
             }
 
-        summary = grouped[group_key]
-        summary["total_count"] += 1
+        activity_summary_row = activity_summary[activity_type_key]
+
+        activity_summary_row["total_count"] += 1
         totals["total_cr"] += 1
 
-        if bpms_key == "yes":
-            summary["bpms_yes"] += 1
-            totals["bpms_yes"] += 1
-        elif bpms_key == "no":
-            summary["bpms_no"] += 1
-            totals["bpms_no"] += 1
+        if bpms_key == "bpms":
+            activity_summary_row["bpms"] += 1
+            totals["bpms"] += 1
+
+        elif bpms_key == "non_bpms":
+            activity_summary_row["non_bpms"] += 1
+            totals["non_bpms"] += 1
 
         if execution_type_key == "automation":
+            activity_summary_row["automation"] += 1
             totals["automation"] += 1
+
         elif execution_type_key == "partial_automation":
+            activity_summary_row["partial_automation"] += 1
             totals["partial_automation"] += 1
+
         elif execution_type_key == "manual":
+            activity_summary_row["manual"] += 1
             totals["manual"] += 1
 
-        # Vendor rollup for the execution-type chart.
+        # ------------------------------------------------------------
+        # 2. Vendor execution-type chart
+        # ------------------------------------------------------------
         if vendor not in vendor_totals:
             vendor_totals[vendor] = {
                 "vendor": vendor,
@@ -2457,53 +2520,70 @@ def fetch_automation_cr_analysis(request):
 
         if execution_type_key == "automation":
             vendor_summary["automation"] += 1
+
         elif execution_type_key == "partial_automation":
             vendor_summary["partial_automation"] += 1
+
         elif execution_type_key == "manual":
             vendor_summary["manual"] += 1
 
-        # Heatmap: Vendor (rows) x Region (columns), automation rate.
-        if vendor not in heatmap:
-            heatmap[vendor] = {}
+        # ------------------------------------------------------------
+        # 3. Vendor versus Region automation heatmap
+        # ------------------------------------------------------------
+        if vendor not in vendor_region_heatmap:
+            vendor_region_heatmap[vendor] = {}
 
-        if region not in heatmap[vendor]:
-            heatmap[vendor][region] = {
+        if region not in vendor_region_heatmap[vendor]:
+            vendor_region_heatmap[vendor][region] = {
                 "total_count": 0,
                 "automation": 0,
             }
 
-        heatmap[vendor][region]["total_count"] += 1
+        vendor_region_cell = vendor_region_heatmap[vendor][region]
+        vendor_region_cell["total_count"] += 1
 
         if execution_type_key == "automation":
-            heatmap[vendor][region]["automation"] += 1
+            vendor_region_cell["automation"] += 1
+
+        # ------------------------------------------------------------
+        # 4. Activity Type versus Execution Type heatmap
+        # ------------------------------------------------------------
+        if activity_type_key not in activity_execution_heatmap:
+            activity_execution_heatmap[activity_type_key] = {
+                "activity_type": activity_type_label,
+                "total_count": 0,
+                "automation": 0,
+                "partial_automation": 0,
+                "manual": 0,
+            }
+
+        activity_heatmap_summary = (
+            activity_execution_heatmap[activity_type_key]
+        )
+
+        activity_heatmap_summary["total_count"] += 1
+
+        if execution_type_key in {
+            "automation",
+            "partial_automation",
+            "manual",
+        }:
+            activity_heatmap_summary[execution_type_key] += 1
 
     # ------------------------------------------------------------
-    # Summary rows
+    # Activity Type summary rows
     # ------------------------------------------------------------
-    summary_rows = []
-
-    for value in grouped.values():
-        summary_rows.append({
-            "region": value["region"],
-            "activity_type": value["activity_type"],
-            "vendor": value["vendor"],
-            "execution_type": value["execution_type"],
-            "total_count": value["total_count"],
-            "bpms_yes": value["bpms_yes"],
-            "bpms_no": value["bpms_no"],
-        })
+    summary_rows = list(activity_summary.values())
 
     summary_rows.sort(
-        key=lambda row: (
-            row["region"].lower(),
-            row["activity_type"].lower(),
-            row["vendor"].lower() == "combination",  # False sorts first
-            row["vendor"].lower(),
-            row["execution_type"].lower(),
-        )
+        key=lambda row: row["activity_type"].lower()
     )
 
+    # ------------------------------------------------------------
+    # Vendor execution-type chart rows
+    # ------------------------------------------------------------
     vendor_rows = list(vendor_totals.values())
+
     vendor_rows.sort(
         key=lambda row: (
             row["vendor"].lower() == "combination",
@@ -2512,69 +2592,162 @@ def fetch_automation_cr_analysis(request):
     )
 
     # ------------------------------------------------------------
-    # Heatmap (Vendor x Region -> automation rate)
+    # Vendor versus Region heatmap
     # ------------------------------------------------------------
     regions = sorted(
-        {row["region"] for row in summary_rows},
+        {
+            region_name
+            for vendor_data in vendor_region_heatmap.values()
+            for region_name in vendor_data.keys()
+        },
         key=str.lower,
     )
 
     vendors = sorted(
-        {row["vendor"] for row in summary_rows},
-        key=lambda v: (v.lower() == "combination", v.lower()),
+        vendor_region_heatmap.keys(),
+        key=lambda value: (
+            value.lower() == "combination",
+            value.lower(),
+        ),
     )
 
-    heatmap_rows = []
+    vendor_region_heatmap_rows = []
 
-    for vendor in vendors:
+    for vendor_name in vendors:
         values = []
 
-        for region in regions:
-            counts = heatmap.get(vendor, {}).get(
-                region,
-                {"total_count": 0, "automation": 0},
+        for region_name in regions:
+            counts = vendor_region_heatmap.get(
+                vendor_name,
+                {},
+            ).get(
+                region_name,
+                {
+                    "total_count": 0,
+                    "automation": 0,
+                },
             )
 
             total_count = counts["total_count"]
             automation_count = counts["automation"]
 
             automation_rate = (
-                round((automation_count / total_count) * 100, 1)
+                round(
+                    (automation_count / total_count) * 100,
+                    1,
+                )
                 if total_count
                 else None
             )
 
             values.append({
-                "region": region,
+                "region": region_name,
                 "total_count": total_count,
                 "automation": automation_count,
                 "automation_rate": automation_rate,
             })
 
-        heatmap_rows.append({
-            "vendor": vendor,
+        vendor_region_heatmap_rows.append({
+            "vendor": vendor_name,
             "values": values,
         })
 
     # ------------------------------------------------------------
-    # KPIs
+    # Activity Type versus Execution Type heatmap
+    # ------------------------------------------------------------
+    execution_labels = [
+        "automation",
+        "partial_automation",
+        "manual",
+    ]
+
+    execution_label_map = {
+        "automation": "Automation",
+        "partial_automation": "Partial Automation",
+        "manual": "Manual",
+    }
+
+    activity_execution_heatmap_rows = []
+
+    sorted_activity_keys = sorted(
+        activity_execution_heatmap.keys(),
+        key=lambda activity_key: (
+            activity_execution_heatmap[activity_key][
+                "activity_type"
+            ].lower()
+        ),
+    )
+
+    for activity_type_key in sorted_activity_keys:
+        activity_counts = activity_execution_heatmap[
+            activity_type_key
+        ]
+
+        total_count = activity_counts["total_count"]
+        values = []
+
+        for execution_key in execution_labels:
+            execution_count = activity_counts[execution_key]
+
+            execution_rate = (
+                round(
+                    (execution_count / total_count) * 100,
+                    1,
+                )
+                if total_count
+                else None
+            )
+
+            values.append({
+                "execution_type": execution_key,
+                "execution_label": execution_label_map[
+                    execution_key
+                ],
+                "count": execution_count,
+                "total_count": total_count,
+                "execution_rate": execution_rate,
+            })
+
+        activity_execution_heatmap_rows.append({
+            "activity_type": activity_counts["activity_type"],
+            "values": values,
+        })
+
+    # ------------------------------------------------------------
+    # KPI calculations
     # ------------------------------------------------------------
     total_cr = totals["total_cr"]
 
     automation_rate = (
-        round((totals["automation"] / total_cr) * 100, 1)
+        round(
+            (totals["automation"] / total_cr) * 100,
+            1,
+        )
         if total_cr
         else 0
     )
 
-    partial_rate = (
-        round((totals["partial_automation"] / total_cr) * 100, 1)
+    partial_automation_rate = (
+        round(
+            (totals["partial_automation"] / total_cr) * 100,
+            1,
+        )
+        if total_cr
+        else 0
+    )
+
+    manual_rate = (
+        round(
+            (totals["manual"] / total_cr) * 100,
+            1,
+        )
         if total_cr
         else 0
     )
 
     if date_str:
         period_label = start_date.strftime("%d-%m-%Y")
+
     else:
         range_labels = {
             "1m": "Last One Month",
@@ -2591,8 +2764,9 @@ def fetch_automation_cr_analysis(request):
     return JsonResponse({
         "ok": True,
         "message": (
-            f"Automation analysis generated for {total_cr} active, "
-            f"planned & completed CR(s), with {len(summary_rows)} group(s)."
+            f"Automation analysis generated for {total_cr} "
+            f"active planned and completed CR(s), with "
+            f"{len(summary_rows)} unique Activity Type group(s)."
         ),
         "period_label": period_label,
         "start_date": start_date.isoformat(),
@@ -2600,21 +2774,42 @@ def fetch_automation_cr_analysis(request):
 
         "kpis": {
             "total_cr": total_cr,
-            "bpms_yes": totals["bpms_yes"],
-            "bpms_no": totals["bpms_no"],
+            "bpms": totals["bpms"],
+            "non_bpms": totals["non_bpms"],
             "automation": totals["automation"],
+            "partial_automation": totals[
+                "partial_automation"
+            ],
+            "manual": totals["manual"],
             "automation_rate": automation_rate,
-            "partial_rate": partial_rate,
         },
 
         "rows": summary_rows,
 
         "charts": {
             "vendor_execution_type": vendor_rows,
+
             "heatmap": {
                 "regions": regions,
-                "vendors": heatmap_rows,
+                "vendors": vendor_region_heatmap_rows,
+            },
+
+            "activity_execution_heatmap": {
+                "execution_types": [
+                    {
+                        "key": "automation",
+                        "label": "Automation",
+                    },
+                    {
+                        "key": "partial_automation",
+                        "label": "Partial Automation",
+                    },
+                    {
+                        "key": "manual",
+                        "label": "Manual",
+                    },
+                ],
+                "activities": activity_execution_heatmap_rows,
             },
         },
     })
-

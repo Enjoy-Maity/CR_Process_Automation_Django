@@ -35,12 +35,94 @@
     .vendor-analysis-chart-wrap { height:285px; position:relative; }
     .vendor-analysis-heatmap-card { background:#fff; border:1px solid #dfe7ef; border-radius:6px; padding:14px; margin-top:18px; }
     .vendor-analysis-heatmap-card h3 { color:#2d425c; font-size:15px; margin:0 0 12px; text-align:center; }
-    .vendor-heatmap-scroll { overflow-x:auto; width:100%; }
-    .vendor-heatmap { border-collapse:collapse; width:100%; min-width:800px; }
-    .vendor-heatmap th, .vendor-heatmap td { border:1px solid #e2e8f0; padding:8px 6px; text-align:center; font-size:12px; white-space:nowrap; }
-    .vendor-heatmap th { color:#34495e; background:#f6f8fb; font-weight:600; }
+    .vendor-heatmap-scroll {
+        width: 100%;
+        overflow-x: auto;
+    }
+    
     .vendor-heatmap-vendor { background:#f6f8fb; color:#34495e; font-weight:600; text-align:left !important; }
-    .vendor-heatmap-cell { cursor:default; font-weight:600; min-width:56px; }
+    
+    .vendor-heatmap {
+        border-collapse: collapse;
+        width: max-content;
+        min-width: 100%;
+        table-layout: auto;
+    }
+
+    .vendor-heatmap th,
+    .vendor-heatmap td {
+        border: 1px solid #e2e8f0;
+        padding: 8px 10px;
+        text-align: center;
+        font-size: 12px;
+        width: auto;
+    }
+
+    .vendor-heatmap th {
+        white-space: nowrap;
+    }
+
+    .vendor-heatmap th:first-child,
+    .vendor-heatmap td:first-child {
+        width: auto;
+        min-width: 0;
+        max-width: none;
+        white-space: nowrap;
+        text-align: left;
+    }
+
+    .vendor-heatmap-cell {
+        width: auto;
+        min-width: 0;
+        max-width: none;
+        white-space: nowrap;
+        cursor: default;
+        font-weight: 600;
+    }
+
+    .vendor-heatmap-vendor {
+        width: auto;
+        min-width: 180px;
+        max-width: 420px;
+        background: #f6f8fb;
+        color: #34495e;
+        font-weight: 600;
+        text-align: center !important;
+        white-space: normal !important;
+        overflow-wrap: anywhere;
+    }
+
+    .activity-heatmap-table {
+        width: max-content;
+        min-width: 100%;
+        table-layout: auto;
+    }
+
+    .vendor-region-heatmap-table th:first-child,
+    .vendor-region-heatmap-table td:first-child {
+        width: auto;
+        min-width: 0;
+        max-width: none;
+        white-space: nowrap;
+        text-align: center;
+    }
+
+    .activity-heatmap-table th:first-child,
+    .activity-heatmap-table td:first-child {
+        width: auto;
+        min-width: 0;
+        max-width: none;
+        white-space: nowrap;
+        text-align: center;
+    }
+
+    .activity-heatmap-table th:not(:first-child),
+    .activity-heatmap-table td:not(:first-child) {
+        width: auto;
+        min-width: 92px;
+        white-space: nowrap;
+    }
+
     .vendor-analysis-summary { margin-top:18px; padding:14px; border:1px solid #dfe7ef; border-radius:6px; background:#fff; }
     .vendor-analysis-summary h3 { margin:0 0 10px; color:#2d425c; font-size:15px; text-align:center; }
     .vendor-analysis-table-wrap { overflow-x:auto; width:100%; border:1px solid #dfe7ef; border-radius:6px; }
@@ -74,20 +156,24 @@
 
         <div class="vendor-analysis-kpis">
             <div class="vendor-kpi-card"><div class="vendor-kpi-label">Total Completed CR</div><div id="automation-kpi-total" class="vendor-kpi-value">—</div></div>
-            <div class="vendor-kpi-card"><div class="vendor-kpi-label">BPMS CR - Yes</div><div id="automation-kpi-bpms-yes" class="vendor-kpi-value info">—</div></div>
-            <div class="vendor-kpi-card"><div class="vendor-kpi-label">BPMS CR - No</div><div id="automation-kpi-bpms-no" class="vendor-kpi-value warning">—</div></div>
+            
+            <div class="vendor-kpi-card"><div class="vendor-kpi-label">BPMS</div><div id="automation-kpi-bpms" class="vendor-kpi-value info">—</div></div>
+            <div class="vendor-kpi-card"><div class="vendor-kpi-label">Non-BPMS</div><div id="automation-kpi-non-bpms" class="vendor-kpi-value warning">—</div></div>
+            
             <div class="vendor-kpi-card"><div class="vendor-kpi-label">Automation</div><div id="automation-kpi-automation" class="vendor-kpi-value success">—</div></div>
+            <div class="vendor-kpi-card"><div class="vendor-kpi-label">Partial Automation</div><div id="automation-kpi-partial-automation" class="vendor-kpi-value info">—</div></div>
+            <div class="vendor-kpi-card"><div class="vendor-kpi-label">Manual</div><div id="automation-kpi-manual" class="vendor-kpi-value">—</div></div>
+
             <div class="vendor-kpi-card"><div class="vendor-kpi-label">Automation Rate</div><div id="automation-kpi-automation-rate" class="vendor-kpi-value success">—</div></div>
-            <div class="vendor-kpi-card"><div class="vendor-kpi-label">Partial Automation Rate</div><div id="automation-kpi-partial-rate" class="vendor-kpi-value info">—</div></div>
         </div>
 
         <div class="vendor-analysis-chart-grid">
             <div class="vendor-analysis-chart-card">
-                <h3>Execution Type (Vendor Wise)</h3>
+                <h3>Automation Rate (Vendor Wise)</h3>
                 <div class="vendor-analysis-chart-wrap"><canvas id="automation-execution-chart"></canvas></div>
             </div>
             <div class="vendor-analysis-chart-card">
-                <h3>BPMS CR Split (Yes vs No)</h3>
+                <h3>CR Split (BPMS/Non-BPMS)</h3>
                 <div class="vendor-analysis-chart-wrap"><canvas id="automation-bpms-chart"></canvas></div>
             </div>
         </div>
@@ -95,10 +181,41 @@
         <div class="vendor-analysis-heatmap-card">
             <h3>Automation Rate (Vendor vs Region)</h3>
             <div class="vendor-heatmap-scroll">
-                <table class="vendor-heatmap">
-                    <thead id="automation-heatmap-head"><tr><th>Vendor / Region</th></tr></thead>
+                <table class="vendor-heatmap vendor-region-heatmap-table">
+                    <thead id="automation-heatmap-head">
+                        <tr>
+                            <th>Vendor / Region</th>
+                        </tr>
+                    </thead>
+
                     <tbody id="automation-heatmap-body">
-                        <tr><td class="vendor-analysis-empty">Run analysis to view the heatmap.</td></tr>
+                        <tr>
+                            <td class="vendor-analysis-empty">
+                                Run analysis to view the heatmap.
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="vendor-analysis-heatmap-card">
+            <h3>Automation Rate (Activity Wise)</h3>
+
+            <div class="vendor-heatmap-scroll">
+                <table class="vendor-heatmap activity-heatmap-table">
+                    <thead id="activity-heatmap-head">
+                        <tr>
+                            <th>Activity Type / Execution Type</th>
+                        </tr>
+                    </thead>
+
+                    <tbody id="activity-heatmap-body">
+                        <tr>
+                            <td class="vendor-analysis-empty">
+                                Run analysis to view the activity-wise heatmap.
+                            </td>
+                        </tr>
                     </tbody>
                 </table>
             </div>
@@ -110,13 +227,13 @@
                 <table class="vendor-analysis-table">
                     <thead>
                         <tr>
-                            <th>Region</th>
                             <th>Activity Type</th>
-                            <th>Vendor</th>
-                            <th>Execution Type</th>
-                            <th>BPMS CR - Yes</th>
-                            <th>BPMS CR - No</th>
-                            <th>Total Count</th>
+                            <th>Total CRs</th>
+                            <th>BPMS</th>
+                            <th>Non-BPMS</th>
+                            <th>Automation</th>
+                            <th>Partial Automation</th>
+                            <th>Manual</th>
                         </tr>
                     </thead>
                     <tbody id="automation-analysis-table-body">
@@ -137,16 +254,72 @@ document.addEventListener("DOMContentLoaded", function () {
     const statusElement = document.getElementById("automation-analysis-status");
     const metaElement = document.getElementById("automation-analysis-meta");
 
-    const totalKpi = document.getElementById("automation-kpi-total");
-    const bpmsYesKpi = document.getElementById("automation-kpi-bpms-yes");
-    const bpmsNoKpi = document.getElementById("automation-kpi-bpms-no");
-    const automationKpi = document.getElementById("automation-kpi-automation");
-    const automationRateKpi = document.getElementById("automation-kpi-automation-rate");
-    const partialRateKpi = document.getElementById("automation-kpi-partial-rate");
+    const totalKpi = document.getElementById(
+        "automation-kpi-total"
+    );
+
+    const automationKpi = document.getElementById(
+        "automation-kpi-automation"
+    );
+
+    const automationRateKpi = document.getElementById(
+        "automation-kpi-automation-rate"
+    );
 
     const tableBody = document.getElementById("automation-analysis-table-body");
     const heatmapHead = document.getElementById("automation-heatmap-head");
     const heatmapBody = document.getElementById("automation-heatmap-body");
+
+    const bpmsKpi = document.getElementById(
+        "automation-kpi-bpms"
+    );
+
+    const nonBpmsKpi = document.getElementById(
+        "automation-kpi-non-bpms"
+    );
+
+    const partialAutomationKpi = document.getElementById(
+        "automation-kpi-partial-automation"
+    );
+
+    const manualKpi = document.getElementById(
+        "automation-kpi-manual"
+    );
+
+    const activityHeatmapHead = document.getElementById(
+        "activity-heatmap-head"
+    );
+
+    const activityHeatmapBody = document.getElementById(
+        "activity-heatmap-body"
+    );
+
+    const executionChartCanvas = document.getElementById(
+        "automation-execution-chart"
+    );
+
+    const bpmsChartCanvas = document.getElementById(
+        "automation-bpms-chart"
+    );
+
+    if (
+        !dateInput ||
+        !dateButton ||
+        !statusElement ||
+        !metaElement ||
+        !tableBody ||
+        !heatmapHead ||
+        !heatmapBody ||
+        !activityHeatmapHead ||
+        !activityHeatmapBody ||
+        !executionChartCanvas ||
+        !bpmsChartCanvas
+    ) {
+        console.error(
+            "Automation CR Analysis: required HTML elements are missing."
+        );
+        return;
+    }
 
     if (!dateInput || !dateButton || !statusElement || !metaElement ||
         !tableBody || !heatmapHead || !heatmapBody) {
@@ -192,45 +365,153 @@ document.addEventListener("DOMContentLoaded", function () {
 
     function setSummaryMessage(message) {
         tableBody.innerHTML = `
-            <tr><td colspan="7" class="vendor-analysis-empty">${escapeHtml(message)}</td></tr>`;
+            <tr>
+                <td colspan="7" class="vendor-analysis-empty">
+                    ${escapeHtml(message)}
+                </td>
+            </tr>
+        `;
     }
 
     function resetKpis() {
         totalKpi.textContent = "—";
-        bpmsYesKpi.textContent = "—";
-        bpmsNoKpi.textContent = "—";
+        bpmsKpi.textContent = "—";
+        nonBpmsKpi.textContent = "—";
         automationKpi.textContent = "—";
+        partialAutomationKpi.textContent = "—";
+        manualKpi.textContent = "—";
         automationRateKpi.textContent = "—";
-        partialRateKpi.textContent = "—";
     }
 
     function updateKpis(kpis) {
         totalKpi.textContent = kpis.total_cr ?? 0;
-        bpmsYesKpi.textContent = kpis.bpms_yes ?? 0;
-        bpmsNoKpi.textContent = kpis.bpms_no ?? 0;
+        bpmsKpi.textContent = kpis.bpms ?? 0;
+        nonBpmsKpi.textContent = kpis.non_bpms ?? 0;
         automationKpi.textContent = kpis.automation ?? 0;
-        automationRateKpi.textContent = `${kpis.automation_rate ?? 0}%`;
-        partialRateKpi.textContent = `${kpis.partial_rate ?? 0}%`;
+        partialAutomationKpi.textContent =
+            kpis.partial_automation ?? 0;
+        manualKpi.textContent = kpis.manual ?? 0;
+        automationRateKpi.textContent =
+            `${kpis.automation_rate ?? 0}%`;
     }
 
     function renderSummary(rows) {
         if (!Array.isArray(rows) || rows.length === 0) {
-            setSummaryMessage("No active, planned & completed CR records found for the selected period.");
+            setSummaryMessage(
+                "No planned and completed CR records found for the selected period."
+            );
             return;
         }
+
         tableBody.innerHTML = rows.map(function (row) {
             return `
                 <tr>
-                    <td>${escapeHtml(row.region)}</td>
                     <td>${escapeHtml(row.activity_type)}</td>
-                    <td>${escapeHtml(row.vendor)}</td>
-                    <td>${escapeHtml(EXEC_LABELS[row.execution_type] || row.execution_type)}</td>
-                    <td>${escapeHtml(row.bpms_yes)}</td>
-                    <td>${escapeHtml(row.bpms_no)}</td>
                     <td>${escapeHtml(row.total_count)}</td>
-                </tr>`;
+                    <td>${escapeHtml(row.bpms)}</td>
+                    <td>${escapeHtml(row.non_bpms)}</td>
+                    <td>${escapeHtml(row.automation)}</td>
+                    <td>${escapeHtml(row.partial_automation)}</td>
+                    <td>${escapeHtml(row.manual)}</td>
+                </tr>
+            `;
         }).join("");
     }
+
+    function renderActivityHeatmap(heatmap) {
+        const executionTypes = Array.isArray(
+            heatmap.execution_types
+        )
+            ? heatmap.execution_types
+            : [];
+
+        const activities = Array.isArray(
+            heatmap.activities
+        )
+            ? heatmap.activities
+            : [];
+
+        if (!executionTypes.length || !activities.length) {
+            activityHeatmapHead.innerHTML = `
+                <tr>
+                    <th>Activity Type / Execution Type</th>
+                </tr>
+            `;
+
+            activityHeatmapBody.innerHTML = `
+                <tr>
+                    <td class="vendor-analysis-empty">
+                        No activity-wise heatmap data available.
+                    </td>
+                </tr>
+            `;
+
+            return;
+        }
+
+        activityHeatmapHead.innerHTML = `
+            <tr>
+                <th>Activity Type / Execution Type</th>
+                ${executionTypes.map(function (item) {
+                    return `<th>${escapeHtml(item.label)}</th>`;
+                }).join("")}
+            </tr>
+        `;
+
+        activityHeatmapBody.innerHTML = activities.map(
+            function (activityRow) {
+                const cells = activityRow.values.map(
+                    function (cell) {
+                        const colors = heatmapColor(
+                            cell.execution_rate
+                        );
+
+                        const value =
+                            cell.execution_rate === null
+                                ? "—"
+                                : `${cell.execution_rate}%`;
+
+                        const tooltip = cell.total_count
+                            ? (
+                                `${activityRow.activity_type} / ` +
+                                `${cell.execution_label}: ` +
+                                `${cell.count} of ` +
+                                `${cell.total_count} CR(s), ` +
+                                `${cell.execution_rate}%`
+                            )
+                            : (
+                                `${activityRow.activity_type} / ` +
+                                `${cell.execution_label}: ` +
+                                "No CR records"
+                            );
+
+                        return `
+                            <td
+                                class="vendor-heatmap-cell"
+                                style="
+                                    background:${colors.background};
+                                    color:${colors.color};
+                                "
+                                title="${escapeHtml(tooltip)}"
+                            >
+                                ${escapeHtml(value)}
+                            </td>
+                        `;
+                    }
+                ).join("");
+
+                return `
+                    <tr>
+                        <td class="vendor-heatmap-vendor">
+                            ${escapeHtml(activityRow.activity_type)}
+                        </td>
+                        ${cells}
+                    </tr>
+                `;
+            }
+        ).join("");
+    }
+
 
     function destroyCharts() {
         if (executionChart) { executionChart.destroy(); executionChart = null; }
@@ -279,23 +560,90 @@ document.addEventListener("DOMContentLoaded", function () {
     }
 
     function renderBpmsChart(kpis) {
-        const context = document.getElementById("automation-bpms-chart").getContext("2d");
+        const canvas = document.getElementById(
+            "automation-bpms-chart"
+        );
+
+        if (!canvas) {
+            console.error(
+                "Automation CR Analysis: BPMS chart canvas was not found."
+            );
+            return;
+        }
+
+        if (typeof Chart === "undefined") {
+            console.error(
+                "Automation CR Analysis: Chart.js is not available."
+            );
+            return;
+        }
+
+        const bpmsCount = Number(kpis.bpms ?? 0);
+        const nonBpmsCount = Number(kpis.non_bpms ?? 0);
+
+        const context = canvas.getContext("2d");
+
         bpmsChart = new Chart(context, {
             type: "doughnut",
+
             data: {
-                labels: ["BPMS CR - Yes", "BPMS CR - No"],
+                labels: [
+                    "BPMS",
+                    "Non-BPMS",
+                ],
+
                 datasets: [{
-                    data: [kpis.bpms_yes ?? 0, kpis.bpms_no ?? 0],
-                    backgroundColor: ["#3567d6", "#d97706"],
+                    data: [
+                        bpmsCount,
+                        nonBpmsCount,
+                    ],
+
+                    backgroundColor: [
+                        "#3567d6",
+                        "#d97706",
+                    ],
+
                     borderColor: "#ffffff",
                     borderWidth: 2,
                 }],
             },
+
             options: {
                 responsive: true,
                 maintainAspectRatio: false,
+
                 plugins: {
-                    legend: { position: "top", labels: { boxWidth: 12, font: { size: 11 } } },
+                    legend: {
+                        position: "top",
+                        labels: {
+                            boxWidth: 12,
+                            font: {
+                                size: 11,
+                            },
+                        },
+                    },
+
+                    tooltip: {
+                        callbacks: {
+                            label: function (context) {
+                                const value = Number(
+                                    context.raw ?? 0
+                                );
+
+                                const total =
+                                    bpmsCount + nonBpmsCount;
+
+                                const percentage = total
+                                    ? ((value / total) * 100).toFixed(1)
+                                    : "0.0";
+
+                                return (
+                                    `${context.label}: ` +
+                                    `${value} (${percentage}%)`
+                                );
+                            },
+                        },
+                    },
                 },
             },
         });
@@ -347,19 +695,39 @@ document.addEventListener("DOMContentLoaded", function () {
         }).join("");
     }
 
+    
     function renderCharts(charts, kpis) {
         destroyCharts();
+
+        charts = charts || {};
+        kpis = kpis || {};
+
         renderHeatmap(charts.heatmap || {});
 
-        const vendorRows = Array.isArray(charts.vendor_execution_type) ? charts.vendor_execution_type : [];
+        renderActivityHeatmap(
+            charts.activity_execution_heatmap || {}
+        );
+
+        const vendorRows = Array.isArray(
+            charts.vendor_execution_type
+        )
+            ? charts.vendor_execution_type
+            : [];
 
         if (typeof Chart === "undefined") {
-            showStatus("Analysis data loaded. Charts are unavailable because Chart.js did not load.", "info");
+            showStatus(
+                "Analysis data loaded, but Chart.js is unavailable.",
+                "error"
+            );
             return;
         }
 
-        if (vendorRows.length) { renderExecutionChart(vendorRows); }
-        renderBpmsChart(kpis || {});
+        if (vendorRows.length > 0) {
+            renderExecutionChart(vendorRows);
+        }
+
+        // Always render the BPMS chart, including when both values are zero.
+        renderBpmsChart(kpis);
     }
 
     function resetVisuals(message) {
@@ -368,6 +736,19 @@ document.addEventListener("DOMContentLoaded", function () {
         setSummaryMessage(message);
         heatmapHead.innerHTML = `<tr><th>Vendor / Region</th></tr>`;
         heatmapBody.innerHTML = `<tr><td class="vendor-analysis-empty">${escapeHtml(message)}</td></tr>`;
+        activityHeatmapHead.innerHTML = `
+            <tr>
+                <th>Activity Type / Execution Type</th>
+            </tr>
+        `;
+
+        activityHeatmapBody.innerHTML = `
+            <tr>
+                <td class="vendor-analysis-empty">
+                    ${escapeHtml(message)}
+                </td>
+            </tr>
+        `;
     }
 
     function setLoadingState() {
