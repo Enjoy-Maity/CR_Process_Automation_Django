@@ -216,15 +216,15 @@ def workbook_styling(workbook: str):
     wb.close()
 
 
-def sync_replica_task():
-    # self.update_state(state='RUNNING')
-    # sync_id = self.request.id
-    try:
-        call_command('sync_replica')
-        # cache.set(f'replica_sync_{sync_id}_status', 'complete', None)
-    except Exception as e:
-        # cache.set(f'replica_sync_{sync_id}_status', 'failed', None)
-        raise
+# def sync_replica_task():
+#     # self.update_state(state='RUNNING')
+#     # sync_id = self.request.id
+#     try:
+#         call_command('sync_replica')
+#         # cache.set(f'replica_sync_{sync_id}_status', 'complete', None)
+#     except Exception as e:
+#         # cache.set(f'replica_sync_{sync_id}_status', 'failed', None)
+#         raise
 
 
 def selected_date_df_maker(selected_date_data: QuerySet) -> pd.DataFrame:

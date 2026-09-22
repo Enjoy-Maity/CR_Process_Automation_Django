@@ -19,7 +19,7 @@ dependencies = [
     "openpyxl>=3.1.5",
     "pandas>=3.0.3",
     "playwright>=1.61.0",
-    "pythoncom",
+    "psycopg2-binary>=2.9.13",
     "pywin32>=312;sys.platform=='win32'",
     "regex>=2026.9.3",
     "rootutils>=1.0.7",

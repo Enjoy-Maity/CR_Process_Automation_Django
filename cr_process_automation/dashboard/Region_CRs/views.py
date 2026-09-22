@@ -266,22 +266,38 @@ def sync_selected_date_table(execution_date):
 # ────────────────────────────────────────────────────────────────
 # Helper: Sync replica after master commit
 # ────────────────────────────────────────────────────────────────
+# def _trigger_replica_sync_on_commit(affected_dates):
+#     """
+#     Registers a post-commit hook to sync the master DB
+#     to the replica after the current transaction commits.
+#     No Redis or Celery required: runs synchronously via call_command.
+#     """
+#     def _run_sync():
+#         try:
+#             # Sync SelectedDateTable for affected dates
+#             for d in affected_dates:
+#                 sync_selected_date_table(d)
+#             # Then sync replica
+#             from django.core.management import call_command
+#             call_command("sync_replica")
+#         except Exception:
+#             logger.exception("Replica sync failed after commit")
+    
+#     if affected_dates:
+#         transaction.on_commit(_run_sync, using=DB_MASTER)
+
 def _trigger_replica_sync_on_commit(affected_dates):
     """
-    Registers a post-commit hook to sync the master DB
-    to the replica after the current transaction commits.
-    No Redis or Celery required: runs synchronously via call_command.
+    Registers a post-commit hook to update the SelectedDateTable 
+    after the current transaction commits on the master DB.
     """
     def _run_sync():
         try:
             # Sync SelectedDateTable for affected dates
             for d in affected_dates:
                 sync_selected_date_table(d)
-            # Then sync replica
-            from django.core.management import call_command
-            call_command("sync_replica")
         except Exception:
-            logger.exception("Replica sync failed after commit")
+            logger.exception("SelectedDateTable sync failed after commit")
     
     if affected_dates:
         transaction.on_commit(_run_sync, using=DB_MASTER)

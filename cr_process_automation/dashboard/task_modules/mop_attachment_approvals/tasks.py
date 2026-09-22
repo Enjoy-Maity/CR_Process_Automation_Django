@@ -17,7 +17,7 @@ from django.db import transaction
 from dashboard.views import _timestamp, _make_serializable
 from dashboard.task_modules.dependencies import playwright_common_methods_ as pcm
 from dashboard.task_modules.dependencies.extra_dependencies import (
-    sync_replica_task, 
+    # sync_replica_task, 
     selected_date_df_maker,
     cr_wise_status_df_maker
     )
@@ -184,7 +184,7 @@ def attachment_queue_writer(
                     cr_row.CR_Approval = _make_serializable("Success")
             
             cr_row.save()
-            transaction.on_commit(lambda: sync_replica_task(), using='default')
+            # transaction.on_commit(lambda: sync_replica_task(), using='default')
         
         if str(items_dict[cr]).strip().lower() in wrong_value_list:
             excel_modifier_obj.colorizer_based_on_value_and_header(header=column_name, value=items_dict[cr], color=red_color)
@@ -207,7 +207,7 @@ def blank_error_protocol_db_updater(list_of_crs: List[AnyStr]):
             cr_row = CRWiseStatus.objects.using('default').get(cr_no=cr, is_active=True)
             cr_row.status = _make_serializable("Failed")
             cr_row.save()
-        transaction.on_commit(lambda: sync_replica_task(), using='default')
+        # transaction.on_commit(lambda: sync_replica_task(), using='default')
 
 
 def planning_cr_mop_attachment_dict_maker(
@@ -807,7 +807,7 @@ def run_task(
 
                 with transaction.atomic(using='default'):
                     SelectedDateTable.objects.using('default').bulk_create(model_instances)
-                    transaction.on_commit(lambda: sync_replica_task(), using='default')
+                    # transaction.on_commit(lambda: sync_replica_task(), using='default')
 
                 selected_date_data = SelectedDateTable.objects.filter(execution_date=parsed_date + timedelta(days=1), is_active=True).values(*settings.SELECTED_DATE_TABLE_FIELDS)
                 # print(f"{selected_date_data = }")

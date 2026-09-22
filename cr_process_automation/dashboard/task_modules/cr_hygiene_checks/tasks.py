@@ -49,7 +49,7 @@ def cr_wise_status_modifier_update_func(
         cr_wise_status = CRWiseStatus.objects.using('default').get(cr_no=cr, is_active=True)
         cr_wise_status.CR_Hygiene_Checks = status
         cr_wise_status.save()
-        transaction.on_commit(lambda: sync_replica_task(), using='default')
+        # transaction.on_commit(lambda: sync_replica_task(), using='default')
 
 
 def cr_details_update_func(
@@ -70,18 +70,18 @@ def cr_details_update_func(
         selected_date_table.impact = _make_serializable(impact)
         selected_date_table.test_cases = _make_serializable(test_cases)
         selected_date_table.save()
-        transaction.on_commit(lambda: sync_replica_task(), using='default')
+        # transaction.on_commit(lambda: sync_replica_task(), using='default')
 
 
-def sync_replica_task():
-    # self.update_state(state='RUNNING')
-    # sync_id = self.request.id
-    try:
-        call_command('sync_replica')
-        # cache.set(f'replica_sync_{sync_id}_status', 'complete', None)
-    except Exception as e:
-        # cache.set(f'replica_sync_{sync_id}_status', 'failed', None)
-        raise
+# def sync_replica_task():
+#     # self.update_state(state='RUNNING')
+#     # sync_id = self.request.id
+#     try:
+#         call_command('sync_replica')
+#         # cache.set(f'replica_sync_{sync_id}_status', 'complete', None)
+#     except Exception as e:
+#         # cache.set(f'replica_sync_{sync_id}_status', 'failed', None)
+#         raise
 
 
 def validation_file_colorizer(
@@ -151,10 +151,10 @@ def validation_file_colorizer(
             
         if ("Manual DLD Name Status" in df.columns and "Manual DLD File Name Status" in df.columns) and ("Install Plan Type" in df.columns):
             if excel_modifier_obj.get_data(cr_row, "Install Plan Type").strip().lower() == "manual":
-                if excel_modifier_obj.get_data(cr_row, "Manual DLD Name Status").lower() in wrong_value_list:
+                if str(excel_modifier_obj.get_data(cr_row, "Manual DLD Name Status")).lower() in wrong_value_list:
                     error_found = True
                     excel_modifier_obj.colorizer_based_on_cell_value(cr_row, col_loc_dict["Manual DLD Name Status"], red_color)
-                if excel_modifier_obj.get_data(cr_row, "Manual DLD File Name Status").strip().lower() in wrong_value_list:
+                if str(excel_modifier_obj.get_data(cr_row, "Manual DLD File Name Status")).strip().lower() in wrong_value_list:
                     error_found = True
                     excel_modifier_obj.colorizer_based_on_cell_value(cr_row, col_loc_dict["Manual DLD File Name Status"], red_color)
                     

@@ -37,18 +37,18 @@ def cr_wise_status_modifier_update_func(
         cr_wise_status = CRWiseStatus.objects.using('default').get(cr_no=cr, is_active=True)
         cr_wise_status.Install_Test_Plan_Downloads = status
         cr_wise_status.save()
-        transaction.on_commit(lambda: sync_replica_task(), using='default')
+        # transaction.on_commit(lambda: sync_replica_task(), using='default')
 
 
-def sync_replica_task():
-    # self.update_state(state='RUNNING')
-    # sync_id = self.request.id
-    try:
-        call_command('sync_replica')
-        # cache.set(f'replica_sync_{sync_id}_status', 'complete', None)
-    except Exception as e:
-        # cache.set(f'replica_sync_{sync_id}_status', 'failed', None)
-        raise
+# def sync_replica_task():
+#     # self.update_state(state='RUNNING')
+#     # sync_id = self.request.id
+#     try:
+#         call_command('sync_replica')
+#         # cache.set(f'replica_sync_{sync_id}_status', 'complete', None)
+#     except Exception as e:
+#         # cache.set(f'replica_sync_{sync_id}_status', 'failed', None)
+#         raise
 
 
 def zip_maker(folder: str, logs: list, file_name: str):
@@ -441,7 +441,7 @@ def run_task(
 
                 with transaction.atomic(using='default'):
                     SelectedDateTable.objects.using('default').bulk_create(model_instances)
-                    transaction.on_commit(lambda: sync_replica_task(), using='default')
+                    # transaction.on_commit(lambda: sync_replica_task(), using='default')
 
                 selected_date_data = SelectedDateTable.objects.filter(execution_date=parsed_date + timedelta(days=1), is_active=True).values(*settings.SELECTED_DATE_TABLE_FIELDS)
                 # print(f"{selected_date_data = }")

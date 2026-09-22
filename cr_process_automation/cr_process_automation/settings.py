@@ -2,8 +2,11 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
+from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+# Add this line to explicitly load the .env file
+load_dotenv(BASE_DIR / 'dashboard' /'.env')
 
 # HOST_DOWNLOAD_DIR = os.getenv(
 #      "DJANGO_DOWNLOAD_DIR", 
@@ -54,28 +57,50 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'cr_process_automation.wsgi.application'
 
+# DATABASES = {
+#     'default': { # Master Database
+#         'ENGINE': 'django.db.backends.sqlite3',
+#         'NAME': BASE_DIR / 'db.master.sqlite3',
+#         'OPTIONS': {
+#             'timeout' : 60,
+#             'transaction_mode': 'IMMEDIATE',
+#             'init_command': "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;",
+#         },
+#     },
+#     'replica' :{
+#         "ENGINE": "django.db.backends.sqlite3",
+#         "NAME": BASE_DIR / "db.replica.sqlite3",
+#         "OPTIONS": {
+#             "timeout": 30,
+#             "init_command": "PRAGMA journal_mode=WAL;",
+#         },
+#     }
+# }
+
 DATABASES = {
-    'default': { # Master Database
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.master.sqlite3',
-        'OPTIONS': {
-            'timeout' : 60,
-            'transaction_mode': 'IMMEDIATE',
-            'init_command': "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;",
-        },
+    'default': {
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': 'master_db',
+        'USER': os.getenv("DB_USER"),
+        'PASSWORD': os.getenv("DB_PASSWORD"),
+        'HOST': '127.0.0.1', # Primary DB
+        'PORT': '5432',
     },
-    'replica' :{
-        "ENGINE": "django.db.backends.sqlite3",
-        "NAME": BASE_DIR / "db.replica.sqlite3",
-        "OPTIONS": {
-            "timeout": 30,
-            "init_command": "PRAGMA journal_mode=WAL;",
-        },
+    'replica': {
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': 'replica_db',
+        'USER': os.getenv("DB_USER"),
+        'PASSWORD': os.getenv("DB_PASSWORD"),
+        'HOST': '127.0.0.1', # Replica DB
+        'PORT': '5433',
+        'TEST': {
+            'MIRROR': 'default',
+        }
     }
 }
 
-DB_REPLICA_PATH = BASE_DIR / "db.replica.sqlite3"
-DB_RESTORE_PATH = BASE_DIR / "db.master.sqlite3"
+# DB_REPLICA_PATH = BASE_DIR / "db.replica.sqlite3"
+# DB_RESTORE_PATH = BASE_DIR / "db.master.sqlite3"
 
 DATABASE_ROUTERS = ['cr_process_automation.routers.CoWRouter',]
 

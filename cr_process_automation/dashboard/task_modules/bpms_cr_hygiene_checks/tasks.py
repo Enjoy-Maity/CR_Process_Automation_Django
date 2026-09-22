@@ -12,7 +12,7 @@ import dashboard.task_modules.dependencies.extra_dependencies as ed
 from dashboard.task_modules.dependencies.extra_dependencies import (
     workbook_styling, 
     cr_wise_status_df_maker, 
-    sync_replica_task,
+    # sync_replica_task,
     selected_date_df_maker,
     _norm_series
 )
@@ -1290,7 +1290,7 @@ def run_task(
 
             with transaction.atomic(using='default'):
                 SelectedDateTable.objects.using('default').bulk_create(model_instances)
-                transaction.on_commit(lambda: sync_replica_task(), using='default')
+                # transaction.on_commit(lambda: sync_replica_task(), using='default')
 
             selected_date_data = SelectedDateTable.objects.filter(execution_date=parsed_date + timedelta(days=1), is_active=True).values(*settings.SELECTED_DATE_TABLE_FIELDS)
             # print(f"{selected_date_data = }")

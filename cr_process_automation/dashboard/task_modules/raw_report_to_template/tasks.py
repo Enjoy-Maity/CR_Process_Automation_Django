@@ -453,7 +453,7 @@ def sync_cr_databases(planning_workbook_df: DataFrame, logs: List[AnyStr], runti
                         total_inserted += 1
 
                 # Register the replica sync to run only after the DB transaction commits
-                transaction.on_commit(lambda: sync_replica_task(), using='default')
+                # transaction.on_commit(lambda: sync_replica_task(), using='default')
 
         logs.append(f"Sync complete: {total_inserted} new CR(s) inserted, {total_updated_cow} existing CR(s) updated to new versions.")
 
@@ -468,15 +468,15 @@ def sync_cr_databases(planning_workbook_df: DataFrame, logs: List[AnyStr], runti
 
 # @shared_task(bind=True)
 # def sync_replica_task(self):
-def sync_replica_task():
-    # self.update_state(state='RUNNING')
-    # sync_id = self.request.id
-    try:
-        call_command('sync_replica')
-        # cache.set(f'replica_sync_{sync_id}_status', 'complete', None)
-    except Exception as e:
-        # cache.set(f'replica_sync_{sync_id}_status', 'failed', None)
-        raise
+# def sync_replica_task():
+#     # self.update_state(state='RUNNING')
+#     # sync_id = self.request.id
+#     try:
+#         call_command('sync_replica')
+#         # cache.set(f'replica_sync_{sync_id}_status', 'complete', None)
+#     except Exception as e:
+#         # cache.set(f'replica_sync_{sync_id}_status', 'failed', None)
+#         raise
 
 
 def run_task(
