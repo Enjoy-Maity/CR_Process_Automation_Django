@@ -19,7 +19,8 @@ from django.contrib.auth.decorators import login_required
 from django.db.models import Q
 from django.views.decorators.clickjacking import xframe_options_sameorigin
 
-from dashboard.views import _timestamp
+import dashboard.views
+from dashboard.views import _timestamp, GLOBAL_LOGS, CURRENT_RUNNING_TASK
 from dashboard.Night_Execution.services import (
     NIGHT_EXECUTION_TASKS,
     build_cr_status_payload_from_itsm,
@@ -255,6 +256,26 @@ def start_night_execution_task(request):
 
 
 # ── Start a status-fetch job (background thread) ────────────────────────────
+class DualLogList(list):
+    def __init__(self, job_logs, global_logs):
+        super().__init__()
+        self.job_logs = job_logs
+        self.global_logs = global_logs
+
+    def append(self, item):
+        self.job_logs.append(item)
+        self.global_logs.append(item)
+        
+    def extend(self, items):
+        self.job_logs.extend(items)
+        self.global_logs.extend(items)
+
+    def __iter__(self):
+        return iter(self.job_logs)
+        
+    def __len__(self):
+        return len(self.job_logs)
+
 @login_required(login_url="login")
 @require_POST
 def fetch_night_cr_status(request):
@@ -287,9 +308,10 @@ def fetch_night_cr_status(request):
     task = {"name": "Night Execution CR Status Fetch"}
 
     def _worker():
+        dashboard.views.CURRENT_RUNNING_TASK = task["name"]
         payload, logs = build_cr_status_payload_from_itsm(
             cr_numbers=cr_numbers,
-            logs=job["logs"],          # same list -> live log updates
+            logs=DualLogList(job["logs"], GLOBAL_LOGS),          # dual list -> live log updates
             task=task,
             runtime=job["runtime"],    # SAME dict polled by dashboard.js
             headless_arg=False,        # OTP/password iframes need a visible browser
@@ -299,6 +321,7 @@ def fetch_night_cr_status(request):
         job["payload"] = payload
         job["done"] = True
         job["runtime"]["status"] = "Completed"
+        dashboard.views.CURRENT_RUNNING_TASK = "No task is running currently."
 
     threading.Thread(target=_worker, name=f"cr-status-{job_id}", daemon=True).start()
     return JsonResponse({"ok": True, "job_id": job_id})
