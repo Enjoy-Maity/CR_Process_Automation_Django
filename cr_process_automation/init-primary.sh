@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 set -e
 
-echo "Configuring PostgreSQL for replication..."
+echo "Configuring PostgreSQL db-master for replication..."
 
-# Append replication settings to pg_hba.conf
+# Append replication permissions to pg_hba.conf
 echo "" >> "$PGDATA/pg_hba.conf"
 echo "# Replication connections" >> "$PGDATA/pg_hba.conf"
 echo "host replication replicator 0.0.0.0/0 md5" >> "$PGDATA/pg_hba.conf"
-echo "" >> "$PGDATA/pg_hba.conf"
-echo "# Application connections" >> "$PGDATA/pg_hba.conf"
-echo "host all all 0.0.0.0/0 md5" >> "$PGDATA/pg_hba.conf"
 
-echo "Setup complete - waiting for PostgreSQL to start..."
+# Create replication user
+psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-EOSQL
+    CREATE ROLE replicator WITH REPLICATION LOGIN PASSWORD 'Django@123#';
+EOSQL
+
+echo "Replication setup on db-master complete."

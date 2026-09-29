@@ -88,7 +88,7 @@ DATABASES = {
     },
     'replica': {
         'ENGINE': 'django.db.backends.postgresql',
-        'NAME': 'replica_db',
+        'NAME': 'master_db',
         'USER': os.getenv("DB_USER"),
         'PASSWORD': os.getenv("DB_PASSWORD"),
         'HOST': '127.0.0.1', # Replica DB

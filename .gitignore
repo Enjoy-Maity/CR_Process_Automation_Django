@@ -28,3 +28,6 @@ pyproject.toml
 docker-compose.yml
 db_master_data/
 db_replica_data/
+volumes/
+.continue/
+.kilo/

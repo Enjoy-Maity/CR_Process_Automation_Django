@@ -29,6 +29,6 @@ class CoWRouter:
         return True if obj1._state.db in ("default", "replica") and obj2._state.db in ("default", "replica") else None
 
     def allow_migrate(self, db, app_label, model_name=None, **hints):
-        # Prevent Django from attempting to migrate the read-only PostgreSQL replica
+        # Migrations apply only to master; PostgreSQL streams them to the read-only replica
         return db == "default"
 

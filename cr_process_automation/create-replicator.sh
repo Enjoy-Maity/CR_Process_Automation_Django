@@ -25,3 +25,4 @@ PGPASSWORD="$MASTER_PASS" psql -h "$MASTER_HOST" -p "$MASTER_PORT" -U "$MASTER_U
 EOF
 
 echo "Replicator role created successfully!"
+
