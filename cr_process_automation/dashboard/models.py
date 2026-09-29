@@ -5,6 +5,83 @@ from django.db.models import Q, UniqueConstraint
 from django.db import transaction
 
 
+class CoWModel(models.Model):
+    """
+    Abstract base implementing Copy-on-Write versioning.
+
+    On update (pk is not None and the row exists), the existing row is
+    marked is_active=False and a NEW active row (version+1) is inserted,
+    linked back via parent_reference. All reads/writes are pinned to
+    'default' and wrapped in a single transaction so replica routing and
+    partial failures cannot produce 0 or 2 active rows per logical record.
+    """
+
+    is_active = models.BooleanField(
+        default=True, help_text="Indicates the current active version"
+    )
+    version = models.IntegerField(
+        default=1, help_text="Version number of this record"
+    )
+    parent_reference = models.ForeignKey(
+        "self",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="historical_versions",
+        help_text="Links to the previous version of this record",
+    )
+
+    class Meta:
+        abstract = True
+
+    def save(self, *args, skip_cow=False, **kwargs):
+        # Plain insert/update, bypass CoW. Used by sync helpers that have
+        # already built a fully-formed new version row.
+        if skip_cow:
+            kwargs.setdefault("using", "default")
+            super().save(*args, **kwargs)
+            return
+
+        cls = type(self)
+        with transaction.atomic(using="default"):
+            old = None
+            if self.pk is not None:
+                # None-safe: a non-None pk that doesn't exist -> plain insert.
+                old = (
+                    cls.objects.using("default")
+                    .select_for_update()
+                    .filter(pk=self.pk)
+                    .first()
+                )
+
+            if old is not None:
+                # These are invalid once we null the pk to force an insert.
+                kwargs.pop("force_insert", None)
+                kwargs.pop("update_fields", None)
+
+                cls.objects.using("default").filter(pk=self.pk).update(is_active=False)
+                self.parent_reference_id = old.pk
+                self.version = old.version + 1
+                self.pk = None
+                self.is_active = True
+            else:
+                # New logical record (or stale pk): insert as active v1.
+                self.pk = None
+                if not self.version:
+                    self.version = 1
+                self.is_active = True
+
+            kwargs["using"] = "default"
+            super().save(*args, **kwargs)
+
+            # Overridable hook, runs inside the SAME transaction.
+            self._after_cow_save(is_update=old is not None)
+
+    def _after_cow_save(self, is_update):
+        """Hook for subclasses (e.g. cross-table sync). Default: no-op."""
+        pass
+
+
 
 class AutomationTask(models.Model):
     STATUS_CHOICES = [
@@ -65,7 +142,7 @@ class TaskLog(models.Model):
     def __str__(self):
         return f"{self.level}: {self.message[:60]}"
 
-class MasterCRDatabase(models.Model):
+class MasterCRDatabase(CoWModel):
     sno = models.IntegerField(null=True, blank=True)
     ms_project = models.CharField(max_length=100, null=True, blank=True)
     execution_date = models.DateField(null=True, blank=True)
@@ -107,16 +184,16 @@ class MasterCRDatabase(models.Model):
     additional_info = models.TextField(null=True, blank=True)
 
     # --- Copy-on-Write (CoW) Architecture Fields ---
-    is_active = models.BooleanField(default=True, help_text="Indicates the current active version")
-    version = models.IntegerField(default=1, help_text="Version number of this record")
-    parent_reference = models.ForeignKey(
-        'self', 
-        on_delete=models.SET_NULL, 
-        null=True, 
-        blank=True, 
-        related_name='historical_versions',
-        help_text="Links to the previous version of this record"
-    )
+    # is_active = models.BooleanField(default=True, help_text="Indicates the current active version")
+    # version = models.IntegerField(default=1, help_text="Version number of this record")
+    # parent_reference = models.ForeignKey(
+    #     'self', 
+    #     on_delete=models.SET_NULL, 
+    #     null=True, 
+    #     blank=True, 
+    #     related_name='historical_versions',
+    #     help_text="Links to the previous version of this record"
+    # )
 
     class Meta:
         db_table = "master_cr_database"
@@ -128,6 +205,8 @@ class MasterCRDatabase(models.Model):
                 name='unique_active_master_cr_no'
             )
         ]
+
+        indexes = [models.Index(fields=["cr_no", "is_active"])]
 
     # def save(self, *args, **kwargs):
     #     # CoW Save Override: Turn updates into insertions of a new active row
@@ -170,25 +249,48 @@ class MasterCRDatabase(models.Model):
     #     #     super().save(*args, **kwargs)
 
 
-    def save(self, *args, skip_cow=False,  **kwargs):
+    # def save(self, *args, skip_cow=False,  **kwargs):
+    #     if skip_cow:
+    #         super().save(*args, **kwargs)
+    #         return
+        
+    #     if self.pk is not None:
+    #         kwargs.pop("force_insert", None)
+    #         kwargs.pop("update_fields", None)
+    #         # Force read and update to master to avoid replication lag
+    #         old_instance = MasterCRDatabase.objects.using('default').get(pk=self.pk)
+    #         MasterCRDatabase.objects.using('default').filter(pk=self.pk).update(is_active=False)
+    #         self.parent_reference_id = old_instance.pk
+    #         self.version = old_instance.version + 1
+    #         self.pk = None
+    #         self.is_active = True
+    #     super().save(*args, **kwargs)
+
+    def save(self, *args, skip_cow=False, **kwargs):
         if skip_cow:
             super().save(*args, **kwargs)
             return
-        
+
         if self.pk is not None:
             kwargs.pop("force_insert", None)
             kwargs.pop("update_fields", None)
-            # Force read and update to master to avoid replication lag
-            old_instance = MasterCRDatabase.objects.using('default').get(pk=self.pk)
-            MasterCRDatabase.objects.using('default').filter(pk=self.pk).update(is_active=False)
-            self.parent_reference_id = old_instance.pk
-            self.version = old_instance.version + 1
-            self.pk = None
-            self.is_active = True
-        super().save(*args, **kwargs)
+            with transaction.atomic(using="default"):
+                old_instance = MasterCRDatabase.objects.using("default").select_for_update().get(pk=self.pk)
+                MasterCRDatabase.objects.using("default").filter(pk=self.pk).update(is_active=False)
+                self.parent_reference_id = old_instance.pk
+                self.version = old_instance.version + 1
+                self.pk = None
+                self.is_active = True
+                kwargs["using"] = "default"
+                super().save(*args, **kwargs)
+        else:
+            kwargs.setdefault("using", "default")
+            super().save(*args, **kwargs)
+
 
     def __str__(self):
         return f"{self.cr_no} (v{self.version})"
+
 
 class UserManagement(AbstractUser):
     ROLE_ADMIN = "Admin"
@@ -314,7 +416,7 @@ class FlagTable(models.Model):
     version = models.IntegerField(default=0) # Optimistic locking helper
 
 
-class SelectedDateTable(models.Model):
+class SelectedDateTable(CoWModel):
     sno = models.IntegerField(null=True, blank=True)
     ms_project = models.CharField(max_length=100, null=True, blank=True)
     execution_date = models.DateField(null=True, blank=True)
@@ -355,16 +457,16 @@ class SelectedDateTable(models.Model):
     niam_node_type = models.CharField(max_length=100, null=True, blank=True)
     additional_info = models.TextField(null=True, blank=True)
 
-    is_active = models.BooleanField(default=True, help_text="Indicates the current active version")
-    version = models.IntegerField(default=1, help_text="Version number of this record")
-    parent_reference = models.ForeignKey(
-        'self', 
-        on_delete=models.SET_NULL, 
-        null=True, 
-        blank=True, 
-        related_name='historical_versions',
-        help_text="Links to the previous version of this record"
-    )
+    # is_active = models.BooleanField(default=True, help_text="Indicates the current active version")
+    # version = models.IntegerField(default=1, help_text="Version number of this record")
+    # parent_reference = models.ForeignKey(
+    #     'self', 
+    #     on_delete=models.SET_NULL, 
+    #     null=True, 
+    #     blank=True, 
+    #     related_name='historical_versions',
+    #     help_text="Links to the previous version of this record"
+    # )
 
     class Meta:
         db_table = "selected_date_table"
@@ -376,8 +478,13 @@ class SelectedDateTable(models.Model):
             )
         ]
 
+        indexes = [models.Index(fields=["cr_no", "is_active"])]
+
     def __str__(self):
         return self.cr_no
+
+    def _after_cow_save(self, is_update):
+        self._sync_to_master_cr_database(is_update)
 
     # def save(self, *args, **kwargs):
     #     """
@@ -423,40 +530,68 @@ class SelectedDateTable(models.Model):
     #         self._sync_to_master_cr_database(is_update)
 
 
+    # def save(self, *args, skip_cow=False, **kwargs):
+    #     if skip_cow:
+    #         super().save(*args, **kwargs)
+    #         return
+    #     # is_update = self.pk is not None
+    #     # if is_update:
+    #     using = self._state.db or kwargs.get("using")
+    #     old_instance = None
+    #     if self.pk is not None:
+    #         qs = SelectedDateTable.objects
+    #         if using:
+    #             qs = qs.using(using)
+    #         old_instance = qs.filter(pk=self.pk).first()   # None-safe, no exception
+
+    #     if old_instance is not None:
+    #         # old_instance = SelectedDateTable.objects.get(pk=self.pk)
+    #         SelectedDateTable.objects.filter(pk=self.pk).update(is_active=False)
+    #         self.parent_reference_id = old_instance.pk
+    #         self.version = old_instance.version + 1
+    #         self.pk = None
+    #         self.is_active = True
+
+    #     else:
+    #         # No existing row for this pk -> plain insert as a new active v1.
+    #         # Clear any stale pk so the DB assigns a fresh one.
+    #         self.pk = None
+    #         if not self.version:
+    #             self.version = 1
+    #         self.is_active = True
+
+    #     super().save(*args, **kwargs)
+    #     if not skip_cow:  # only sync on the CoW path
+    #         self._sync_to_master_cr_database(old_instance is not None)
+
+
     def save(self, *args, skip_cow=False, **kwargs):
         if skip_cow:
             super().save(*args, **kwargs)
             return
-        # is_update = self.pk is not None
-        # if is_update:
-        using = self._state.db or kwargs.get("using")
-        old_instance = None
-        if self.pk is not None:
-            qs = SelectedDateTable.objects
-            if using:
-                qs = qs.using(using)
-            old_instance = qs.filter(pk=self.pk).first()   # None-safe, no exception
 
-        if old_instance is not None:
-            # old_instance = SelectedDateTable.objects.get(pk=self.pk)
-            SelectedDateTable.objects.filter(pk=self.pk).update(is_active=False)
-            self.parent_reference_id = old_instance.pk
-            self.version = old_instance.version + 1
-            self.pk = None
-            self.is_active = True
+        with transaction.atomic(using="default"):
+            old_instance = None
+            if self.pk is not None:
+                old_instance = (SelectedDateTable.objects.using("default")
+                                .select_for_update()
+                                .filter(pk=self.pk).first())
 
-        else:
-            # No existing row for this pk -> plain insert as a new active v1.
-            # Clear any stale pk so the DB assigns a fresh one.
-            self.pk = None
-            if not self.version:
-                self.version = 1
-            self.is_active = True
+            if old_instance is not None:
+                SelectedDateTable.objects.using("default").filter(pk=self.pk).update(is_active=False)
+                self.parent_reference_id = old_instance.pk
+                self.version = old_instance.version + 1
+                self.pk = None
+                self.is_active = True
+            else:
+                self.pk = None
+                if not self.version:
+                    self.version = 1
+                self.is_active = True
 
-        super().save(*args, **kwargs)
-        if not skip_cow:  # only sync on the CoW path
+            kwargs["using"] = "default"
+            super().save(*args, **kwargs)
             self._sync_to_master_cr_database(old_instance is not None)
-
 
     # def _sync_to_master_cr_database(self, is_update):
     #     if not self.cr_no:
@@ -598,7 +733,7 @@ class SelectedDateTable(models.Model):
 
         # Force read to master
         active = list(
-            MasterCRDatabase.objects.using('default').filter(cr_no=self.cr_no, is_active=True)
+            MasterCRDatabase.objects.using('default').filter(cr_no=self.cr_no, is_active=True).order_by("-version")
         )
 
         if not active:
@@ -606,8 +741,22 @@ class SelectedDateTable(models.Model):
             return
 
         old = active[0]
-        # Force update to master
-        MasterCRDatabase.objects.using('default').filter(cr_no=self.cr_no, is_active=True).update(is_active=False)
+        if len(active) > 1:
+            # Prior drift — collapse but surface it.
+            logger.warning(
+                "Multiple active MasterCRDatabase rows for cr_no=%s; collapsing.",
+                self.cr_no,
+            )
+
+        # MasterCRDatabase(
+        #     is_active=True,
+        #     version=old.version + 1,
+        #     parent_reference_id=old.pk,
+        #     **fields,
+        # ).save(skip_cow=True)
+        MasterCRDatabase.objects.using("default").filter(
+            cr_no=self.cr_no, is_active=True
+        ).update(is_active=False)
 
         MasterCRDatabase(
             is_active=True,
