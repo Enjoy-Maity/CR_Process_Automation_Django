@@ -2,15 +2,14 @@
 -- PostgreSQL database dump
 --
 
-\restrict Ic3HJ8gGFkSQpzJZCTqo9nmh5zLUea8oRaY6BKTZYsd1ploPUcNztcujj3hID5Q
+\restrict uHRfgj4N8k00dSBESzcmikC4j0mVcVBkOIAt3Z5hYxJaAhEvZCcjznZm8vezSRA
 
 -- Dumped from database version 16.15 (Debian 16.15-1.pgdg13+2)
--- Dumped by pg_dump version 18.6
+-- Dumped by pg_dump version 16.15 (Debian 16.15-1.pgdg13+2)
 
 SET statement_timeout = 0;
 SET lock_timeout = 0;
 SET idle_in_transaction_session_timeout = 0;
-SET transaction_timeout = 0;
 SET client_encoding = 'UTF8';
 SET standard_conforming_strings = on;
 SELECT pg_catalog.set_config('search_path', '', false);
@@ -23,5 +22,5 @@ SET row_security = off;
 -- PostgreSQL database dump complete
 --
 
-\unrestrict Ic3HJ8gGFkSQpzJZCTqo9nmh5zLUea8oRaY6BKTZYsd1ploPUcNztcujj3hID5Q
+\unrestrict uHRfgj4N8k00dSBESzcmikC4j0mVcVBkOIAt3Z5hYxJaAhEvZCcjznZm8vezSRA
 
