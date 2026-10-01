@@ -10,11 +10,7 @@ if [ -z "$(ls -A "$PGDATA" 2>/dev/null)" ]; then
         sleep 2
     done
 
-    PGPASSWORD="Django@123#" gosu postgres pg_basebackup \
-        -h db-master -p 5432 \
-        -U replicator \
-        -D "$PGDATA" \
-        -Fp -Xs -P -R
+    PGPASSWORD="Django@123#" gosu postgres pg_basebackup -h db-master -p 5432 -U replicator -D "$PGDATA" -Fp -Xs -P -R
 
     echo "primary_conninfo = 'host=db-master port=5432 user=replicator password=Django@123# application_name=db-replica'" >> "$PGDATA/postgresql.auto.conf"
     chown -R postgres:postgres "$PGDATA"
