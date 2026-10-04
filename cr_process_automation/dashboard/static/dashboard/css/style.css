@@ -57,6 +57,7 @@ input {
 
 .app-shell {
     min-height: 100vh;
+    height: 100vh;
     display: flex;
     flex-direction: column;
 }
@@ -145,6 +146,7 @@ input {
 
 .content-area {
     flex: 1;
+    height: 100%;
     padding: 12px;
 }
 
@@ -153,6 +155,7 @@ input {
     grid-template-columns: 280px 1fr;
     gap: 12px;
     min-height: 0;
+    height: 100%;
     width: 100%;
     min-width: 0;
 }
@@ -224,10 +227,11 @@ input {
 }
 
 .module-content-card {
+    height: 100%;
+    min-height: 0;
     display: flex;
     flex-direction: column;
     flex: 1;
-    min-height: 0;
     overflow-x: visible;
     overflow-y: visible;
     padding: 12px 14px;
@@ -238,6 +242,72 @@ input {
     padding: 12px 14px;
     min-height: 0;
     min-width: 0;
+}
+
+/* Shared tab canvas: the module card always occupies the full available
+   height, every tab page stretches to fill it, and long tables scroll
+   inside the card instead of growing it. Keeps the canvas identical
+   for all sidebar tab options. */
+.content-area {
+    min-height: 0;
+}
+
+.module-content-card {
+    overflow-x: hidden;
+    overflow-y: auto;
+}
+
+.module-content-card > .content-card,
+.module-content-card > .region-crs-page,
+.module-content-card > .vendor-analysis-page,
+.module-content-card > .success-analysis-page,
+.module-content-card > .team-analysis-page {
+    flex: 1 1 auto;
+    min-height: 0;
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+}
+
+.module-content-card > .content-card > .table-wrap,
+.module-content-card > .content-card > .data-panel,
+.module-content-card .region-cr-panel,
+.module-content-card .region-cr-data-panel {
+    flex: 1 1 auto;
+    min-height: 0;
+}
+
+.module-content-card .page-head,
+.module-content-card .compact-page-head,
+.module-content-card .module-page-title {
+    flex-shrink: 0;
+}
+
+.module-content-card > .content-card > #no-crs-message {
+    flex: 1 1 auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.module-content-card .region-cr-data-panel,
+.module-content-card .data-panel {
+    display: flex;
+    flex-direction: column;
+}
+
+.module-content-card .table-wrap,
+.module-content-card .data-panel-scroll,
+.module-content-card .region-cr-scroll-wrap {
+    height: auto;
+    max-height: 100%;
+    overflow: auto;
+}
+
+.module-content-card .data-panel-scroll,
+.module-content-card .region-cr-scroll-wrap {
+    flex: 1 1 auto;
+    min-height: 0;
 }
 
 .page-head,
@@ -616,7 +686,8 @@ input {
 }
 
 
-.region-cr-data-panel {
+.region-cr-data-panel,
+.data-panel {
     width: 100%;
     min-width: 0;
     border: 1px solid var(--border);
@@ -627,7 +698,8 @@ input {
     overflow: hidden;
 }
 
-.region-cr-scroll-wrap {
+.region-cr-scroll-wrap,
+.data-panel-scroll {
     width: 100%;
     min-width: 0;
     height: 420px;
@@ -667,7 +739,8 @@ input {
     width: auto;
 }
 
-.region-cr-table thead th {
+.region-cr-table thead th,
+.data-panel-scroll .task-table thead th {
     position: sticky;
     top: 0;
     z-index: 3;
@@ -901,7 +974,8 @@ input {
     position: relative;
 } */
 
-.region-cr-scroll-wrap {
+.region-cr-scroll-wrap,
+.data-panel-scroll {
     width: 100%;
     min-width: 0;
     height: 420px;

@@ -1,0 +1,108 @@
+{% extends 'dashboard/base_module.html' %}
+{% block module_content %}
+<div class="content-card compact-content-card">
+    <div class="page-head compact-page-head">
+        <h2 class="module-page-title compact-module-title">NIAM Template Database</h2>
+    </div>
+    <div class="region-filter-panel" style="margin-bottom:16px;padding:14px;border:1px solid #d5dde8;border-radius:10px;background:#f7f9fc;">
+        <div style="margin-bottom:12px;">
+            <span class="cr-history-filter-label">Note:- Select Date Time range before fetching data.</span>
+        </div>  
+        <div style="display:flex;gap:20px;align-items:center;flex-wrap:wrap;">
+            <div>
+                <label for="niam_from_datetime" style="font-weight:700;margin-right:8px;">From Date Time:</label>
+                <input type="datetime-local" id="niam_from_datetime" name="niam_from_datetime">
+            </div>
+            <div>
+                <label for="niam_to_datetime" style="font-weight:700;margin-right:8px;">To Date Time:</label>
+                <input type="datetime-local" id="niam_to_datetime" name="niam_to_datetime">
+            </div>
+            <button type="button" id="fetch_niam_template_btn" class="action-btn compact-btn apply-filter-btn">Fetch Data</button>
+            <button type="button" id="download_niam_template_btn" class="action-btn compact-btn download-btn">Download Template</button>
+        </div>
+    </div>
+    <div class="data-panel">
+        <div class="table-wrap compact-table-wrap data-panel-scroll">
+            <table class="task-table compact-task-table ultra-compact-task-table" id="niam_template_table">
+                <thead>
+                    <tr id="niam_template_table_head"></tr>
+                </thead>
+                <tbody id="niam_template_table_body">
+                    <tr><td colspan="20" class="text-center">Select date time range and fetch data.</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+<script>
+const FETCH_NIAM_URL = "{% url 'fetch_niam_template_data' %}";
+const DOWNLOAD_NIAM_URL = "{% url 'download_niam_template' %}";
+
+document.getElementById('fetch_niam_template_btn').addEventListener('click', function() {
+    const from_dt = document.getElementById('niam_from_datetime').value;
+    const to_dt = document.getElementById('niam_to_datetime').value;
+    if (!from_dt || !to_dt) {
+        alert('Please select both From and To Date Time.');
+        return;
+    }
+    const params = new URLSearchParams({ from_datetime: from_dt, to_datetime: to_dt });
+    fetch(FETCH_NIAM_URL + '?' + params.toString())
+        .then(res => res.json())
+        .then(data => {
+            if (!data.ok) {
+                alert(data.message || 'Failed to fetch data');
+                return;
+            }
+            renderNiamTable(data);
+        })
+        .catch(() => alert('Error fetching data'));
+});
+
+function renderNiamTable(data) {
+    const head = document.getElementById('niam_template_table_head');
+    const body = document.getElementById('niam_template_table_body');
+    head.innerHTML = '';
+    body.innerHTML = '';
+    if (!data.columns || data.columns.length === 0) {
+        body.innerHTML = '<tr><td>No data found.</td></tr>';
+        return;
+    }
+    data.columns.forEach(col => {
+        const th = document.createElement('th');
+        th.textContent = col;
+        head.appendChild(th);
+    });
+    if (!data.rows || data.rows.length === 0) {
+        body.innerHTML = '<tr><td colspan="' + data.columns.length + '">No records found.</td></tr>';
+        return;
+    }
+    data.rows.forEach(row => {
+        const tr = document.createElement('tr');
+        data.columns.forEach(col => {
+            const td = document.createElement('td');
+            td.innerHTML = '<input type="text" class="niam-input" data-col="' + col + '" value="' + escapeHtml(row[col] ?? '') + '" style="width:100%;min-width:120px;">';
+            tr.appendChild(td);
+        });
+        body.appendChild(tr);
+    });
+}
+
+function escapeHtml(text) {
+    if (text === null || text === undefined) return '';
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+document.getElementById('download_niam_template_btn').addEventListener('click', function() {
+    const from_dt = document.getElementById('niam_from_datetime').value;
+    const to_dt = document.getElementById('niam_to_datetime').value;
+    if (!from_dt || !to_dt) {
+        alert('Please select both From and To Date Time.');
+        return;
+    }
+    const url = DOWNLOAD_NIAM_URL + '?from_datetime=' + encodeURIComponent(from_dt) + '&to_datetime=' + encodeURIComponent(to_dt);
+    window.location.href = url;
+});
+</script>
+{% endblock %}

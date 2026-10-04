@@ -47,7 +47,8 @@ TASKS = [
     {"id": 4, "sequence_no": 4, "name": "BPMS CR Hygiene Checks", "download_required": True},
     {"id": 5, "sequence_no": 5, "name": "MOP Attachment & Approvals", "download_required": True},
     {"id": 6, "sequence_no": 6, "name": "Final Email Package", "download_required": True},
-    {"id": 7, "sequence_no": 7, "name": "NIAM Ticket Generation", "download_required": True},
+    {"id": 8, "sequence_no": 7, "name": "NIAM Template Generator", "download_required": True},
+    {"id": 7, "sequence_no": 8, "name": "NIAM Ticket Generation", "download_required": True},
 ]
 
 TASKS_REQUIRING_AUTH = {1, 2, 3, 4, 5, 7}
@@ -229,6 +230,7 @@ def _common_context(request):
             {"key": "region_crs", "label": "Region CRs", "url_name": "region_crs"},
             {"key": "cr_wise_status", "label": "CR-Wise Status", "url_name": "cr_wise_status"},
             {"key": "cr_history", "label": "CR History", "url_name": "cr_history"},
+            {"key": "niam_template_db", "label": "NIAM Template Database", "url_name": "niam_template_db"},
         ]
     }
 
@@ -2813,3 +2815,119 @@ def fetch_automation_cr_analysis(request):
             },
         },
     })
+
+
+@login_required(login_url="login")
+def niam_template_db_view(request):
+    ctx = _common_context(request)
+    ctx["selected_option"] = "niam_template_db"
+    return render(request, "dashboard/niam_template_db.html", ctx)
+
+
+@require_GET
+@login_required(login_url="login")
+def fetch_niam_template_data(request):
+    from .models import NIAMTicketGenerationTable
+    from django.forms.models import model_to_dict
+
+    try:
+        from_dt_str = request.GET.get("from_datetime")
+        to_dt_str = request.GET.get("to_datetime")
+
+        if not from_dt_str or not to_dt_str:
+            return JsonResponse({"ok": False, "message": "from_datetime and to_datetime are required"}, status=400)
+
+        try:
+            from_dt = datetime.strptime(from_dt_str, "%Y-%m-%dT%H:%M")
+        except ValueError:
+            try:
+                from_dt = datetime.strptime(from_dt_str, "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                from_dt = parser.parse(from_dt_str)
+
+        try:
+            to_dt = datetime.strptime(to_dt_str, "%Y-%m-%dT%H:%M")
+        except ValueError:
+            try:
+                to_dt = datetime.strptime(to_dt_str, "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                to_dt = parser.parse(to_dt_str)
+
+        qs = NIAMTicketGenerationTable.objects.filter(
+            execution_date__isnull=False
+        ).filter(
+            models.Q(niam_access_start_date_time__isnull=False, niam_access_start_date_time__range=(from_dt, to_dt)) |
+            models.Q(sr_cr_start_date_time__isnull=False, sr_cr_start_date_time__range=(from_dt, to_dt)) |
+            models.Q(execution_date__range=(from_dt.date() if hasattr(from_dt, "date") else from_dt, to_dt.date() if hasattr(to_dt, "date") else to_dt))
+        ).order_by("-id")[:1000]
+
+        rows = []
+        columns = []
+        for obj in qs:
+            d = model_to_dict(obj)
+            rows.append(d)
+        if rows:
+            columns = list(rows[0].keys())
+
+        return JsonResponse({
+            "ok": True,
+            "columns": columns,
+            "rows": rows,
+            "count": len(rows)
+        })
+    except Exception as e:
+        logger.error("Error fetching NIAM template data: %s", e, exc_info=True)
+        return JsonResponse({"ok": False, "message": str(e)}, status=500)
+
+
+@require_GET
+@login_required(login_url="login")
+def download_niam_template(request):
+    from .models import NIAMTicketGenerationTable
+    from django.forms.models import model_to_dict
+    import io
+
+    try:
+        from_dt_str = request.GET.get("from_datetime")
+        to_dt_str = request.GET.get("to_datetime")
+
+        if not from_dt_str or not to_dt_str:
+            return JsonResponse({"ok": False, "message": "from_datetime and to_datetime are required"}, status=400)
+
+        try:
+            from_dt = datetime.strptime(from_dt_str, "%Y-%m-%dT%H:%M")
+        except ValueError:
+            from_dt = parser.parse(from_dt_str)
+
+        try:
+            to_dt = datetime.strptime(to_dt_str, "%Y-%m-%dT%H:%M")
+        except ValueError:
+            to_dt = parser.parse(to_dt_str)
+
+        qs = NIAMTicketGenerationTable.objects.filter(
+            execution_date__isnull=False
+        ).order_by("-id")[:5000]
+
+        if from_dt_str and to_dt_str:
+            qs = NIAMTicketGenerationTable.objects.filter(
+                Q(niam_access_start_date_time__range=(from_dt, to_dt)) |
+                Q(sr_cr_start_date_time__range=(from_dt, to_dt)) |
+                Q(execution_date__range=(from_dt.date(), to_dt.date()))
+            ).order_by("-id")[:5000]
+
+        rows = [model_to_dict(o) for o in qs]
+        if not rows:
+            return JsonResponse({"ok": False, "message": "No data found for selected range"}, status=404)
+
+        df = pd.DataFrame(rows)
+        output = io.BytesIO()
+        df.to_excel(output, index=False, sheet_name="NIAM_Template")
+        output.seek(0)
+
+        filename = f"NIAM_Template_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        response = FileResponse(output, content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        response["Content-Disposition"] = f'attachment; filename="{filename}"'
+        return response
+    except Exception as e:
+        logger.error("Error downloading NIAM template: %s", e, exc_info=True)
+        return JsonResponse({"ok": False, "message": str(e)}, status=500)

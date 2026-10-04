@@ -29,42 +29,48 @@
         <button type="button" id="apply_region_filter_btn" class="action-btn compact-btn apply-filter-btn">Apply Filter</button>  
     </div> 
 </div>
-    <div class="table-wrap compact-table-wrap">
-        <table class="task-table compact-task-table ultra-compact-task-table">
-            <thead>
-                <tr>
-                    <th>SNO</th>
-                    <th>Task Details</th>
-                    <th>Action</th>
-                    <th>Total CRs</th>
-                    <th>North CRs</th>
-                    <th>West CRs</th>
-                    <th>East CRs</th>
-                    <th>South CRs</th>
-                    <th>Task Status</th>
-                    <th>Download Files</th>
-                </tr>
-            </thead>
-            <tbody>
-            {% for task in tasks %}
-                <tr data-task-id="{{ task.id }}">
-                    <td>{{ task.sequence_no }}</td>
-                    <td class="task-name-cell">{{ task.name }}</td>
-                    <td>
-                        <button type="button" class="action-btn start-btn compact-btn js-start-task" data-task-id="{{ task.id }}">Start</button>
-                    </td>
-                    <td class="js-total-crs">{{ task.total_crs }}</td>
-                    <td class="js-north-crs">{{ task.north_crs }}</td>
-                    <td class="js-west-crs">{{ task.west_crs }}</td>
-                    <td class="js-east-crs">{{ task.east_crs }}</td>
-                    <td class="js-south-crs">{{ task.south_crs }}</td>
-                    <td>
-                    <span class="status-badge compact-status js-task-status {% if task.status == 'Completed' %}status-success{% elif task.status == 'Running' %}status-progress{% elif task.status == 'Failed' %}status-failed{% endif %}">
-                            {{ task.status }}
-                    </span>
-                    </td>
-                    <td>
-                        <div class="download-area">
+
+    <div class="data-panel">
+        <div class="table-wrap compact-table-wrap data-panel-scroll">
+            <table class="task-table compact-task-table ultra-compact-task-table">
+                <thead>
+                    <tr>
+                        <th>SNO</th>
+                        <th>Task Details</th>
+                        <th>Action</th>
+                        <th>Total CRs</th>
+                        <th>North CRs</th>
+                        <th>West CRs</th>
+                        <th>East CRs</th>
+                        <th>South CRs</th>
+                        <th>Task Status</th>
+                        <th>Download Files</th>
+                    </tr>
+                </thead>
+                <tbody>
+                {% for task in tasks %}
+                    <tr data-task-id="{{ task.id }}">
+                        <td>{{ task.sequence_no }}</td>
+                        <td class="task-name-cell">{{ task.name }}</td>
+                        <td>
+                            {% if task.id == 8 %}
+                                <button type="button" id="niam_template_generator_btn_inline" class="action-btn start-btn compact-btn" data-task-id="{{ task.id }}">Start</button>
+                            {% else %}
+                                <button type="button" class="action-btn start-btn compact-btn js-start-task" data-task-id="{{ task.id }}">Start</button>
+                            {% endif %}
+                        </td>
+                        <td class="js-total-crs">{{ task.total_crs }}</td>
+                        <td class="js-north-crs">{{ task.north_crs }}</td>
+                        <td class="js-west-crs">{{ task.west_crs }}</td>
+                        <td class="js-east-crs">{{ task.east_crs }}</td>
+                        <td class="js-south-crs">{{ task.south_crs }}</td>
+                        <td>
+                        <span class="status-badge compact-status js-task-status {% if task.status == 'Completed' %}status-success{% elif task.status == 'Running' %}status-progress{% elif task.status == 'Failed' %}status-failed{% endif %}">
+                                {{ task.status }}
+                        </span>
+                        </td>
+                        <td>
+                            <div class="download-area">
                             {% if task.id == 1 or task.id == 2  or task.id == 3 or task.id == 4 or task.id == 5 or task.id == 6 or task.id == 7 %}
                                 {% if task.status == 'Completed' and task.download_ready %}
                                     <a href="{% url 'download_task_output' task.id %}" class="action-btn download-btn compact-btn js-download-link auto-ready" data-task-id="{{ task.id }}">Download</a>
@@ -72,17 +78,20 @@
                                     <a href="#" class="action-btn download-btn compact-btn js-download-link hidden" data-task-id="{{ task.id }}">Download</a>
                                     <span class="text-muted js-download-placeholder">Waiting</span>
                                 {% endif %}
+                            {% elif task.id == 8 %}
+                                <span class="text-muted js-download-placeholder">Not Applicable</span>
                             {% else %}
                                 <span class="text-muted js-download-placeholder">Not Applicable</span>
                             {% endif %}
-                        </div>
-                    </td>
-                </tr>
-            {% empty %}
-                <tr><td colspan="10">No tasks configured yet.</td></tr>
-            {% endfor %}
-            </tbody>
-        </table>
+                            </div>
+                        </td>
+                    </tr>
+                {% empty %}
+                    <tr><td colspan="10">No tasks configured yet.</td></tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
     </div>
 </div>
 
@@ -227,6 +236,16 @@ document.getElementById("apply_region_filter_btn").addEventListener("click", fun
 
 // Restore when the page loads
 restoreHomeSessionState();
+
+document.getElementById('niam_template_generator_btn_inline')?.addEventListener('click', function() {
+    window.location.href = '{% url "niam_template_db" %}';
+});
+
+document.querySelectorAll('#niam_template_generator_btn_inline, .niam-template-open').forEach(btn => {
+    btn.addEventListener('click', function() {
+        window.location.href = '{% url "niam_template_db" %}';
+    });
+});
 </script>
 <!-- Auth / Password / OTP overlay -->
 <div id="auth-overlay" class="auth-overlay" style="display: none;" aria-hidden="true">
