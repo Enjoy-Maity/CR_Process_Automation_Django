@@ -306,6 +306,21 @@ def _trigger_replica_sync_on_commit(affected_dates):
 # ────────────────────────────────────────────────────────────────
 # Views: Render Pages
 # ────────────────────────────────────────────────────────────────
+MASTER_CR_EXCLUDED_FIELDS = ("id",)
+
+
+def _master_cr_columns():
+    columns = []
+    for field in MasterCRDatabase._meta.get_fields():
+        if not getattr(field, "concrete", False):
+            continue
+        if field.name in MASTER_CR_EXCLUDED_FIELDS:
+            continue
+        label = field.verbose_name if field.verbose_name else field.name
+        columns.append({"name": field.name, "label": str(label)})
+    return columns
+
+
 @login_required(login_url="login")
 def region_crs_view(request):
     ctx = _common_context(request)
@@ -313,6 +328,7 @@ def region_crs_view(request):
     ctx["field_labels"] = MASTER_CR_FIELDS
     ctx["editable_region_cr_fields"] = EDITABLE_REGION_CR_FIELDS
     ctx["can_edit_region_crs"] = getattr(request.user, "role", "") in ALLOWED_REGION_CR_EDIT_ROLES
+    ctx["region_cr_columns"] = _master_cr_columns()
     return render(request, "dashboard/region_crs.html", ctx)
 
 
@@ -340,11 +356,14 @@ def fetch_region_cr_details(request):
         return JsonResponse({"ok": False, "message": "Invalid date format."}, status=400)
 
     # Read explicitly from replica and only return active (latest CoW) records
+    columns_meta = _master_cr_columns()
+    columns = [c["name"] for c in columns_meta]
+    field_list = columns if columns else MASTER_CR_FIELDS
     result = list(
         MasterCRDatabase.objects
         .using(DB_REPLICA)
         .filter(execution_date=parsed_date, is_active=True)
-        .values(*MASTER_CR_FIELDS)
+        .values(*field_list)
     )
 
     for row in result:
@@ -358,7 +377,9 @@ def fetch_region_cr_details(request):
     return JsonResponse({
         "ok": True,
         "date": date_str,
-        "fields": MASTER_CR_FIELDS,
+        "fields": field_list,
+        "columns": columns,
+        "column_labels": {c["name"]: c["label"] for c in columns_meta},
         "rows": result,
     })
 

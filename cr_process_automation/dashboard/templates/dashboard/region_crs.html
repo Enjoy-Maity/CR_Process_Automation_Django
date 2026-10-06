@@ -70,11 +70,13 @@ const CAN_EDIT = {{ can_edit_region_crs|yesno:"true,false" }};
 
 const REGION_CR_SESSION_KEY = 'region_crs_page_state';
 
+const REGION_CR_COLUMNS = {{ region_cr_columns|safe }};
 const HIDDEN_COLUMNS = new Set([
     'id',
     'is_active',
     'version',
-    'parent_reference_id'
+    'parent_reference_id',
+    'parent_reference'
 ]);
 
 let USER_OPTIONS = [];   // [{ value: 'jdoe', label: 'jdoe' }, ...]
@@ -363,6 +365,26 @@ const DEFAULT_COLUMN_WIDTH = 160;
 
 function getColumnWidth(col) {
     return FROZEN_COLUMN_WIDTHS[col] || DEFAULT_COLUMN_WIDTH;
+}
+
+function renderRegionSkeleton(columns) {
+    const table = document.getElementById('region-cr-table');
+    const colgroup = document.getElementById('region-cr-table-colgroup');
+    const head = document.getElementById('region-cr-table-head');
+    const body = document.getElementById('region-cr-table-body');
+    head.innerHTML = '';
+    body.innerHTML = '';
+    colgroup.innerHTML = '';
+    if (!columns || columns.length === 0) {
+        body.innerHTML = '<tr><td colspan="20" class="region-cr-empty-cell">Select a date and click Fetch CRs to load data.</td></tr>';
+        return;
+    }
+    columns.forEach(col => {
+        const th = document.createElement('th');
+        th.textContent = col.label || col.name;
+        head.appendChild(th);
+    });
+    body.innerHTML = '<tr><td colspan="' + columns.length + '" class="region-cr-empty-cell">Select a date and click Fetch CRs to load data.</td></tr>';
 }
 
 function renderTable(rows) {
@@ -746,6 +768,12 @@ setRegionCrDateMin();
 fetchUserOptions().then(() => {
     restoreRegionCrSessionState();
 });
+// Render skeleton on page load
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => renderRegionSkeleton(REGION_CR_COLUMNS));
+} else {
+    renderRegionSkeleton(REGION_CR_COLUMNS);
+}
 
 
 document.querySelectorAll('.region-tab-btn').forEach(btn => {

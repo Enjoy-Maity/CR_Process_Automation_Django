@@ -51,6 +51,24 @@ const STATUS_HIGHLIGHT_COLUMNS = [
 
 let STATUS_ALL_ROWS = [];
 let STATUS_TIMEOUT = null;
+const CR_WISE_STATUS_COLUMNS = {{ cr_wise_status_columns|safe }};
+
+function renderStatusSkeleton(columns) {
+    const head = document.getElementById('status-cr-table-head');
+    const body = document.getElementById('status-cr-table-body');
+    head.innerHTML = '';
+    body.innerHTML = '';
+    if (!columns || columns.length === 0) {
+        body.innerHTML = '<tr><td colspan="20" class="region-cr-empty-cell">Select a date and click Fetch CRs to load data.</td></tr>';
+        return;
+    }
+    columns.forEach(col => {
+        const th = document.createElement('th');
+        th.textContent = col.label || col.name;
+        head.appendChild(th);
+    });
+    body.innerHTML = '<tr><td colspan="' + columns.length + '" class="region-cr-empty-cell">Select a date and click Fetch CRs to load data.</td></tr>';
+}
 
 function setStatusMeta(message) {
     document.getElementById('status-cr-table-meta').textContent = message;
@@ -134,7 +152,7 @@ function renderStatusTable(rows) {
     }
 
     const rawColumns = Object.keys(rows[0]);
-    const columns = rawColumns.filter(col => col !== 'id');
+    const columns = rawColumns.filter(col => col !== 'id' && col !== 'is_active' && col !== 'version' && col !== 'parent_reference_id' && col !== 'parent_reference');
 
     head.innerHTML = columns.map(col => `<th>${escapeHtml(formatHeaderLabel(col))}</th>`).join('');
 
@@ -187,5 +205,12 @@ function fetchStatusCRs() {
 }
 
 document.getElementById('fetch-status-cr-btn').addEventListener('click', fetchStatusCRs);
+
+// Render skeleton on page load
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => renderStatusSkeleton(CR_WISE_STATUS_COLUMNS));
+} else {
+    renderStatusSkeleton(CR_WISE_STATUS_COLUMNS);
+}
 </script>
 {% endblock %}

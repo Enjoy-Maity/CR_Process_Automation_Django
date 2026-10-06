@@ -5,17 +5,24 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-# Add this line to explicitly load the .env file
-load_dotenv(BASE_DIR / 'dashboard' /'.env')
+load_dotenv(BASE_DIR / 'dashboard' / '.env')
 
-# HOST_DOWNLOAD_DIR = os.getenv(
-#      "DJANGO_DOWNLOAD_DIR", 
-#     os.path.join(os.path.abspath(os.sep), "PS-Core-Automation")
-# )
 
-SECRET_KEY = 'django-insecure-change-me'
-DEBUG = True
-ALLOWED_HOSTS = []
+def env_bool(name, default='False'):
+    val = os.getenv(name, default).strip().lower()
+    return val in ('1', 'true', 'yes', 'on')
+
+
+def env_list(name, default=''):
+    val = os.getenv(name, default)
+    if not val:
+        return []
+    return [x.strip() for x in val.replace(',', ' ').split() if x.strip()]
+
+
+SECRET_KEY = os.getenv('DJANGO_SECRET_KEY', 'django-insecure-change-me')
+DEBUG = env_bool('DJANGO_DEBUG', 'True')
+ALLOWED_HOSTS = env_list('DJANGO_ALLOWED_HOSTS', '') or ['localhost', '127.0.0.1', '0.0.0.0']
 
 INSTALLED_APPS = [
     'django.contrib.admin',
@@ -80,19 +87,19 @@ WSGI_APPLICATION = 'cr_process_automation.wsgi.application'
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
-        'NAME': 'master_db',
-        'USER': os.getenv("DB_USER"),
-        'PASSWORD': os.getenv("DB_PASSWORD"),
-        'HOST': '127.0.0.1', # Primary DB
-        'PORT': '5432',
+        'NAME': os.getenv('DB_NAME', 'master_db'),
+        'USER': os.getenv('DB_USER'),
+        'PASSWORD': os.getenv('DB_PASSWORD'),
+        'HOST': os.getenv('DB_HOST', '127.0.0.1'),
+        'PORT': os.getenv('DB_PORT', '5432'),
     },
     'replica': {
         'ENGINE': 'django.db.backends.postgresql',
-        'NAME': 'master_db',
-        'USER': os.getenv("DB_USER"),
-        'PASSWORD': os.getenv("DB_PASSWORD"),
-        'HOST': '127.0.0.1', # Replica DB
-        'PORT': '5433',
+        'NAME': os.getenv('DB_NAME_REPLICA', os.getenv('DB_NAME', 'master_db')),
+        'USER': os.getenv('DB_USER_REPLICA', os.getenv('DB_USER')),
+        'PASSWORD': os.getenv('DB_PASSWORD_REPLICA', os.getenv('DB_PASSWORD')),
+        'HOST': os.getenv('DB_HOST_REPLICA', '127.0.0.1'),
+        'PORT': os.getenv('DB_PORT_REPLICA', '5433'),
         'TEST': {
             'MIRROR': 'default',
         }

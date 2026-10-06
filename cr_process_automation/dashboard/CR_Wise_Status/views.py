@@ -24,6 +24,22 @@ from io import BytesIO
 from django.utils import timezone
 from dashboard.models import CRWiseStatus
 from django.conf import settings
+from django.forms.models import model_to_dict
+
+CR_WISE_STATUS_EXCLUDED_FIELDS = ("id",)
+
+
+def _cr_wise_status_columns():
+    columns = []
+    for field in CRWiseStatus._meta.get_fields():
+        if not getattr(field, "concrete", False):
+            continue
+        if field.name in CR_WISE_STATUS_EXCLUDED_FIELDS:
+            continue
+        label = field.verbose_name if field.verbose_name else field.name
+        columns.append({"name": field.name, "label": str(label)})
+    return columns
+
 
 @require_GET
 @login_required(login_url="login")
@@ -38,15 +54,20 @@ def fetch_cr_wise_status(request):
     except ValueError:
         return JsonResponse({"ok": False, "message": "Invalid date format."}, status=400)
 
+    columns_meta = _cr_wise_status_columns()
+    columns = [c["name"] for c in columns_meta]
+    field_list = columns if columns else settings.CR_WISE_STATUS_FIELDS
+
     result = list(
-        CRWiseStatus.objects.filter(execution_date=parsed_date, is_active=True).values(*settings.CR_WISE_STATUS_FIELDS)
+        CRWiseStatus.objects.filter(execution_date=parsed_date, is_active=True).values(*field_list)
     )
-    print(result)
 
     return JsonResponse({
         "ok": True,
         "date": date_str,
-        "fields": settings.CR_WISE_STATUS_FIELDS,
+        "fields": field_list,
+        "columns": columns,
+        "column_labels": {c["name"]: c["label"] for c in columns_meta},
         "rows": result,
     }, encoder=DjangoJSONEncoder)
 
@@ -54,5 +75,6 @@ def fetch_cr_wise_status(request):
 def cr_wise_status(request):
     ctx = _common_context(request)
     ctx["selected_option"] = "cr_wise_status"
+    ctx["cr_wise_status_columns"] = _cr_wise_status_columns()
     return render(request, "dashboard/cr_wise_status.html", ctx)
 

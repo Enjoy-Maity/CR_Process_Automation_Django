@@ -1,6 +1,7 @@
 from pathlib import Path
 from dateutil import parser
 from datetime import datetime, timedelta
+import json
 import sqlite3
 import sys
 import re
@@ -18,7 +19,7 @@ from django.shortcuts import render, redirect
 from django.views.decorators.clickjacking import xframe_options_sameorigin
 from django.views.decorators.http import require_GET, require_POST
 from django.core.serializers.json import DjangoJSONEncoder
-from .forms import LoginForm, TwoFactorAuthForm, PasswordAuthForm
+from .forms import LoginForm, TwoFactorAuthForm, PasswordAuthForm, NiamCredentialsForm
 # from django.contrib.auth import get_user_model
 from .models import MasterCRDatabase, SelectedDateTable, UserManagement
 from .exceptions import (
@@ -47,11 +48,9 @@ TASKS = [
     {"id": 4, "sequence_no": 4, "name": "BPMS CR Hygiene Checks", "download_required": True},
     {"id": 5, "sequence_no": 5, "name": "MOP Attachment & Approvals", "download_required": True},
     {"id": 6, "sequence_no": 6, "name": "Final Email Package", "download_required": True},
-    {"id": 8, "sequence_no": 7, "name": "NIAM Template Generator", "download_required": True},
-    {"id": 7, "sequence_no": 8, "name": "NIAM Ticket Generation", "download_required": True},
 ]
 
-TASKS_REQUIRING_AUTH = {1, 2, 3, 4, 5, 7}
+TASKS_REQUIRING_AUTH = {1, 2, 3, 4, 5}
 
 def _requires_auth(task_id):
     """Check if a task requires authentication."""
@@ -231,6 +230,7 @@ def _common_context(request):
             {"key": "cr_wise_status", "label": "CR-Wise Status", "url_name": "cr_wise_status"},
             {"key": "cr_history", "label": "CR History", "url_name": "cr_history"},
             {"key": "niam_template_db", "label": "NIAM Template Database", "url_name": "niam_template_db"},
+            {"key": "niam_credentials", "label": "NIAM Credentials", "url_name": "niam_credentials"},
         ]
     }
 
@@ -947,6 +947,82 @@ def fetch_user_options(request):
         .values("id", "employee_name")   # adjust fields to what you store/display
     )
     return JsonResponse({"ok": True, "users": users})
+
+
+# ────────────────────────────────────────────────────────────────
+# NIAM Credentials (self-service OLM ID / Password update)
+# ────────────────────────────────────────────────────────────────
+@login_required(login_url="login")
+def niam_credentials_view(request):
+    """Render the NIAM Credentials page for the logged-in user."""
+    ctx = _common_context(request)
+    ctx["selected_option"] = "niam_credentials"
+    ctx["niam_olm_id"] = getattr(request.user, "niam_olm_id", "") or ""
+    ctx["niam_password_set"] = bool(getattr(request.user, "niam_password", ""))
+    return render(request, "dashboard/niam_credentials.html", ctx)
+
+
+@require_POST
+@login_required(login_url="login")
+@handle_exceptions
+def update_niam_credentials(request):
+    """
+    Update the current user's NIAM OLM ID and NIAM Password.
+
+    Accepts JSON body:
+        {
+            "niam_olm_id": "...",
+            "niam_password": "...",
+            "confirm_niam_password": "..."
+        }
+    Any logged-in user (including non-admin) may update only their own credentials.
+    """
+    try:
+        payload = json.loads(request.body or b"{}")
+    except json.JSONDecodeError:
+        raise ValidationException("Invalid JSON payload.")
+
+    if not isinstance(payload, dict):
+        raise ValidationException("Request body must be a JSON object.")
+
+    form = NiamCredentialsForm(data=payload)
+    if not form.is_valid():
+        errors = {
+            field: [str(err) for err in errs]
+            for field, errs in form.errors.items()
+        }
+        first_message = next(
+            (msgs[0] for msgs in errors.values() if msgs),
+            "Please correct the errors and try again.",
+        )
+        return JsonResponse(
+            {
+                "ok": False,
+                "title": "Validation Error",
+                "message": first_message,
+                "errors": errors,
+                "status_code": 400,
+            },
+            status=400,
+        )
+
+    user = request.user
+    user.niam_olm_id = form.cleaned_data["niam_olm_id"]
+    user.niam_password = form.cleaned_data["niam_password"]
+    user.save(update_fields=["niam_olm_id", "niam_password"])
+
+    logger.info(
+        "User %s updated NIAM credentials (OLM ID: %s)",
+        user.username,
+        user.niam_olm_id,
+    )
+    return JsonResponse(
+        {
+            "ok": True,
+            "message": "NIAM credentials updated successfully.",
+            "niam_olm_id": user.niam_olm_id,
+        }
+    )
 
 
 VENDOR_ANALYSIS_FIELDS = [
@@ -2817,10 +2893,50 @@ def fetch_automation_cr_analysis(request):
     })
 
 
+def _parse_niam_date_range(date_str):
+    """Parse a single date (YYYY-MM-DD) into (from_dt, to_dt) covering that day."""
+    if not date_str:
+        raise ValueError("date is required")
+    try:
+        selected = datetime.strptime(date_str, "%Y-%m-%d")
+    except ValueError:
+        selected = parser.parse(date_str)
+        if hasattr(selected, "date"):
+            selected = datetime.combine(selected.date(), datetime.min.time())
+    from_dt = datetime.combine(selected.date(), datetime.min.time())
+    to_dt = datetime.combine(selected.date(), datetime.max.time())
+    return from_dt, to_dt
+
+
+# Fields hidden from the NIAM Template Database UI/export.
+NIAM_TEMPLATE_EXCLUDED_FIELDS = ("id",)
+
+
+def _niam_template_columns():
+    """
+    Build the NIAM Template Database column skeleton from the model.
+
+    Returns a list of {"name": field_name, "label": verbose_name} dicts,
+    excluding hidden fields (id). Used for page-load skeleton and fetch responses.
+    """
+    from .models import NIAMTicketGenerationTable
+
+    columns = []
+    for field in NIAMTicketGenerationTable._meta.get_fields():
+        if not getattr(field, "concrete", False):
+            continue
+        if field.name in NIAM_TEMPLATE_EXCLUDED_FIELDS:
+            continue
+        label = field.verbose_name if field.verbose_name else field.name
+        columns.append({"name": field.name, "label": str(label)})
+    return columns
+
+
 @login_required(login_url="login")
 def niam_template_db_view(request):
     ctx = _common_context(request)
     ctx["selected_option"] = "niam_template_db"
+    ctx["niam_columns"] = _niam_template_columns()
     return render(request, "dashboard/niam_template_db.html", ctx)
 
 
@@ -2831,47 +2947,36 @@ def fetch_niam_template_data(request):
     from django.forms.models import model_to_dict
 
     try:
-        from_dt_str = request.GET.get("from_datetime")
-        to_dt_str = request.GET.get("to_datetime")
-
-        if not from_dt_str or not to_dt_str:
-            return JsonResponse({"ok": False, "message": "from_datetime and to_datetime are required"}, status=400)
+        date_str = request.GET.get("date")
+        if not date_str:
+            return JsonResponse({"ok": False, "message": "date is required"}, status=400)
 
         try:
-            from_dt = datetime.strptime(from_dt_str, "%Y-%m-%dT%H:%M")
+            from_dt, to_dt = _parse_niam_date_range(date_str)
         except ValueError:
-            try:
-                from_dt = datetime.strptime(from_dt_str, "%Y-%m-%d %H:%M:%S")
-            except ValueError:
-                from_dt = parser.parse(from_dt_str)
+            return JsonResponse({"ok": False, "message": "Invalid date. Use YYYY-MM-DD."}, status=400)
 
-        try:
-            to_dt = datetime.strptime(to_dt_str, "%Y-%m-%dT%H:%M")
-        except ValueError:
-            try:
-                to_dt = datetime.strptime(to_dt_str, "%Y-%m-%d %H:%M:%S")
-            except ValueError:
-                to_dt = parser.parse(to_dt_str)
-
+        selected_day = from_dt.date()
         qs = NIAMTicketGenerationTable.objects.filter(
             execution_date__isnull=False
         ).filter(
             models.Q(niam_access_start_date_time__isnull=False, niam_access_start_date_time__range=(from_dt, to_dt)) |
             models.Q(sr_cr_start_date_time__isnull=False, sr_cr_start_date_time__range=(from_dt, to_dt)) |
-            models.Q(execution_date__range=(from_dt.date() if hasattr(from_dt, "date") else from_dt, to_dt.date() if hasattr(to_dt, "date") else to_dt))
+            models.Q(execution_date=selected_day)
         ).order_by("-id")[:1000]
 
+        columns_meta = _niam_template_columns()
+        columns = [c["name"] for c in columns_meta]
+
         rows = []
-        columns = []
         for obj in qs:
             d = model_to_dict(obj)
-            rows.append(d)
-        if rows:
-            columns = list(rows[0].keys())
+            rows.append({name: d.get(name) for name in columns})
 
         return JsonResponse({
             "ok": True,
             "columns": columns,
+            "column_labels": {c["name"]: c["label"] for c in columns_meta},
             "rows": rows,
             "count": len(rows)
         })
@@ -2888,38 +2993,29 @@ def download_niam_template(request):
     import io
 
     try:
-        from_dt_str = request.GET.get("from_datetime")
-        to_dt_str = request.GET.get("to_datetime")
-
-        if not from_dt_str or not to_dt_str:
-            return JsonResponse({"ok": False, "message": "from_datetime and to_datetime are required"}, status=400)
+        date_str = request.GET.get("date")
+        if not date_str:
+            return JsonResponse({"ok": False, "message": "date is required"}, status=400)
 
         try:
-            from_dt = datetime.strptime(from_dt_str, "%Y-%m-%dT%H:%M")
+            from_dt, to_dt = _parse_niam_date_range(date_str)
         except ValueError:
-            from_dt = parser.parse(from_dt_str)
+            return JsonResponse({"ok": False, "message": "Invalid date. Use YYYY-MM-DD."}, status=400)
 
-        try:
-            to_dt = datetime.strptime(to_dt_str, "%Y-%m-%dT%H:%M")
-        except ValueError:
-            to_dt = parser.parse(to_dt_str)
-
+        selected_day = from_dt.date()
         qs = NIAMTicketGenerationTable.objects.filter(
-            execution_date__isnull=False
+            Q(niam_access_start_date_time__range=(from_dt, to_dt)) |
+            Q(sr_cr_start_date_time__range=(from_dt, to_dt)) |
+            Q(execution_date=selected_day)
         ).order_by("-id")[:5000]
-
-        if from_dt_str and to_dt_str:
-            qs = NIAMTicketGenerationTable.objects.filter(
-                Q(niam_access_start_date_time__range=(from_dt, to_dt)) |
-                Q(sr_cr_start_date_time__range=(from_dt, to_dt)) |
-                Q(execution_date__range=(from_dt.date(), to_dt.date()))
-            ).order_by("-id")[:5000]
 
         rows = [model_to_dict(o) for o in qs]
         if not rows:
-            return JsonResponse({"ok": False, "message": "No data found for selected range"}, status=404)
+            return JsonResponse({"ok": False, "message": "No data found for selected date"}, status=404)
 
-        df = pd.DataFrame(rows)
+        columns_meta = _niam_template_columns()
+        columns = [c["name"] for c in columns_meta]
+        df = pd.DataFrame([{name: row.get(name) for name in columns} for row in rows])
         output = io.BytesIO()
         df.to_excel(output, index=False, sheet_name="NIAM_Template")
         output.seek(0)
