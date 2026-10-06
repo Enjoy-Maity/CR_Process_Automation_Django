@@ -25,15 +25,15 @@ from dashboard.task_modules.dependencies.extra_dependencies import (
 )
 
 
-def niam_workbook_template_maker(df: pd.DataFrame, mail_id_worksheet_df: pd.DataFrame):
+def niam_workbook_template_maker(df: pd.DataFrame, mail_id_worksheet_df: pd.DataFrame, date_: datetime):
     global workbook_path
     
     niam_workbook_path = Path(
         workbook_path
     ).parent.joinpath(
         "NIAM_Excel_files",
-        datetime.now().strftime("%d_%b_%Y"),
-        f"RITM Input_PS_Core_{datetime.now().strftime('%d_%b_%Y')}.xlsx"
+        date_.strftime("%d_%b_%Y"),
+        f"RITM Input_PS_Core_{date_.strftime('%d_%b_%Y')}.xlsx"
     )
     
     niam_workbook_path.parent.mkdir(parents=True, exist_ok=True)
@@ -134,7 +134,7 @@ def niam_workbook_template_maker(df: pd.DataFrame, mail_id_worksheet_df: pd.Data
  
 
 
-def niam_input_initiator(filtered_df: pd.DataFrame, mail_id_worksheet_df: pd.DataFrame):
+def niam_input_initiator(filtered_df: pd.DataFrame, mail_id_worksheet_df: pd.DataFrame, date_: datetime):
     
     if filtered_df.shape[0] > 0:
         unique_crs = filtered_df["CR No"].astype(str).str.strip().unique()
@@ -199,12 +199,14 @@ def niam_input_initiator(filtered_df: pd.DataFrame, mail_id_worksheet_df: pd.Dat
         niam_node_type_index = filtered_df.columns.get_loc("NIAM Node Type")
         node_details_index = filtered_df.columns.get_loc("Node Details")
         
-        today_date = datetime.now()
-        today_date = today_date.replace(hour=0, minute=0, second=0, microsecond=0)
+        # today_date = datetime.now()
+        # today_date = today_date.replace(hour=0, minute=0, second=0, microsecond=0)
+        today_date = date_.replace(hour=0, minute=0, second=0, microsecond=0)
 
         # today_date = today_date.strftime('%d-%m-%Y %H:%M:%S')
 
-        tomorrow_date = datetime.now() + timedelta(days=1)
+        # tomorrow_date = datetime.now() + timedelta(days=1)
+        tomorrow_date = date_ + timedelta(days=1)
         tomorrow_date = tomorrow_date.replace(
             hour=0, minute=0, second=0, microsecond=0
         )
