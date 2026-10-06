@@ -15,3 +15,10 @@ class DashboardConfig(AppConfig):
         This is the Django-recommended way to register signals.
         """
         import dashboard.signals  # noqa: F401
+
+        # Seed NIAM reference tables when empty (admin-editable data in niam_seed).
+        try:
+            from dashboard.niam_seed import seed_niam_reference_tables
+            seed_niam_reference_tables()
+        except Exception:
+            pass

@@ -64,17 +64,19 @@ class MasterCRDatabaseAdmin(admin.ModelAdmin):
 @admin.register(UserManagement)
 class UserManagementAdmin(UserAdmin):
     model = UserManagement
-    list_display = ("username", "employee_name", "employee_signum", "role", "email", "last_login", "is_staff", "is_active")
+    list_display = ("username", "employee_name", "employee_signum", "role", "email", "niam_olm_id", "last_login", "is_staff", "is_active")
     list_filter = ("role", "is_staff", "is_superuser", "is_active")
-    search_fields = ("username", "email", "employee_name", "employee_signum")
+    search_fields = ("username", "email", "employee_name", "employee_signum", "niam_olm_id")
     ordering = ("username",)
 
     fieldsets = UserAdmin.fieldsets + (
         ("User Management", {"fields": ("employee_name", "employee_signum", "role")}),
+        ("NIAM Credentials", {"fields": ("niam_olm_id", "niam_password")}),
     )
     add_fieldsets = UserAdmin.add_fieldsets + (
         ("User Management", {"fields": ("email", "employee_name", "employee_signum", "role")}),
-    )	
+        ("NIAM Credentials", {"fields": ("niam_olm_id", "niam_password")}),
+    )
 
 @admin.register(CRWiseStatus)
 class CRWiseStatusAdmin(admin.ModelAdmin):

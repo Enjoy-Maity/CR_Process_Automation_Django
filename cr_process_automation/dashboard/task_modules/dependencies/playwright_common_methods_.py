@@ -1043,7 +1043,7 @@ def bpms_tasks_tab_getter(
     # first_table_xpath = "//fieldset[@arwindowid='3']/div[@arwindowid='3']/div/div/div[@arwindowid='3']/fieldset/div/div[@arid='301389923']/div[@class='TableInner']/div[@class='BaseTableOuter']"
     # first_table_xpath = "//fieldset/div/div/div/div/fieldset/div/div/div[@class='TableInner']/div[@class='BaseTableOuter']"
     # first_table_xpath = "//fieldset/div/div/div/div/div[3]/fieldset/div/div/fieldset[1]/div[2]/div/div/div[2]/fieldset/div/div/div[2]/div"
-    lld_locator = "//fieldset/div/div/div/div/fieldset/div/div/div[@class='TableInner']/div[@class='BaseTableOuter']/div[@class='BaseTableInner']/table/tbody/tr/td/nobr/span[contains(.,'LLD Automation')]"
+    lld_locator = "//fieldset/div/div/div/div/fieldset/div/div/div[@class='TableInner']/div[@class='BaseTableOuter']/div[@class='BaseTableInner']/table/tbody/tr/td/nobr/span[contains(.,'LLD')]"
     # logs.append(
     #     f"Getting the bpms technical design attachment name for cr: {cr}"
     # )

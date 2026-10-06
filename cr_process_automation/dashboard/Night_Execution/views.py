@@ -116,6 +116,7 @@ def night_execution(request):
             {"key": "cr_wise_status", "label": "CR-Wise Status", "url_name": "cr_wise_status"},
             {"key": "cr_history", "label": "CR History", "url_name": "cr_history"},
             {"key": "niam_template_db", "label": "NIAM Template Database", "url_name": "niam_template_db"},
+            {"key": "niam_credentials", "label": "NIAM Credentials", "url_name": "niam_credentials"},
         ]
     }
     return render(request, "dashboard/night_execution.html", context)

@@ -309,7 +309,9 @@ class UserManagement(AbstractUser):
     employee_name = models.CharField(max_length=150, null=True, blank=True)
     employee_signum = models.CharField(max_length=100, null=True, blank=True, unique=True)
     role = models.CharField(max_length=20, choices=ROLE_CHOICES, default=ROLE_ADMIN)
-    
+    niam_olm_id = models.CharField(("NIAM OLM ID"), max_length=100, null=True, blank=True)
+    niam_password = models.CharField(("NIAM Password"), max_length=255, null=True, blank=True)
+
     def __str__(self):
         return f"{self.username} ({self.role})"
 
@@ -855,3 +857,15 @@ class NIAMAccessTypeTable(models.Model):
 
     def __str__(self):
         return self.access_type
+
+
+class NIAMActivityNameTable(models.Model):
+    sno = models.IntegerField(("SNO"), blank=True, null=True)
+    activity_name = models.CharField(("Activity Name"), max_length=255, blank=True, null=True)
+
+    class Meta:
+        db_table = "niam_activity_name_table"
+
+    def __str__(self):
+        return self.activity_name
+        
