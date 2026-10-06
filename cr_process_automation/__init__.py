@@ -1,3 +1,5 @@
+import os
+
 import rootutils
 from dotenv import load_dotenv
 
