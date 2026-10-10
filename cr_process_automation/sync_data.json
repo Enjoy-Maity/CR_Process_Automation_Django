@@ -4769,7 +4769,7 @@
     "circle": "UPE",
     "node_details": "",
     "node_count": 3,
-    "activity_description": "CR for Network Name configuration to ‚Äúairtel‚Äù for Airtel PLMN only in all Nokia CMMs",
+    "activity_description": "CR for Network Name configuration to ìairtelî for Airtel PLMN only in all Nokia CMMs",
     "bpms_cr_yes_no": "No",
     "planning_status": "",
     "activity_executor": "",
@@ -4961,7 +4961,7 @@
     "circle": "UPE",
     "node_details": "",
     "node_count": 3,
-    "activity_description": "CR for Network Name configuration to ‚Äúairtel‚Äù for Airtel PLMN only in all Nokia CMMs",
+    "activity_description": "CR for Network Name configuration to ìairtelî for Airtel PLMN only in all Nokia CMMs",
     "bpms_cr_yes_no": "No",
     "planning_status": "planned",
     "activity_executor": "",
@@ -5297,7 +5297,7 @@
     "circle": "UPE",
     "node_details": "UEVARNCMM02,\nUEGANNCMM01,\nUEGANCK02NCMM05",
     "node_count": 3,
-    "activity_description": "CR for Network Name configuration to ‚Äúairtel‚Äù for Airtel PLMN only in all Nokia CMMs",
+    "activity_description": "CR for Network Name configuration to ìairtelî for Airtel PLMN only in all Nokia CMMs",
     "bpms_cr_yes_no": "No",
     "planning_status": "planned",
     "activity_executor": "",
@@ -5345,7 +5345,7 @@
     "circle": "UPE",
     "node_details": "UEVARNCMM02,\nUEGANNCMM01,\nUEGANCK02NCMM05",
     "node_count": 3,
-    "activity_description": "CR for Network Name configuration to ‚Äúairtel‚Äù for Airtel PLMN only in all Nokia CMMs",
+    "activity_description": "CR for Network Name configuration to ìairtelî for Airtel PLMN only in all Nokia CMMs",
     "bpms_cr_yes_no": "No",
     "planning_status": "planned",
     "activity_executor": "",
@@ -5681,7 +5681,7 @@
     "circle": "UPE",
     "node_details": "UEVARNCMM02,\nUEGANNCMM01,\nUEGANCK02NCMM05",
     "node_count": 3,
-    "activity_description": "CR for Network Name configuration to ‚Äúairtel‚Äù for Airtel PLMN only in all Nokia CMMs",
+    "activity_description": "CR for Network Name configuration to ìairtelî for Airtel PLMN only in all Nokia CMMs",
     "bpms_cr_yes_no": "No",
     "planning_status": "",
     "activity_executor": "",
@@ -9233,7 +9233,7 @@
     "circle": "UPE",
     "node_details": "",
     "node_count": 3,
-    "activity_description": "CR for Network Name configuration to ‚Äúairtel‚Äù for Airtel PLMN only in all Nokia CMMs",
+    "activity_description": "CR for Network Name configuration to ìairtelî for Airtel PLMN only in all Nokia CMMs",
     "bpms_cr_yes_no": "No",
     "planning_status": "",
     "activity_executor": "",
@@ -9425,7 +9425,7 @@
     "circle": "UPE",
     "node_details": "",
     "node_count": 3,
-    "activity_description": "CR for Network Name configuration to ‚Äúairtel‚Äù for Airtel PLMN only in all Nokia CMMs",
+    "activity_description": "CR for Network Name configuration to ìairtelî for Airtel PLMN only in all Nokia CMMs",
     "bpms_cr_yes_no": "No",
     "planning_status": "planned",
     "activity_executor": "",
@@ -12017,7 +12017,7 @@
     "circle": "GJ",
     "node_details": "",
     "node_count": 2,
-    "activity_description": "S10 Entry of MP MME remove¬†in GUJ DNSs",
+    "activity_description": "S10 Entry of MP MME remove†in GUJ DNSs",
     "bpms_cr_yes_no": "No",
     "planning_status": "",
     "activity_executor": "",
@@ -13611,7 +13611,7 @@
     "technical_validator": "Enjoy Maity",
     "service_affecting": "Yes",
     "impact": "SA, in worst case 20 Mins Volte/voice services will be impacted",
-    "test_cases": "KPI:-( CHNSNTVSAPC02) CCR-I Success Rate CCR-T Success Rate CCR-Update Success Rate Gx-RAR Success Rate Rx-AAR Success Rate Rx-RAR Success Rate Rx-STR Success rate PCF KPI: SM Policy Control Create Success Ratio (only Eric) SM Policy Control UpdateNotify Success Ratio (only Eric) CHN SAPC Pair-1 CHNSIRVSAPC01, CHNSNTVSAPC02 CHNSIRVSAPC01‚Äînon-preferred CHNSNTVSAPC02‚Äîpreferred CHNOCDSR03, CHNOCDSR04 KPI: Diameter_DSR_Success_Rate IMS KPI & O-DRA KPI Aligned from circle end. Voice & Volte testing to be done by circle team.",
+    "test_cases": "KPI:-( CHNSNTVSAPC02) CCR-I Success Rate CCR-T Success Rate CCR-Update Success Rate Gx-RAR Success Rate Rx-AAR Success Rate Rx-RAR Success Rate Rx-STR Success rate PCF KPI: SM Policy Control Create Success Ratio (only Eric) SM Policy Control UpdateNotify Success Ratio (only Eric) CHN SAPC Pair-1 CHNSIRVSAPC01, CHNSNTVSAPC02 CHNSIRVSAPC01ónon-preferred CHNSNTVSAPC02ópreferred CHNOCDSR03, CHNOCDSR04 KPI: Diameter_DSR_Success_Rate IMS KPI & O-DRA KPI Aligned from circle end. Voice & Volte testing to be done by circle team.",
     "kpi_name": "",
     "kpi_spoc_night": "",
     "kpi_spoc_morning": "",
@@ -13659,7 +13659,7 @@
     "technical_validator": "Enjoy Maity",
     "service_affecting": "Yes",
     "impact": "SA, in worst case 20 Mins Volte/voice services will be impacted",
-    "test_cases": "KPI:-( CHNSNTVSAPC02) CCR-I Success Rate CCR-T Success Rate CCR-Update Success Rate Gx-RAR Success Rate Rx-AAR Success Rate Rx-RAR Success Rate Rx-STR Success rate PCF KPI: SM Policy Control Create Success Ratio (only Eric) SM Policy Control UpdateNotify Success Ratio (only Eric) CHN SAPC Pair-1 CHNSIRVSAPC01, CHNSNTVSAPC02 CHNSIRVSAPC01‚Äînon-preferred CHNSNTVSAPC02‚Äîpreferred CHNOCDSR03, CHNOCDSR04 KPI: Diameter_DSR_Success_Rate IMS KPI & O-DRA KPI Aligned from circle end. Voice & Volte testing to be done by circle team.",
+    "test_cases": "KPI:-( CHNSNTVSAPC02) CCR-I Success Rate CCR-T Success Rate CCR-Update Success Rate Gx-RAR Success Rate Rx-AAR Success Rate Rx-RAR Success Rate Rx-STR Success rate PCF KPI: SM Policy Control Create Success Ratio (only Eric) SM Policy Control UpdateNotify Success Ratio (only Eric) CHN SAPC Pair-1 CHNSIRVSAPC01, CHNSNTVSAPC02 CHNSIRVSAPC01ónon-preferred CHNSNTVSAPC02ópreferred CHNOCDSR03, CHNOCDSR04 KPI: Diameter_DSR_Success_Rate IMS KPI & O-DRA KPI Aligned from circle end. Voice & Volte testing to be done by circle team.",
     "kpi_name": "",
     "kpi_spoc_night": "",
     "kpi_spoc_morning": "",
@@ -13995,7 +13995,7 @@
     "technical_validator": "Enjoy Maity",
     "service_affecting": "Yes",
     "impact": "SA, in worst case 20 Mins Volte/voice services will be impacted",
-    "test_cases": "KPI:-( CHNSNTVSAPC02) CCR-I Success Rate CCR-T Success Rate CCR-Update Success Rate Gx-RAR Success Rate Rx-AAR Success Rate Rx-RAR Success Rate Rx-STR Success rate PCF KPI: SM Policy Control Create Success Ratio (only Eric) SM Policy Control UpdateNotify Success Ratio (only Eric) CHN SAPC Pair-1 CHNSIRVSAPC01, CHNSNTVSAPC02 CHNSIRVSAPC01‚Äînon-preferred CHNSNTVSAPC02‚Äîpreferred CHNOCDSR03, CHNOCDSR04 KPI: Diameter_DSR_Success_Rate IMS KPI & O-DRA KPI Aligned from circle end. Voice & Volte testing to be done by circle team.",
+    "test_cases": "KPI:-( CHNSNTVSAPC02) CCR-I Success Rate CCR-T Success Rate CCR-Update Success Rate Gx-RAR Success Rate Rx-AAR Success Rate Rx-RAR Success Rate Rx-STR Success rate PCF KPI: SM Policy Control Create Success Ratio (only Eric) SM Policy Control UpdateNotify Success Ratio (only Eric) CHN SAPC Pair-1 CHNSIRVSAPC01, CHNSNTVSAPC02 CHNSIRVSAPC01ónon-preferred CHNSNTVSAPC02ópreferred CHNOCDSR03, CHNOCDSR04 KPI: Diameter_DSR_Success_Rate IMS KPI & O-DRA KPI Aligned from circle end. Voice & Volte testing to be done by circle team.",
     "kpi_name": "",
     "kpi_spoc_night": "",
     "kpi_spoc_morning": "",
@@ -17393,7 +17393,7 @@
     "circle": "UPE",
     "node_details": "",
     "node_count": 24,
-    "activity_description": "Unused TAC related configuration deletion in Cisco & Nokia¬† DNS",
+    "activity_description": "Unused TAC related configuration deletion in Cisco & Nokia† DNS",
     "bpms_cr_yes_no": "No",
     "planning_status": "",
     "activity_executor": "",
@@ -22001,7 +22001,7 @@
     "circle": "UPE",
     "node_details": "",
     "node_count": 12,
-    "activity_description": "infotrack.com and autowiz.com M2M APN migration from NoidaGGSN1 to tnsaneegp03 in cisco¬† DNS",
+    "activity_description": "infotrack.com and autowiz.com M2M APN migration from NoidaGGSN1 to tnsaneegp03 in cisco† DNS",
     "bpms_cr_yes_no": "No",
     "planning_status": "",
     "activity_executor": "",
@@ -24387,7 +24387,7 @@
   "model": "dashboard.usermanagement",
   "fields": {
     "password": "pbkdf2_sha256$1500000$6mKb74mxZki9RxlOnqEJ2Q$qRFn65JDRsGIjiSF2OjS5Dwac83xnyHytUKwqcAifDU=",
-    "last_login": "2026-09-30T08:52:40.450Z",
+    "last_login": "2026-10-07T06:56:57.856Z",
     "is_superuser": true,
     "username": "enjoy",
     "first_name": "Enjoy",
@@ -26694,7 +26694,7 @@
     "maintenance_window": "00:00:00 - 06:00:00",
     "cr_no": "CRQ000005575213",
     "risk": "1-Extensive/Widespread",
-    "activity_description": "CR for Network Name configuration to ‚Äúairtel‚Äù for Airtel PLMN only in all Nokia CMMs",
+    "activity_description": "CR for Network Name configuration to ìairtelî for Airtel PLMN only in all Nokia CMMs",
     "bpms_cr_yes_no": "No",
     "circle": "UPE",
     "region": "North",
@@ -26814,7 +26814,7 @@
     "maintenance_window": "00:00:00 - 06:00:00",
     "cr_no": "CRQ000005575213",
     "risk": "1-Extensive/Widespread",
-    "activity_description": "CR for Network Name configuration to ‚Äúairtel‚Äù for Airtel PLMN only in all Nokia CMMs",
+    "activity_description": "CR for Network Name configuration to ìairtelî for Airtel PLMN only in all Nokia CMMs",
     "bpms_cr_yes_no": "No",
     "circle": "UPE",
     "region": "North",
@@ -26910,7 +26910,7 @@
     "maintenance_window": "00:00:00 - 06:00:00",
     "cr_no": "CRQ000005575213",
     "risk": "1-Extensive/Widespread",
-    "activity_description": "CR for Network Name configuration to ‚Äúairtel‚Äù for Airtel PLMN only in all Nokia CMMs",
+    "activity_description": "CR for Network Name configuration to ìairtelî for Airtel PLMN only in all Nokia CMMs",
     "bpms_cr_yes_no": "No",
     "circle": "UPE",
     "region": "North",
@@ -28662,7 +28662,7 @@
     "maintenance_window": "00:00:00 - 06:00:00",
     "cr_no": "CRQ000005575213",
     "risk": "1-Extensive/Widespread",
-    "activity_description": "CR for Network Name configuration to ‚Äúairtel‚Äù for Airtel PLMN only in all Nokia CMMs",
+    "activity_description": "CR for Network Name configuration to ìairtelî for Airtel PLMN only in all Nokia CMMs",
     "bpms_cr_yes_no": "No",
     "circle": "UPE",
     "region": "North",
@@ -29958,7 +29958,7 @@
     "maintenance_window": "00:00:00 - 06:00:00",
     "cr_no": "CRQ000005580174",
     "risk": "1-Extensive/Widespread",
-    "activity_description": "S10 Entry of MP MME remove¬†in GUJ DNSs",
+    "activity_description": "S10 Entry of MP MME remove†in GUJ DNSs",
     "bpms_cr_yes_no": "No",
     "circle": "GJ",
     "region": "West",
@@ -32286,7 +32286,7 @@
     "maintenance_window": "00:00:00 - 06:00:00",
     "cr_no": "CRQ000005579589",
     "risk": "1-Extensive/Widespread",
-    "activity_description": "Unused TAC related configuration deletion in Cisco & Nokia¬† DNS",
+    "activity_description": "Unused TAC related configuration deletion in Cisco & Nokia† DNS",
     "bpms_cr_yes_no": "No",
     "circle": "UPE",
     "region": "North",
@@ -34422,7 +34422,7 @@
     "maintenance_window": "00:00:00 - 06:00:00",
     "cr_no": "CRQ000005598109",
     "risk": "1-Extensive/Widespread",
-    "activity_description": "infotrack.com and autowiz.com M2M APN migration from NoidaGGSN1 to tnsaneegp03 in cisco¬† DNS",
+    "activity_description": "infotrack.com and autowiz.com M2M APN migration from NoidaGGSN1 to tnsaneegp03 in cisco† DNS",
     "bpms_cr_yes_no": "No",
     "circle": "UPE",
     "region": "North",
@@ -35655,7 +35655,7 @@
     "circle": "UPE",
     "node_details": "",
     "node_count": 3,
-    "activity_description": "CR for Network Name configuration to ‚Äúairtel‚Äù for Airtel PLMN only in all Nokia CMMs",
+    "activity_description": "CR for Network Name configuration to ìairtelî for Airtel PLMN only in all Nokia CMMs",
     "bpms_cr_yes_no": "No",
     "planning_status": "planned",
     "activity_executor": "",
@@ -39217,7 +39217,7 @@
     "technical_validator": "Enjoy Maity",
     "service_affecting": "Yes",
     "impact": "SA, in worst case 20 Mins Volte/voice services will be impacted",
-    "test_cases": "KPI:-( CHNSNTVSAPC02) CCR-I Success Rate CCR-T Success Rate CCR-Update Success Rate Gx-RAR Success Rate Rx-AAR Success Rate Rx-RAR Success Rate Rx-STR Success rate PCF KPI: SM Policy Control Create Success Ratio (only Eric) SM Policy Control UpdateNotify Success Ratio (only Eric) CHN SAPC Pair-1 CHNSIRVSAPC01, CHNSNTVSAPC02 CHNSIRVSAPC01‚Äînon-preferred CHNSNTVSAPC02‚Äîpreferred CHNOCDSR03, CHNOCDSR04 KPI: Diameter_DSR_Success_Rate IMS KPI & O-DRA KPI Aligned from circle end. Voice & Volte testing to be done by circle team.",
+    "test_cases": "KPI:-( CHNSNTVSAPC02) CCR-I Success Rate CCR-T Success Rate CCR-Update Success Rate Gx-RAR Success Rate Rx-AAR Success Rate Rx-RAR Success Rate Rx-STR Success rate PCF KPI: SM Policy Control Create Success Ratio (only Eric) SM Policy Control UpdateNotify Success Ratio (only Eric) CHN SAPC Pair-1 CHNSIRVSAPC01, CHNSNTVSAPC02 CHNSIRVSAPC01ónon-preferred CHNSNTVSAPC02ópreferred CHNOCDSR03, CHNOCDSR04 KPI: Diameter_DSR_Success_Rate IMS KPI & O-DRA KPI Aligned from circle end. Voice & Volte testing to be done by circle team.",
     "kpi_name": "",
     "kpi_spoc_night": "",
     "kpi_spoc_morning": "",
@@ -40263,7 +40263,7 @@
     "circle": "GJ",
     "node_details": "",
     "node_count": 2,
-    "activity_description": "S10 Entry of MP MME remove¬†in GUJ DNSs",
+    "activity_description": "S10 Entry of MP MME remove†in GUJ DNSs",
     "bpms_cr_yes_no": "No",
     "planning_status": "",
     "activity_executor": "",
@@ -42903,7 +42903,7 @@
     "circle": "UPE",
     "node_details": "",
     "node_count": 24,
-    "activity_description": "Unused TAC related configuration deletion in Cisco & Nokia¬† DNS",
+    "activity_description": "Unused TAC related configuration deletion in Cisco & Nokia† DNS",
     "bpms_cr_yes_no": "No",
     "planning_status": "",
     "activity_executor": "",
@@ -48423,7 +48423,7 @@
     "circle": "GJ",
     "node_details": "",
     "node_count": 2,
-    "activity_description": "BPMS - Top-ON Weightage changes¬† in Ericsson DNS (Without Coordination) - E2E",
+    "activity_description": "BPMS - Top-ON Weightage changes† in Ericsson DNS (Without Coordination) - E2E",
     "bpms_cr_yes_no": "Yes",
     "planning_status": "planned",
     "activity_executor": "",
@@ -48759,7 +48759,7 @@
     "circle": "GJ",
     "node_details": "GUJRAJEDNS01,\nGUJCHAEDNS03",
     "node_count": 2,
-    "activity_description": "BPMS - Top-ON Weightage changes¬† in Ericsson DNS (Without Coordination) - E2E",
+    "activity_description": "BPMS - Top-ON Weightage changes† in Ericsson DNS (Without Coordination) - E2E",
     "bpms_cr_yes_no": "Yes",
     "planning_status": "planned",
     "activity_executor": "",
@@ -48768,7 +48768,7 @@
     "reason_for_rollback_cancel": "",
     "technical_validator": "Enjoy Maity",
     "service_affecting": "Yes",
-    "impact": "SA ( 10 to 15 min¬†Voice/Data Service impact in worst Case)",
+    "impact": "SA ( 10 to 15 min†Voice/Data Service impact in worst Case)",
     "test_cases": "Test/KPI : Pre & post testing required. GUJCHAEDNS03,GUJRAJEDNS01 KPI : Resolution check from DNS & MME KPI - GJCHGRHCK01ERPCCSM02 / GJCHGRHCK01ERPCGUP03 / GJRJTRHCK01ERPCCSM03 / GUJRAJCC02EREPGUP02 / GJCHGRHCK03ERPCCSM04 / GJCHGRHCK03ERPCGUP04 / GJRJTRHCK02ERPCCSM05 / GJRJTRHCK02ERPCGUP05 GGSN Bearer Creation SR _Combained GGSN PDP SR_Combained GGSN Thpt_Gbps_Combained_Hourly GGSN GX SR _Combained GGSN GY SR _Combained Node - GUJCHAEDNS03,GUJRAJEDNS01 Basic testing will be done by circle team. IMS team aligned.",
     "kpi_name": "",
     "kpi_spoc_night": "",
@@ -51447,7 +51447,7 @@
     "circle": "UPE",
     "node_details": "",
     "node_count": 12,
-    "activity_description": "infotrack.com and autowiz.com M2M APN migration from NoidaGGSN1 to tnsaneegp03 in cisco¬† DNS",
+    "activity_description": "infotrack.com and autowiz.com M2M APN migration from NoidaGGSN1 to tnsaneegp03 in cisco† DNS",
     "bpms_cr_yes_no": "No",
     "planning_status": "",
     "activity_executor": "",
@@ -53221,6 +53221,30 @@
 },
 {
   "model": "dashboard.niamprojectnametable",
+  "pk": 1,
+  "fields": {
+    "sno": 1,
+    "project_name": "CORE"
+  }
+},
+{
+  "model": "dashboard.niamprojectnametable",
+  "pk": 2,
+  "fields": {
+    "sno": 2,
+    "project_name": "RAN/MW"
+  }
+},
+{
+  "model": "dashboard.niamprojectnametable",
+  "pk": 3,
+  "fields": {
+    "sno": 3,
+    "project_name": "Transport"
+  }
+},
+{
+  "model": "dashboard.niamprojectnametable",
   "pk": 4,
   "fields": {
     "sno": 1,
@@ -53241,6 +53265,30 @@
   "fields": {
     "sno": 3,
     "project_name": "Transport"
+  }
+},
+{
+  "model": "dashboard.niamrequestfortable",
+  "pk": 1,
+  "fields": {
+    "sno": 1,
+    "request_for": "ID Modification"
+  }
+},
+{
+  "model": "dashboard.niamrequestfortable",
+  "pk": 2,
+  "fields": {
+    "sno": 2,
+    "request_for": "ID Creation"
+  }
+},
+{
+  "model": "dashboard.niamrequestfortable",
+  "pk": 3,
+  "fields": {
+    "sno": 3,
+    "request_for": "Glass_break"
   }
 },
 {
@@ -53269,6 +53317,30 @@
 },
 {
   "model": "dashboard.niamaccesstypetable",
+  "pk": 1,
+  "fields": {
+    "sno": 1,
+    "access_type": "ADMIN"
+  }
+},
+{
+  "model": "dashboard.niamaccesstypetable",
+  "pk": 2,
+  "fields": {
+    "sno": 2,
+    "access_type": "READWRITE"
+  }
+},
+{
+  "model": "dashboard.niamaccesstypetable",
+  "pk": 3,
+  "fields": {
+    "sno": 3,
+    "access_type": "ADMIN and READWRITE"
+  }
+},
+{
+  "model": "dashboard.niamaccesstypetable",
   "pk": 4,
   "fields": {
     "sno": 1,
@@ -53289,6 +53361,22 @@
   "fields": {
     "sno": 3,
     "access_type": "ADMIN and READWRITE"
+  }
+},
+{
+  "model": "dashboard.niamactivitynametable",
+  "pk": 1,
+  "fields": {
+    "sno": 1,
+    "activity_name": "Configural-Change: Addition or Creation | Modification | Deletion | Definition"
+  }
+},
+{
+  "model": "dashboard.niamactivitynametable",
+  "pk": 2,
+  "fields": {
+    "sno": 2,
+    "activity_name": "Traffic-Optimization / Shifting / Migration / Offloading"
   }
 },
 {

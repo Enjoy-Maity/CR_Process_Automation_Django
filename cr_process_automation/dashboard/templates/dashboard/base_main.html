@@ -32,9 +32,6 @@
                     <span class="user-summary-separator">|</span>
                     <span class="user-summary-text">{{ user_role }}</span>
                 </div>
-                {% if user.is_authenticated %}
-                <a href="{% url 'niam_credentials' %}" class="logout-btn" style="text-decoration:none;margin-right:8px;">My NIAM Credentials</a>
-                {% endif %}
                 <a href="{% url 'logout' %}" class="logout-btn">Logout</a>
             </div>
         </header>

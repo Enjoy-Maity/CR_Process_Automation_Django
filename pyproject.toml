@@ -24,4 +24,5 @@ dependencies = [
     "regex>=2026.9.3",
     "rootutils>=1.0.7",
     "tabulate>=0.10.0",
+    "waitress>=3.0.2",
 ]
