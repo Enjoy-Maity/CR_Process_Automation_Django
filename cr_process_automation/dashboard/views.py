@@ -2,6 +2,7 @@ from pathlib import Path
 from dateutil import parser
 from datetime import datetime, timedelta
 import json
+import shutil
 import sqlite3
 import sys
 import re
@@ -9,19 +10,30 @@ import traceback
 import threading
 from importlib import import_module
 import pandas as pd
-from django.db import connection
+from django.db import connection, transaction, IntegrityError
+from django.db.models import Q
 from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth import authenticate, login, logout
 from django.contrib.auth.decorators import login_required
 from django.http import JsonResponse, FileResponse, Http404
 from django.shortcuts import render, redirect
+from django.utils import timezone
 from django.views.decorators.clickjacking import xframe_options_sameorigin
 from django.views.decorators.http import require_GET, require_POST
 from django.core.serializers.json import DjangoJSONEncoder
 from .forms import LoginForm, TwoFactorAuthForm, PasswordAuthForm, NiamCredentialsForm
 # from django.contrib.auth import get_user_model
-from .models import MasterCRDatabase, SelectedDateTable, UserManagement
+from .models import (
+    MasterCRDatabase,
+    SelectedDateTable,
+    UserManagement,
+    RegionLock,
+    TaskRun,
+    AutomationTask,
+)
+from .utils import task_runtime
+from .utils.task_runtime import RUN_REGISTRY
 from .exceptions import (
     ValidationException,
     NotFoundException,
@@ -50,6 +62,22 @@ TASKS = [
     {"id": 6, "sequence_no": 6, "name": "Final Email Package", "download_required": True},
 ]
 
+# NIAM Ticket Generation is triggered from the NIAM Template Database page, not
+# the CR Planning task table, so it is kept out of TASKS but startable.
+NIAM_TASK_ID = 7
+NIAM_TASK = {
+    "id": NIAM_TASK_ID,
+    "sequence_no": NIAM_TASK_ID,
+    "name": "NIAM Ticket Generation",
+    "download_required": True,
+}
+
+ALL_TASKS = TASKS + [NIAM_TASK]
+
+# Region locks are held for this long without a heartbeat, then become free.
+REGION_LOCK_TTL_SECONDS = 120
+REGION_KEYS = ("north", "west", "east", "south")
+
 TASKS_REQUIRING_AUTH = {1, 2, 3, 4, 5}
 
 def _requires_auth(task_id):
@@ -75,7 +103,7 @@ TASK_RUNTIME = {
         "password": None,
         "pwd_event": threading.Event(),
     }
-    for task in TASKS
+    for task in ALL_TASKS
 }
 
 GLOBAL_LOGS = ["Dashboard loaded successfully.", "Waiting for task execution."]
@@ -122,17 +150,22 @@ def login_view(request):
 
 
 def logout_view(request):
-    """Handle user logout."""
+    """Handle user logout and release any region locks they hold."""
     user = request.user.username if request.user.is_authenticated else "Unknown"
+    if request.user.is_authenticated:
+        try:
+            RegionLock.objects.using("default").filter(locked_by=request.user).delete()
+        except Exception:
+            logger.exception("Failed to release region locks on logout for %s", user)
     logout(request)
     logger.info(f"User {user} logged out")
     return redirect("login")
 
 
 def _task_by_id(task_id):
-    """Get task by ID."""
+    """Get task by ID (includes the NIAM generator task)."""
     try:
-        return next((task for task in TASKS if task["id"] == task_id), None)
+        return next((task for task in ALL_TASKS if task["id"] == task_id), None)
     except Exception as e:
         logger.error(f"Error retrieving task {task_id}: {str(e)}")
         return None
@@ -192,9 +225,47 @@ def _apply_counts_to_tasks():
         runtime.update(counts)
 
 
-def _build_tasks_for_ui():
-    """Build task data for UI."""
-    return [{**task, **TASK_RUNTIME[task["id"]]} for task in TASKS]
+def _merge_runtime_for_request(user_id, task_id):
+    """
+    Merge the per-user runtime context (status/download/auth flags) on top of
+    the shared default runtime (regional counts) for one task. Users never see
+    each other's run state.
+    """
+    merged = dict(TASK_RUNTIME[task_id])
+    ctx = RUN_REGISTRY.peek(user_id, task_id) if user_id is not None else None
+    if ctx:
+        merged.update({
+            "status": ctx.get("status", merged["status"]),
+            "download_ready": ctx.get("download_ready", False),
+            "download_name": ctx.get("download_name", ""),
+            "download_url": ctx.get("download_url", ""),
+            "otp_required": ctx.get("otp_required", False),
+            "password_required": ctx.get("password_required", False),
+            "logs": ctx.get("logs", []),
+            "run_key": ctx.get("run_key", ""),
+        })
+    return merged
+
+
+def _build_tasks_for_ui(user_id=None, include_niam=False):
+    """Build task data for UI, scoped to the requesting user when given."""
+    task_defs = TASKS + ([NIAM_TASK] if include_niam else [])
+    return [
+        {**task, **_merge_runtime_for_request(user_id, task["id"])}
+        for task in task_defs
+    ]
+
+
+def _user_logs(user_id, limit=20):
+    """Return the requesting user's own recent logs (falls back to global)."""
+    entries = []
+    if user_id is not None:
+        for ctx in RUN_REGISTRY.all_for_user(user_id).values():
+            for entry in ctx.get("logs", []) or []:
+                entries.append(entry)
+    if not entries:
+        entries = list(GLOBAL_LOGS)
+    return entries[-limit:]
 
 
 def _split_log(entry):
@@ -210,18 +281,24 @@ def _common_context(request):
     if request.user.is_authenticated:
         user_name = request.user.get_full_name() or request.user.username
         user_role = getattr(request.user, 'role', 'User')
+        user_id = request.user.id
+        running_task = _current_running_task_for(user_id)
+        task_logs = _user_logs(user_id)
     else:
         user_name = "Guest"
         user_role = "Standard User"
-    
+        user_id = None
+        running_task = CURRENT_RUNNING_TASK
+        task_logs = list(GLOBAL_LOGS)
+
     return {
         "page_title": "CR Process Automation",
         "selected_option": "cr_planning",
         "user_name": user_name,
         "user_role": user_role,
-        "running_task": CURRENT_RUNNING_TASK,
-        "task_logs": [_split_log(x) for x in GLOBAL_LOGS[-20:]],
-        "tasks": _build_tasks_for_ui(),
+        "running_task": running_task,
+        "task_logs": [_split_log(x) for x in task_logs],
+        "tasks": _build_tasks_for_ui(user_id),
         "menu_items": [
             {"key": "cr_planning", "label": "CR Planning", "url_name": "cr_planning"},
             {"key": "night_execution", "label": "Night Execution", "url_name": "night_execution"},
@@ -233,6 +310,15 @@ def _common_context(request):
             {"key": "niam_credentials", "label": "NIAM Credentials", "url_name": "niam_credentials"},
         ]
     }
+
+
+def _current_running_task_for(user_id):
+    """Human-readable label for the task the given user currently runs."""
+    for task_id, ctx in RUN_REGISTRY.all_for_user(user_id).items():
+        if ctx.get("status") in ("Running", "Waiting for OTP", "Waiting for Password"):
+            task = _task_by_id(task_id)
+            return task["name"] if task else f"Task {task_id}"
+    return "No task is running currently."
 
 
 @login_required(login_url="login")
@@ -257,11 +343,211 @@ def night_spoc_view(request):
     return render(request, "dashboard/night_spoc.html", ctx)
 
 
+# ────────────────────────────────────────────────────────────────────────
+# Region locks (cross-user, DB-backed, heartbeat via the 3s dashboard poll)
+# ────────────────────────────────────────────────────────────────────────
+
+def _parse_regions(raw):
+    """Normalize a regions value (list or comma string) to known region keys."""
+    if raw is None:
+        return []
+    items = raw if isinstance(raw, (list, tuple)) else str(raw).split(",")
+    result = []
+    for item in items:
+        key = str(item).strip().lower()
+        if key in REGION_KEYS and key not in result:
+            result.append(key)
+    return result
+
+
+def _purge_expired_region_locks():
+    try:
+        RegionLock.objects.using("default").filter(
+            expires_at__lte=timezone.now()
+        ).delete()
+    except Exception:
+        logger.exception("Failed to purge expired region locks")
+
+
+def _region_holder_name(lock):
+    if not lock.locked_by_id:
+        return "another user"
+    user = lock.locked_by
+    return user.get_full_name() or user.username
+
+
+def _region_lock_map(user=None):
+    """Return {region: {"locked", "mine", "by", "since"}} for every region."""
+    _purge_expired_region_locks()
+    result = {key: {"locked": False, "mine": False, "by": "", "since": ""} for key in REGION_KEYS}
+    try:
+        locks = (
+            RegionLock.objects.using("default")
+            .select_related("locked_by")
+            .filter(expires_at__gt=timezone.now())
+        )
+        for lock in locks:
+            if lock.region not in result:
+                continue
+            mine = bool(user is not None and user.is_authenticated and lock.locked_by_id == user.id)
+            result[lock.region] = {
+                "locked": True,
+                "mine": mine,
+                "by": _region_holder_name(lock),
+                "since": lock.locked_at.strftime("%H:%M:%S") if lock.locked_at else "",
+            }
+    except Exception:
+        logger.exception("Failed to read region lock map")
+    return result
+
+
+def _locked_by_others(user, regions):
+    """Regions from *regions* currently locked by a different user."""
+    if not regions:
+        return []
+    _purge_expired_region_locks()
+    conflicts = []
+    try:
+        locks = (
+            RegionLock.objects.using("default")
+            .select_related("locked_by")
+            .filter(region__in=regions, expires_at__gt=timezone.now())
+        )
+        for lock in locks:
+            if lock.locked_by_id != user.id:
+                conflicts.append({
+                    "region": lock.region,
+                    "locked_by": _region_holder_name(lock),
+                })
+    except Exception:
+        logger.exception("Failed to evaluate region lock conflicts")
+    return conflicts
+
+
+@require_POST
+@login_required(login_url="login")
+@handle_exceptions
+def acquire_region_locks(request):
+    """Acquire (or renew) region locks for the current user."""
+    regions = _parse_regions(request.POST.get("regions") or request.POST.get("region"))
+    if not regions:
+        return JsonResponse({
+            "ok": False,
+            "message": "No regions supplied.",
+            "acquired": [],
+            "conflicts": [],
+            "locks": _region_lock_map(request.user),
+        }, status=400)
+
+    expires = timezone.now() + timedelta(seconds=REGION_LOCK_TTL_SECONDS)
+    session_key = request.session.session_key or ""
+    acquired, conflicts = [], []
+
+    for region in regions:
+        if _acquire_single_region_lock(request.user, region, session_key, expires):
+            acquired.append(region)
+        else:
+            conflicts.extend(_locked_by_others(request.user, [region]))
+
+    return JsonResponse({
+        "ok": not conflicts,
+        "acquired": acquired,
+        "conflicts": conflicts,
+        "locks": _region_lock_map(request.user),
+        "ttl": REGION_LOCK_TTL_SECONDS,
+    })
+
+
+def _acquire_single_region_lock(user, region, session_key, expires):
+    """
+    Try to acquire/renew one region lock. Returns True on success, False when the
+    region is held by another user. Safe under concurrent requests: the empty-row
+    race is caught via an IntegrityError savepoint and retried as a conflict.
+    """
+    with transaction.atomic(using="default"):
+        _purge_expired_region_locks()
+        lock = (
+            RegionLock.objects.using("default")
+            .select_for_update()
+            .filter(region=region)
+            .first()
+        )
+        if lock is None:
+            try:
+                with transaction.atomic(using="default"):
+                    RegionLock.objects.using("default").create(
+                        region=region,
+                        locked_by=user,
+                        session_key=session_key,
+                        expires_at=expires,
+                    )
+                return True
+            except IntegrityError:
+                # Another request inserted the same region first; fall through
+                # and read the row to decide conflict vs. renewal.
+                lock = (
+                    RegionLock.objects.using("default")
+                    .select_for_update()
+                    .filter(region=region)
+                    .first()
+                )
+
+        if lock is None:
+            return False
+
+        if lock.locked_by_id == user.id:
+            lock.expires_at = expires
+            lock.session_key = session_key
+            lock.save(using="default", update_fields=["expires_at", "session_key"])
+            return True
+        return False
+
+
+@require_POST
+@login_required(login_url="login")
+@handle_exceptions
+def release_region_locks(request):
+    """Release region locks owned by the current user (all or a subset)."""
+    regions = _parse_regions(request.POST.get("regions") or request.POST.get("region"))
+    qs = RegionLock.objects.using("default").filter(locked_by=request.user)
+    if regions:
+        qs = qs.filter(region__in=regions)
+    try:
+        released = qs.count()
+        qs.delete()
+    except Exception:
+        logger.exception("Failed to release region locks")
+        released = 0
+    return JsonResponse({
+        "ok": True,
+        "released": released,
+        "locks": _region_lock_map(request.user),
+    })
+
+
+@require_GET
+@login_required(login_url="login")
+@handle_exceptions
+def region_lock_status(request):
+    """Return the current region lock map (used by the frontend poll)."""
+    return JsonResponse({
+        "ok": True,
+        "locks": _region_lock_map(request.user),
+        "ttl": REGION_LOCK_TTL_SECONDS,
+    })
+
+
 @require_POST
 @login_required(login_url="login")
 @handle_exceptions
 def start_task(request, task_id):
-    """Start a task with validation and exception handling."""
+    """
+    Start a task for the *current user* in its own isolated runtime context.
+
+    Multiple users may run the same task at the same time; each gets a private
+    runtime (own status/logs/OTP events/output folder). Shared on-disk files are
+    protected separately by advisory file locks inside the task modules.
+    """
     global CURRENT_RUNNING_TASK
 
     try:
@@ -281,16 +567,15 @@ def start_task(request, task_id):
 
     # Parse date input
     selected_date = request.POST.get('date', '').strip()
-    
-    # Validate date for task_id 1
-    if task_id in [1, 2] and not selected_date:
+
+    if task_id in [1, 2, NIAM_TASK_ID] and not selected_date:
         raise ValidationException(
             "Please select a Date before starting this task.",
             title="Missing Date"
         )
 
     try:
-        parsed_date = datetime.strptime(selected_date, '%Y-%m-%d').date() if selected_date else None
+        datetime.strptime(selected_date, '%Y-%m-%d').date() if selected_date else None
     except ValueError:
         raise ValidationException(
             "Invalid date format. Use YYYY-MM-DD.",
@@ -298,95 +583,134 @@ def start_task(request, task_id):
         )
 
     # Parse region input
-    region_values = request.POST.get('region', '')
-    region_values = [r.strip().lower() for r in region_values.split(',') if r.strip()]
-    
-    logger.info(f"Starting task {task_id} with regions: {region_values}, date: {selected_date}")
+    region_values = _parse_regions(request.POST.get('region', ''))
+
+    # Enforce the region lock: a user may only run on regions nobody else holds.
+    conflicts = _locked_by_others(request.user, region_values)
+    if conflicts:
+        names = ", ".join(f"{c['region']} (locked by {c['locked_by']})" for c in conflicts)
+        raise ValidationException(
+            f"Some selected region(s) are locked by another user: {names}.",
+            title="Region Locked"
+        )
+
+    logger.info(
+        "Starting task %s for user %s with regions: %s, date: %s",
+        task_id, request.user.username, region_values, selected_date,
+    )
 
     # Get user information
     user_email = request.user.email if request.user.is_authenticated else None
     user_name = getattr(request.user, 'employee_name', request.user.username if request.user.is_authenticated else None)
+    user_id = request.user.id if request.user.is_authenticated else None
 
-    # Load task module
+    # Load task module (pre-check the base module so errors surface immediately).
     task_module_path = TASK_MODULE_MAP.get(task_id)
     if not task_module_path:
         raise TaskExecutionException(
             f"Module not found for '{task['name']}'.",
             title="Module Not Found"
         )
-
     try:
-        task_module = import_module(task_module_path)
+        base_module = import_module(task_module_path)
     except Exception as exc:
         logger.error(f"Import failed for module {task_module_path}: {str(exc)}", exc_info=True)
         raise TaskExecutionException(
             f"Import failed for '{task_module_path}': {str(exc)}",
             title="Module Import Failed"
         )
-
-    if not hasattr(task_module, "run_task"):
+    if not hasattr(base_module, "run_task"):
         raise TaskExecutionException(
             f"run_task() function missing in module '{task_module_path}'.",
             title="Missing Task Function"
         )
 
-    # Initialize runtime
-    runtime = TASK_RUNTIME[task_id]
+    # Isolated, per-(user, task) runtime context.
+    runtime = RUN_REGISTRY.begin(user_id, task_id)
     runtime["status"] = "Running"
     runtime["requires_auth"] = _requires_auth(task_id)
-    runtime["otp_required"] = False
-    runtime["otp"] = None
-    runtime["otp_event"] = threading.Event()
-    runtime["password_required"] = False
-    runtime["password"] = None
-    runtime["pwd_event"] = threading.Event()
+    runtime["run_dir"] = str(task_runtime.run_output_dir(runtime["run_key"]))
+    runtime["logs"] = [f"{task['name']}: task started ---- {_timestamp()}"]
+    runtime["username"] = request.user.username
 
     CURRENT_RUNNING_TASK = task["name"]
-    GLOBAL_LOGS.append(f"{task['name']}: task started ---- {_timestamp()}")
+    GLOBAL_LOGS.append(f"{task['name']}: task started by {request.user.username} ---- {_timestamp()}")
 
     def _runner():
-        """Run task in background thread."""
+        """Run the task in a background thread with isolated module globals."""
         global CURRENT_RUNNING_TASK
+        task_module = None
         try:
+            task_module = task_runtime.load_fresh_module(task_module_path)
+            if not hasattr(task_module, "run_task"):
+                raise TaskExecutionException(
+                    f"run_task() function missing in module '{task_module_path}'.",
+                    title="Missing Task Function"
+                )
+
             result = task_module.run_task(
                 request=request,
                 task=task,
                 runtime=runtime,
-                GLOBAL_LOGS=GLOBAL_LOGS,
+                GLOBAL_LOGS=runtime["logs"],
                 timestamp_fn=_timestamp,
                 selected_date=selected_date,
                 user_email=user_email,
                 user_name=user_name,
                 regions=region_values,
             )
+            if not isinstance(result, dict):
+                result = {"status": "Completed", "download_ready": False}
 
             runtime["status"] = result.get("status", "Completed")
-            runtime["download_ready"] = result.get("download_ready", False)
-            runtime["download_name"] = result.get("download_name", "")
+
+            # Separate this run's files from everyone else's by copying the
+            # produced artefact into the run's private folder.
+            source = result.get("download_name") or runtime.get("download_name")
+            if source:
+                isolated = task_runtime.isolate_output(runtime, source)
+                if isolated:
+                    runtime["download_name"] = isolated
+            runtime["download_ready"] = bool(
+                result.get("download_ready", False) and runtime.get("download_name")
+            )
+            runtime["download_url"] = f"/download/task/{task_id}/" if runtime["download_ready"] else ""
+
             if result.get("counts"):
                 runtime.update(result["counts"])
-            CURRENT_RUNNING_TASK = result.get("message", f"{task['name']} completed successfully.")
-            GLOBAL_LOGS.append(f"{task['name']}: {CURRENT_RUNNING_TASK} ---- {_timestamp()}")
-            logger.info(f"Task {task_id} completed: {CURRENT_RUNNING_TASK}")
-            
+
+            message = result.get("message", f"{task['name']} completed successfully.")
+            runtime["logs"].append(f"{task['name']}: {message} ---- {_timestamp()}")
+            logger.info(f"Task {task_id} completed for user {user_id}: {message}")
+
         except Exception as exc:
             runtime["status"] = "Failed"
             msg = f"{task['name']} failed: {str(exc)}"
-            GLOBAL_LOGS.append(f"{msg} ---- {_timestamp()}")
-            GLOBAL_LOGS.append(traceback.format_exc())
-            CURRENT_RUNNING_TASK = msg
-            logger.error(f"Task {task_id} failed: {str(exc)}", exc_info=True)
-            
+            runtime["logs"].append(f"{msg} ---- {_timestamp()}")
+            runtime["logs"].append(traceback.format_exc())
+            logger.error(f"Task {task_id} failed for user {user_id}: {str(exc)}", exc_info=True)
+
         finally:
             # Safety: clear authentication flags
             runtime["otp_required"] = False
             runtime["password_required"] = False
+            # Drop the private module copy from sys.modules so repeated runs do
+            # not accumulate unbounded module objects. The shared base module is
+            # never removed (its name does not start with the per-run prefix).
+            mod_name = getattr(task_module, "__name__", "")
+            if mod_name.startswith("_cr_run_"):
+                sys.modules.pop(mod_name, None)
 
-    threading.Thread(target=_runner, daemon=True).start()
+    threading.Thread(
+        target=_runner,
+        name=f"task-{task_id}-user-{user_id}-{runtime['run_key'][:8]}",
+        daemon=True,
+    ).start()
 
     return JsonResponse({
         "ok": True,
         "task_id": task_id,
+        "run_key": runtime["run_key"],
         "message": f"{task['name']} started successfully.",
         "status": runtime["status"],
         "requires_auth": runtime["requires_auth"],
@@ -422,7 +746,12 @@ def submit_otp(request, task_id):
             title="Missing OTP"
         )
 
-    runtime = TASK_RUNTIME[task_id]
+    runtime = RUN_REGISTRY.peek(request.user.id, task_id)
+    if runtime is None:
+        raise NotFoundException(
+            "No active run found for this task. Please start the task again.",
+            title="No Active Run"
+        )
     runtime["otp"] = otp
     runtime["otp_required"] = False
     
@@ -430,9 +759,9 @@ def submit_otp(request, task_id):
     if otp_event:
         otp_event.set()
     
-    GLOBAL_LOGS.append(f"{task['name']}: OTP received from user ---- {_timestamp()}")
+    runtime.setdefault("logs", []).append(f"{task['name']}: OTP received from user ---- {_timestamp()}")
     logger.info(f"OTP received for task {task_id}")
-    
+
     return JsonResponse({
         "ok": True,
         "message": "OTP submitted successfully."
@@ -466,7 +795,12 @@ def submit_password(request, task_id):
             title="Missing Password"
         )
 
-    runtime = TASK_RUNTIME[task_id]
+    runtime = RUN_REGISTRY.peek(request.user.id, task_id)
+    if runtime is None:
+        raise NotFoundException(
+            "No active run found for this task. Please start the task again.",
+            title="No Active Run"
+        )
     runtime["password"] = password
     runtime["password_required"] = False
 
@@ -474,7 +808,7 @@ def submit_password(request, task_id):
     if pwd_event:
         pwd_event.set()
 
-    GLOBAL_LOGS.append(f"{task['name']}: Password received from user ---- {_timestamp()}")
+    runtime.setdefault("logs", []).append(f"{task['name']}: Password received from user ---- {_timestamp()}")
     logger.info(f"Password received for task {task_id}")
 
     return JsonResponse({
@@ -486,9 +820,9 @@ def submit_password(request, task_id):
 @require_GET
 @login_required(login_url="login")
 def task_dashboard_data(request):
-    """Get dashboard data for all tasks."""
+    """Get dashboard data for all tasks, scoped to the requesting user."""
     tasks = []
-    for task in _build_tasks_for_ui():
+    for task in _build_tasks_for_ui(request.user.id, include_niam=True):
         task_id = task["id"]
         requires_auth = _requires_auth(task_id)
         tasks.append({
@@ -506,10 +840,10 @@ def task_dashboard_data(request):
             "otp_required": bool(task.get("otp_required", False)) if requires_auth else False,
             "password_required": bool(task.get("password_required", False)) if requires_auth else False,
         })
-    
+
     return JsonResponse({
-        "running_task": CURRENT_RUNNING_TASK,
-        "logs": [_split_log(x) for x in GLOBAL_LOGS[-20:]],
+        "running_task": _current_running_task_for(request.user.id),
+        "logs": [_split_log(x) for x in _user_logs(request.user.id)],
         "tasks": tasks,
         "user_name": request.user.get_full_name() or request.user.username,
         "user_role": getattr(request.user, "role", ""),
@@ -521,7 +855,7 @@ def task_dashboard_data(request):
 @login_required(login_url='login')
 @handle_exceptions
 def download_task_output(request, task_id):
-    """Download task output file."""
+    """Download the output file produced by *this* user's run of the task."""
     try:
         task_id = int(task_id)
     except (ValueError, TypeError):
@@ -531,8 +865,8 @@ def download_task_output(request, task_id):
     if not task:
         raise NotFoundException(f"Task with ID {task_id} not found.")
 
-    runtime = TASK_RUNTIME[task_id]
-    file_path = runtime.get("download_name")
+    runtime = RUN_REGISTRY.peek(request.user.id, task_id)
+    file_path = runtime.get("download_name") if runtime else None
 
     if not file_path or not runtime.get("download_ready"):
         raise NotFoundException(
@@ -547,8 +881,8 @@ def download_task_output(request, task_id):
             title="File Not Found"
         )
 
-    logger.info(f"Downloading task {task_id} output: {path_obj.name}")
-    
+    logger.info(f"Downloading task {task_id} output for user {request.user.username}: {path_obj.name}")
+
     return FileResponse(
         open(path_obj, "rb"),
         as_attachment=True,
@@ -663,7 +997,7 @@ def playwright_auth_iframe(request):
                     logger.warning(f"Task {task_id} does not require auth")
                     return render(request, 'dashboard/iframe_form.html', {'form': form})
 
-                runtime = TASK_RUNTIME.get(task_id)
+                runtime = RUN_REGISTRY.peek(request.user.id, task_id) if request.user.is_authenticated else None
 
                 if runtime is None:
                     logger.error(f"No runtime found for task {task_id}")
@@ -677,7 +1011,7 @@ def playwright_auth_iframe(request):
                     otp_event.set()
                     logger.info(f"OTP event set for task {task_id}")
 
-                GLOBAL_LOGS.append(f"Task ID {task_id}: OTP received via Iframe ---- {_timestamp()}")
+                runtime.setdefault("logs", []).append(f"Task ID {task_id}: OTP received via Iframe ---- {_timestamp()}")
 
                 return render(request, 'dashboard/iframe_success.html')
 
@@ -712,7 +1046,7 @@ def playwright_password_iframe(request):
                     logger.warning(f"Task {task_id} does not require auth")
                     return render(request, 'dashboard/password_form.html', {'form': form})
 
-                runtime = TASK_RUNTIME.get(task_id)
+                runtime = RUN_REGISTRY.peek(request.user.id, task_id) if request.user.is_authenticated else None
 
                 if runtime is None:
                     logger.error(f"No runtime found for task {task_id}")
@@ -726,7 +1060,7 @@ def playwright_password_iframe(request):
                     pwd_event.set()
                     logger.info(f"Password event set for task {task_id}")
 
-                GLOBAL_LOGS.append(f"Task ID {task_id}: Password received via Iframe ---- {_timestamp()}")
+                runtime.setdefault("logs", []).append(f"Task ID {task_id}: Password received via Iframe ---- {_timestamp()}")
 
                 return render(request, 'dashboard/iframe_success.html')
 
@@ -2908,6 +3242,52 @@ def _parse_niam_date_range(date_str):
     return from_dt, to_dt
 
 
+# NIAM Template Database period shortcuts: "past 1 week / 1 month / 1 year".
+# The day counts are inclusive of today (e.g. 6 -> a 7-day window).
+NIAM_RANGE_DAYS = {"1w": 6, "1m": 29, "1y": 364}
+NIAM_RANGE_LABELS = {
+    "1w": "Past 1 Week",
+    "1m": "Past 1 Month",
+    "1y": "Past 1 Year",
+}
+
+
+def _niam_period_bounds(date_str=None, range_key=None):
+    """
+    Resolve a fetch period from either an explicit date or a range shortcut.
+
+    Returns (from_dt, to_dt, label, range_key). Exactly one of date_str / range_key
+    must resolve; range_key takes precedence when both are supplied.
+    """
+    key = (range_key or "").strip().lower()
+    if key in NIAM_RANGE_DAYS:
+        today = timezone.localdate()
+        start = today - timedelta(days=NIAM_RANGE_DAYS[key])
+        from_dt = datetime.combine(start, datetime.min.time())
+        to_dt = datetime.combine(today, datetime.max.time())
+        return from_dt, to_dt, NIAM_RANGE_LABELS[key], key
+
+    from_dt, to_dt = _parse_niam_date_range(date_str)
+    return from_dt, to_dt, from_dt.strftime("%d-%m-%Y"), ""
+
+
+def _niam_period_query(from_dt, to_dt, limit):
+    """Build the NIAM rows queryset for a datetime window."""
+    from .models import NIAMTicketGenerationTable
+
+    return (
+        NIAMTicketGenerationTable.objects.filter(execution_date__isnull=False)
+        .filter(
+            Q(niam_access_start_date_time__isnull=False,
+              niam_access_start_date_time__range=(from_dt, to_dt)) |
+            Q(sr_cr_start_date_time__isnull=False,
+              sr_cr_start_date_time__range=(from_dt, to_dt)) |
+            Q(execution_date__range=(from_dt.date(), to_dt.date()))
+        )
+        .order_by("-id")[:limit]
+    )
+
+
 # Fields hidden from the NIAM Template Database UI/export.
 NIAM_TEMPLATE_EXCLUDED_FIELDS = ("id",)
 
@@ -2943,27 +3323,25 @@ def niam_template_db_view(request):
 @require_GET
 @login_required(login_url="login")
 def fetch_niam_template_data(request):
-    from .models import NIAMTicketGenerationTable
     from django.forms.models import model_to_dict
 
     try:
         date_str = request.GET.get("date")
-        if not date_str:
-            return JsonResponse({"ok": False, "message": "date is required"}, status=400)
+        range_key = request.GET.get("range")
+
+        if not date_str and not range_key:
+            return JsonResponse(
+                {"ok": False, "message": "date or range is required"}, status=400
+            )
 
         try:
-            from_dt, to_dt = _parse_niam_date_range(date_str)
+            from_dt, to_dt, label, used_range = _niam_period_bounds(date_str, range_key)
         except ValueError:
-            return JsonResponse({"ok": False, "message": "Invalid date. Use YYYY-MM-DD."}, status=400)
+            return JsonResponse(
+                {"ok": False, "message": "Invalid date. Use YYYY-MM-DD."}, status=400
+            )
 
-        selected_day = from_dt.date()
-        qs = NIAMTicketGenerationTable.objects.filter(
-            execution_date__isnull=False
-        ).filter(
-            models.Q(niam_access_start_date_time__isnull=False, niam_access_start_date_time__range=(from_dt, to_dt)) |
-            models.Q(sr_cr_start_date_time__isnull=False, sr_cr_start_date_time__range=(from_dt, to_dt)) |
-            models.Q(execution_date=selected_day)
-        ).order_by("-id")[:1000]
+        qs = _niam_period_query(from_dt, to_dt, limit=1000)
 
         columns_meta = _niam_template_columns()
         columns = [c["name"] for c in columns_meta]
@@ -2978,7 +3356,11 @@ def fetch_niam_template_data(request):
             "columns": columns,
             "column_labels": {c["name"]: c["label"] for c in columns_meta},
             "rows": rows,
-            "count": len(rows)
+            "count": len(rows),
+            "range": used_range,
+            "period_label": label,
+            "from_date": from_dt.date().isoformat(),
+            "to_date": to_dt.date().isoformat(),
         })
     except Exception as e:
         logger.error("Error fetching NIAM template data: %s", e, exc_info=True)
@@ -2988,30 +3370,32 @@ def fetch_niam_template_data(request):
 @require_GET
 @login_required(login_url="login")
 def download_niam_template(request):
-    from .models import NIAMTicketGenerationTable
     from django.forms.models import model_to_dict
     import io
 
     try:
         date_str = request.GET.get("date")
-        if not date_str:
-            return JsonResponse({"ok": False, "message": "date is required"}, status=400)
+        range_key = request.GET.get("range")
+
+        if not date_str and not range_key:
+            return JsonResponse(
+                {"ok": False, "message": "date or range is required"}, status=400
+            )
 
         try:
-            from_dt, to_dt = _parse_niam_date_range(date_str)
+            from_dt, to_dt, label, used_range = _niam_period_bounds(date_str, range_key)
         except ValueError:
-            return JsonResponse({"ok": False, "message": "Invalid date. Use YYYY-MM-DD."}, status=400)
+            return JsonResponse(
+                {"ok": False, "message": "Invalid date. Use YYYY-MM-DD."}, status=400
+            )
 
-        selected_day = from_dt.date()
-        qs = NIAMTicketGenerationTable.objects.filter(
-            Q(niam_access_start_date_time__range=(from_dt, to_dt)) |
-            Q(sr_cr_start_date_time__range=(from_dt, to_dt)) |
-            Q(execution_date=selected_day)
-        ).order_by("-id")[:5000]
-
+        qs = _niam_period_query(from_dt, to_dt, limit=5000)
         rows = [model_to_dict(o) for o in qs]
         if not rows:
-            return JsonResponse({"ok": False, "message": "No data found for selected date"}, status=404)
+            return JsonResponse(
+                {"ok": False, "message": "No data found for the selected period"},
+                status=404,
+            )
 
         columns_meta = _niam_template_columns()
         columns = [c["name"] for c in columns_meta]
@@ -3020,10 +3404,45 @@ def download_niam_template(request):
         df.to_excel(output, index=False, sheet_name="NIAM_Template")
         output.seek(0)
 
-        filename = f"NIAM_Template_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-        response = FileResponse(output, content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        response["Content-Disposition"] = f'attachment; filename="{filename}"'
+        if used_range:
+            stamp = f"{from_dt.date().isoformat()}_{to_dt.date().isoformat()}"
+            sheet_name = f"NIAM_Template_{label.replace(' ', '')}_{stamp}.xlsx"
+        else:
+            sheet_name = f"NIAM_Template_{from_dt.date().isoformat()}.xlsx"
+
+        response = FileResponse(
+            output,
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        response["Content-Disposition"] = f'attachment; filename="{sheet_name}"'
         return response
     except Exception as e:
         logger.error("Error downloading NIAM template: %s", e, exc_info=True)
         return JsonResponse({"ok": False, "message": str(e)}, status=500)
+
+
+@require_POST
+@login_required(login_url="login")
+@handle_exceptions
+def start_niam_ticket_generation(request):
+    """
+    Trigger the NIAM Ticket Generation task (task 7) from the NIAM Template
+    Database page for the selected date. Reuses the generic start_task flow so
+    every user gets an isolated run and their own downloadable workbook.
+    """
+    date_str = (request.POST.get("date") or "").strip()
+    if not date_str:
+        raise ValidationException(
+            "Please select a Date before generating the NIAM ticket.",
+            title="Missing Date",
+        )
+    try:
+        datetime.strptime(date_str, "%Y-%m-%d")
+    except ValueError:
+        raise ValidationException(
+            "Invalid date format. Use YYYY-MM-DD.",
+            title="Invalid Date Format",
+        )
+
+    # Delegate to the shared, per-user task starter.
+    return start_task(request, NIAM_TASK_ID)

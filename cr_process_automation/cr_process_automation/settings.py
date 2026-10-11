@@ -7,6 +7,14 @@ from dotenv import load_dotenv
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / 'dashboard' / '.env')
 
+# WhiteNoise lets Django itself serve static files in production, so the app is
+# self-contained on Windows and Linux (a reverse proxy is then optional).
+try:
+    import whitenoise  # noqa: F401
+    _HAS_WHITENOISE = True
+except ImportError:  # pragma: no cover - static serving falls back to Django
+    _HAS_WHITENOISE = False
+
 
 def env_bool(name, default='False'):
     val = os.getenv(name, default).strip().lower()
@@ -22,7 +30,28 @@ def env_list(name, default=''):
 
 SECRET_KEY = os.getenv('DJANGO_SECRET_KEY', 'django-insecure-change-me')
 DEBUG = env_bool('DJANGO_DEBUG', 'True')
-ALLOWED_HOSTS = env_list('DJANGO_ALLOWED_HOSTS', '') or ['localhost', '127.0.0.1', '0.0.0.0']
+
+# Hosts allowed to reach the app. Defaults to '*' so a client can connect using
+# the server's IP/hostname out of the box; set DJANGO_ALLOWED_HOSTS (comma or
+# space separated, e.g. "10.0.0.5,cr-app.internal,localhost") to restrict it.
+ALLOWED_HOSTS = env_list('DJANGO_ALLOWED_HOSTS', '') or ['*']
+
+# Origins allowed to submit POSTs (Django's CSRF check compares Origin/Referer
+# against these). Needed when the app is reached through nginx/TLS or by a host
+# name other than the Host header, e.g.
+#   DJANGO_CSRF_TRUSTED_ORIGINS=https://cr-app.internal,http://10.0.0.5
+CSRF_TRUSTED_ORIGINS = env_list('DJANGO_CSRF_TRUSTED_ORIGINS', '')
+
+# Running behind a reverse proxy (nginx)? Trust its forwarding headers so Django
+# builds correct absolute URLs and knows when the client used HTTPS.
+if env_bool('DJANGO_BEHIND_PROXY', 'False'):
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+    USE_X_FORWARDED_HOST = True
+
+# Optional hardened cookie flags for HTTPS deployments.
+if env_bool('DJANGO_SECURE_COOKIES', 'False'):
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
 
 INSTALLED_APPS = [
     'django.contrib.admin',
@@ -36,6 +65,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    *(['whitenoise.middleware.WhiteNoiseMiddleware'] if _HAS_WHITENOISE else []),
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -164,12 +194,35 @@ USE_TZ = True
 TIME_ZONE = 'Asia/Kolkata'
 
 
-STATIC_URL = 'static/'
+STATIC_URL = '/static/'
 STATICFILES_DIRS = []
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 
-MEDIA_URL = 'media/'
+MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
+
+# Static files are served by WhiteNoise (when installed) so the deployment does
+# not require nginx/Apache just to deliver CSS/JS. With a reverse proxy in front
+# you can additionally point /static/ at STATIC_ROOT for extra performance.
+STORAGES = {
+    'default': {
+        'BACKEND': 'django.core.files.storage.FileSystemStorage',
+    },
+    'staticfiles': {
+        'BACKEND': (
+            'whitenoise.storage.CompressedManifestStaticFilesStorage'
+            if _HAS_WHITENOISE
+            else 'django.contrib.staticfiles.storage.StaticFilesStorage'
+        ),
+    },
+}
+
+if _HAS_WHITENOISE:
+    # During development serve straight from the app dirs (no collectstatic);
+    # in production serve the collected, hashed files from STATIC_ROOT.
+    WHITENOISE_USE_FINDERS = DEBUG
+    WHITENOISE_AUTOREFRESH = DEBUG
+    WHITENOISE_MAX_AGE = 0 if DEBUG else 31536000
 
 # LOGIN_URL = '/admin/login/'
 # LOGIN_REDIRECT_URL = '/'

@@ -169,7 +169,7 @@ def attachment_queue_writer(
 
 
         with transaction.atomic(using='default'):
-            cr_row = CRWiseStatus.objects.using('default').get(cr_no=cr, is_active=True)
+            cr_row = CRWiseStatus.objects.using('default').select_for_update().get(cr_no=cr, is_active=True)
             value = str(items_dict[cr]).strip().lower()
             if mop_attachment_task:
                 if value in wrong_value_list:
@@ -204,7 +204,7 @@ def attachment_queue_writer(
 def blank_error_protocol_db_updater(list_of_crs: List[AnyStr]):
     with transaction.atomic(using='default'):
         for cr in list_of_crs:
-            cr_row = CRWiseStatus.objects.using('default').get(cr_no=cr, is_active=True)
+            cr_row = CRWiseStatus.objects.using('default').select_for_update().get(cr_no=cr, is_active=True)
             cr_row.status = _make_serializable("Failed")
             cr_row.save()
         # transaction.on_commit(lambda: sync_replica_task(), using='default')

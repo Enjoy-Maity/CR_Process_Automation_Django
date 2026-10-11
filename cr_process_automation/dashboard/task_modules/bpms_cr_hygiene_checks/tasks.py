@@ -38,6 +38,7 @@ from dashboard.task_modules.cr_hygiene_checks.tasks import (
     cr_details_update_func,
     cr_wise_status_modifier_update_func,
 )
+from dashboard.utils.file_locks import file_lock
 
 
 glogs = Queue()
@@ -959,6 +960,16 @@ def node_counts_remarks_maker(cr: str):
 
 
 def validation_summary_writer_and_planning_sheet_updater(filtered_df: pd.DataFrame, logs: list, date_: datetime) -> list:
+    """Serialise writes to the shared planning-sheet workbook across users."""
+    workbook_file_path = os.path.join(
+        os.getenv("PLANNING_SHEET_DOWNLOAD_FOLDER").format(date_.strftime('%d-%b-%y')),
+        os.getenv("PLANNING_SHEET_WORKBOOK_NAME"),
+    )
+    with file_lock(workbook_file_path):
+        return _validation_summary_writer_and_planning_sheet_updater_locked(filtered_df, logs, date_)
+
+
+def _validation_summary_writer_and_planning_sheet_updater_locked(filtered_df: pd.DataFrame, logs: list, date_: datetime) -> list:
     global manual_crs
     global auto_crs
     global cr_itsm_details_dictionary

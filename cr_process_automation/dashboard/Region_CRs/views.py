@@ -712,9 +712,10 @@ def save_region_cr_details(request):
                 if not sanitised_fields:
                     continue  # nothing to change for this row
 
-                # --- Load the current active row ---
+                # --- Load the current active row (locked so concurrent edits serialise) ---
                 active_obj = (
                     MasterCRDatabase.objects.using(DB_MASTER)
+                    .select_for_update()
                     .filter(pk=row_id, is_active=True)
                     .first()
                 )

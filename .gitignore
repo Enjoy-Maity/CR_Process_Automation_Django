@@ -20,12 +20,8 @@ Session_store_files/
 *.log
 logs/
 /cr_process_automation/pw-browsers/
-migrations/
-uv.lock
-pyproject.toml
 *.sqlite3-shm
 *.sqlite3-wal
-docker-compose.yml
 db_master_data/
 db_replica_data/
 volumes/

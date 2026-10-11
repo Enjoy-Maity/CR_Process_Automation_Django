@@ -1,21 +1,30 @@
 {% extends 'dashboard/base_module.html' %}
 {% block module_content %}
+{% csrf_token %}
 <div class="content-card compact-content-card">
     <div class="page-head compact-page-head">
         <h2 class="module-page-title compact-module-title">NIAM Template Database</h2>
     </div>
     <div class="region-filter-panel" style="margin-bottom:16px;padding:14px;border:1px solid #d5dde8;border-radius:10px;background:#f7f9fc;">
         <div style="margin-bottom:12px;">
-            <span class="cr-history-filter-label">Note:- Select Date before fetching data.</span>
+            <span class="cr-history-filter-label">Note:- Select Date (or a period shortcut) before fetching data.</span>
         </div>
         <div style="display:flex;gap:20px;align-items:center;flex-wrap:wrap;">
             <div>
                 <label for="niam_date" style="font-weight:700;margin-right:8px;">Date:</label>
                 <input type="date" id="niam_date" name="niam_date">
             </div>
-            <button type="button" id="fetch_niam_template_btn" class="action-btn compact-btn apply-filter-btn">Fetch Data</button>
+            <button type="button" id="fetch_niam_template_btn" class="action-btn compact-btn fetch-cr-black-btn">Fetch CR</button>
             <button type="button" id="download_niam_template_btn" class="action-btn compact-btn download-btn">Download Template</button>
         </div>
+        <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:12px;">
+            <button type="button" id="past_niam_week_btn" class="action-btn compact-btn region-tab-btn">Past 1 Week CRs</button>
+            <button type="button" id="past_niam_month_btn" class="action-btn compact-btn region-tab-btn">Past 1 Month CRs</button>
+            <button type="button" id="past_niam_year_btn" class="action-btn compact-btn region-tab-btn">Past 1 Year CRs</button>
+            <button type="button" id="niam_generate_ticket_btn" class="action-btn compact-btn start-btn">NIAM Ticket Generator</button>
+            <a id="niam_ticket_download_link" class="action-btn compact-btn download-btn" href="#" style="display:none;">Download NIAM Ticket</a>
+        </div>
+        <div id="niam_generate_status" class="cr-history-filter-label" style="margin-top:10px;"></div>
     </div>
     <div class="data-panel">
         <div class="table-wrap compact-table-wrap data-panel-scroll">
@@ -32,7 +41,11 @@
 <script>
 const FETCH_NIAM_URL = "{% url 'fetch_niam_template_data' %}";
 const DOWNLOAD_NIAM_URL = "{% url 'download_niam_template' %}";
+const GENERATE_NIAM_URL = "{% url 'start_niam_ticket_generation' %}";
 const NIAM_COLUMNS = {{ niam_columns|safe }};
+
+// Tracks the period currently shown (used by "Download Template").
+let currentPeriod = { date: null, range: null };
 
 function renderNiamSkeleton(columns) {
     const head = document.getElementById('niam_template_table_head');
@@ -73,7 +86,7 @@ function renderNiamTable(data) {
     });
 
     if (!data.rows || data.rows.length === 0) {
-        body.innerHTML = '<tr><td colspan="' + columns.length + '" class="text-center">No records found for selected date.</td></tr>';
+        body.innerHTML = '<tr><td colspan="' + columns.length + '" class="text-center">No records found for selected period.</td></tr>';
         return;
     }
 
@@ -95,14 +108,23 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
-document.getElementById('fetch_niam_template_btn').addEventListener('click', function() {
+function setNiamStatus(message) {
+    const el = document.getElementById('niam_generate_status');
+    if (el) el.textContent = message || '';
+}
+
+function selectedNiamDate() {
     const date = document.getElementById('niam_date').value;
     if (!date) {
         alert('Please select a Date.');
-        return;
+        return null;
     }
-    const params = new URLSearchParams({ date: date });
-    fetch(FETCH_NIAM_URL + '?' + params.toString())
+    return date;
+}
+
+function loadNiam(params) {
+    const search = new URLSearchParams(params);
+    fetch(FETCH_NIAM_URL + '?' + search.toString())
         .then(res => res.json())
         .then(data => {
             if (!data.ok) {
@@ -110,18 +132,120 @@ document.getElementById('fetch_niam_template_btn').addEventListener('click', fun
                 return;
             }
             renderNiamTable(data);
+            const label = data.period_label ? data.period_label + ' - ' : '';
+            setNiamStatus(label + (data.count || 0) + ' row(s) loaded.');
         })
         .catch(() => alert('Error fetching data'));
+}
+
+document.getElementById('fetch_niam_template_btn').addEventListener('click', function () {
+    const date = selectedNiamDate();
+    if (!date) return;
+    currentPeriod = { date: date, range: null };
+    loadNiam({ date: date });
 });
 
-document.getElementById('download_niam_template_btn').addEventListener('click', function() {
-    const date = document.getElementById('niam_date').value;
-    if (!date) {
-        alert('Please select a Date.');
-        return;
+[['1w', 'past_niam_week_btn'], ['1m', 'past_niam_month_btn'], ['1y', 'past_niam_year_btn']].forEach(function (pair) {
+    const range = pair[0];
+    const btn = document.getElementById(pair[1]);
+    if (!btn) return;
+    btn.addEventListener('click', function () {
+        currentPeriod = { date: null, range: range };
+        loadNiam({ range: range });
+    });
+});
+
+document.getElementById('download_niam_template_btn').addEventListener('click', function () {
+    const params = {};
+    if (currentPeriod.range) {
+        params.range = currentPeriod.range;
+    } else {
+        const date = selectedNiamDate();
+        if (!date) return;
+        params.date = date;
     }
-    const url = DOWNLOAD_NIAM_URL + '?date=' + encodeURIComponent(date);
-    window.location.href = url;
+    window.location.href = DOWNLOAD_NIAM_URL + '?' + new URLSearchParams(params).toString();
+});
+
+// ── NIAM Ticket Generator (task 7) ─────────────────────────────────────────
+let niamTicketPollTimer = null;
+
+function stopNiamTicketPoll() {
+    if (niamTicketPollTimer) {
+        clearInterval(niamTicketPollTimer);
+        niamTicketPollTimer = null;
+    }
+}
+
+function setGenerateEnabled(enabled) {
+    const btn = document.getElementById('niam_generate_ticket_btn');
+    if (!btn) return;
+    btn.disabled = !enabled;
+    btn.textContent = enabled ? 'NIAM Ticket Generator' : 'Generating...';
+}
+
+function pollNiamTicket() {
+    fetch('/api/task/dashboard-data/')
+        .then(res => res.json())
+        .then(data => {
+            const task = (data.tasks || []).find(item => Number(item.id) === 7);
+            if (!task) return;
+
+            if (task.status === 'Failed') {
+                setNiamStatus('NIAM ticket generation failed. Check the task log.');
+                stopNiamTicketPoll();
+                setGenerateEnabled(true);
+                return;
+            }
+            if (task.download_ready && task.download_url) {
+                setNiamStatus('NIAM ticket is ready to download.');
+                const link = document.getElementById('niam_ticket_download_link');
+                if (link) {
+                    link.href = task.download_url;
+                    link.style.display = 'inline-block';
+                }
+                stopNiamTicketPoll();
+                setGenerateEnabled(true);
+                return;
+            }
+            setNiamStatus('Generating NIAM ticket... (' + (task.status || 'Running') + ')');
+        })
+        .catch(function () { /* ignore transient poll errors */ });
+}
+
+document.getElementById('niam_generate_ticket_btn').addEventListener('click', function () {
+    const date = selectedNiamDate();
+    if (!date) return;
+
+    const link = document.getElementById('niam_ticket_download_link');
+    if (link) link.style.display = 'none';
+    setGenerateEnabled(false);
+    setNiamStatus('Starting NIAM ticket generation...');
+
+    const body = new FormData();
+    body.append('date', date);
+
+    fetch(GENERATE_NIAM_URL, {
+        method: 'POST',
+        headers: { 'X-CSRFToken': (typeof getCookie === 'function' ? getCookie('csrftoken') : '') },
+        body: body,
+    })
+        .then(res => res.json())
+        .then(data => {
+            if (!data.ok) {
+                setNiamStatus(data.message || 'Failed to start NIAM ticket generation.');
+                setGenerateEnabled(true);
+                return;
+            }
+            setNiamStatus('NIAM ticket generation started...');
+            stopNiamTicketPoll();
+            niamTicketPollTimer = setInterval(pollNiamTicket, 3000);
+            pollNiamTicket();
+        })
+        .catch(function () {
+            setNiamStatus('Error starting NIAM ticket generation.');
+            setGenerateEnabled(true);
+        });
 });
 
 // Render DB column skeleton on page load (before any fetch).

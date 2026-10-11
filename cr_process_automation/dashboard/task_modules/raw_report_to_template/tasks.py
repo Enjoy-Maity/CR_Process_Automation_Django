@@ -23,6 +23,7 @@ import dateutil.parser as dp
 from django.db import transaction
 # from django.core.cache import cache
 from dashboard.models import MasterCRDatabase, CRWiseStatus, SelectedDateTable
+from dashboard.utils.file_locks import file_lock
 
 def check_admin_status():
     try:
@@ -358,8 +359,10 @@ def sync_cr_databases(planning_workbook_df: DataFrame, logs: List[AnyStr], runti
                     cr_number = str(row.cr_no)
 
                     # Explicitly use .using('default') for queries during write/sync phases
-                    active_master = MasterCRDatabase.objects.using('default').filter(cr_no=cr_number, is_active=True).first()
-                    active_status = CRWiseStatus.objects.using('default').filter(cr_no=cr_number, is_active=True).first()
+                    # Lock the active rows so two concurrent runs serialize on
+                    # this CR and cannot both deactivate + insert a new version.
+                    active_master = MasterCRDatabase.objects.using('default').select_for_update().filter(cr_no=cr_number, is_active=True).first()
+                    active_status = CRWiseStatus.objects.using('default').select_for_update().filter(cr_no=cr_number, is_active=True).first()
 
                     if active_master:
                         # 1. Deactivate old records on master database
@@ -587,11 +590,14 @@ def run_task(
     planning_workbook = os.path.join(planning_workbook_folder, str(os.getenv("PLANNING_SHEET_WORKBOOK_NAME")))
 
     if report_df_filtered.shape[0]>0:
-        GLOBAL_LOGS = raw_report_to_planning_sheet_converter(
-            report_df_filtered, planning_workbook, GLOBAL_LOGS, runtime, selected_date = selected_date, user_name = user_name
-            )
+        # The planning-sheet workbook is a shared file: serialise the write and
+        # the immediately following read so another user's run cannot interleave.
+        with file_lock(planning_workbook):
+            GLOBAL_LOGS = raw_report_to_planning_sheet_converter(
+                report_df_filtered, planning_workbook, GLOBAL_LOGS, runtime, selected_date = selected_date, user_name = user_name
+                )
 
-        planning_workbook_df = pd.read_excel(planning_workbook)
+            planning_workbook_df = pd.read_excel(planning_workbook)
         GLOBAL_LOGS = sync_cr_databases(planning_workbook_df, GLOBAL_LOGS, runtime)
 
     else:

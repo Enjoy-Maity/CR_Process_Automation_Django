@@ -34,7 +34,7 @@ def cr_wise_status_modifier_update_func(
     status: str = "Success"
 ):
     with transaction.atomic(using='default'):
-        cr_wise_status = CRWiseStatus.objects.using('default').get(cr_no=cr, is_active=True)
+        cr_wise_status = CRWiseStatus.objects.using('default').select_for_update().get(cr_no=cr, is_active=True)
         cr_wise_status.Install_Test_Plan_Downloads = status
         cr_wise_status.save()
         # transaction.on_commit(lambda: sync_replica_task(), using='default')

@@ -15,27 +15,36 @@ from queue import Queue
 import dateutil.parser as dp
 from dashboard.views import _timestamp
 from dashboard.models import SelectedDateTable, MasterCRDatabase
-from dashboard.utils import settings
+from django.conf import settings
 from django.http import JsonResponse
 from django.db import transaction
+from dashboard.utils.file_locks import file_lock
 from dashboard.task_modules.dependencies.extra_dependencies import (
     selected_date_df_maker, 
     cr_wise_status_df_maker,
-    _norm_series
+    _norm_series,
+    user_email_df_maker,
+    niam_data_updater
 )
 
 
-def niam_workbook_template_maker(df: pd.DataFrame, mail_id_worksheet_df: pd.DataFrame, date_: datetime):
-    global workbook_path
-    
-    niam_workbook_path = Path(
-        workbook_path
-    ).parent.joinpath(
+# Base location under which generated NIAM workbooks are written
+# (HOST_DOWNLOAD_DIR/NIAM_Excel_files/<date>/RITM Input_...xlsx).
+workbook_path = os.path.join(settings.HOST_DOWNLOAD_DIR, "NIAM_Excel_files", "base.xlsx")
+
+
+def niam_workbook_path_for(date_: datetime) -> Path:
+    """Canonical output path of the RITM workbook for a given date."""
+    return Path(workbook_path).parent.joinpath(
         "NIAM_Excel_files",
         date_.strftime("%d_%b_%Y"),
-        f"RITM Input_PS_Core_{date_.strftime('%d_%b_%Y')}.xlsx"
+        f"RITM Input_PS_Core_{date_.strftime('%d_%b_%Y')}.xlsx",
     )
-    
+
+
+def niam_workbook_template_maker(df: pd.DataFrame, mail_id_worksheet_df: pd.DataFrame, date_: datetime):
+    niam_workbook_path = niam_workbook_path_for(date_)
+
     niam_workbook_path.parent.mkdir(parents=True, exist_ok=True)
     
     niam_workbook_path.unlink(missing_ok=True)
@@ -131,10 +140,16 @@ def niam_workbook_template_maker(df: pd.DataFrame, mail_id_worksheet_df: pd.Data
     }
     excel_modifier_obj.special_styler(column_index_color_dict)
     del excel_modifier_obj
+
+    return str(niam_workbook_path)
  
 
 
-def niam_input_initiator(filtered_df: pd.DataFrame, mail_id_worksheet_df: pd.DataFrame, date_: datetime):
+def niam_input_initiator(
+    filtered_df: pd.DataFrame, 
+    mail_id_worksheet_df: pd.DataFrame, 
+    niam_circle_df: pd.DataFrame, 
+    date_: datetime):
     
     if filtered_df.shape[0] > 0:
         unique_crs = filtered_df["CR No"].astype(str).str.strip().unique()
@@ -231,7 +246,7 @@ def niam_input_initiator(filtered_df: pd.DataFrame, mail_id_worksheet_df: pd.Dat
         while i < unique_crs.size:
             # print(f"{i =}")
             cr = unique_crs[i]
-            selected_cr_df = niam_filtered_df.loc[niam_filtered_df["CR No"] == cr]
+            selected_cr_df = filtered_df.loc[filtered_df["CR No"] == cr]
             
             node_type_var = selected_cr_df.iloc[0, niam_node_type_index]
             
@@ -416,9 +431,15 @@ def niam_input_initiator(filtered_df: pd.DataFrame, mail_id_worksheet_df: pd.Dat
             }
         )
         
-        niam_workbook_template_maker(niam_input_template_df, mail_id_worksheet_df)
+        niam_data_updater(
+            niam_input_template_df,
+            execution_date=date_ + timedelta(days=1)
+        )
+        
+        niam_workbook_template_maker(niam_input_template_df, mail_id_worksheet_df, date_)
+        return niam_workbook_path_for(date_)
 
-
+        
 
 def run_task(
     request, 
@@ -526,3 +547,42 @@ def run_task(
     selected_data_df = selected_data_df.loc[
         selected_data_df["CR No"].astype(str).str.strip().isin(to_be_filter_crs)
     ]
+
+
+    mail_id_df = (user_email_df_maker())
+    if mail_id_df is not None:
+        mail_id_df = mail_id_df[["employee_name", "email"]].rename(columns={"employee_name": "Change Responsible", "email": "Mail ID"})
+
+    # Serialise generation for the same execution date: the workbook path is
+    # shared by date, so two users generating for the same day must not write
+    # it at the same time.
+    workbook_file = None
+    try:
+        with file_lock(niam_workbook_path_for(parsed_date)):
+            workbook_file = niam_input_initiator(
+                selected_data_df,
+                mail_id_df,
+                None,
+                parsed_date,
+            )
+    except TimeoutError as exc:
+        return {
+            "status": "Failed",
+            "download_ready": False,
+            "message": f"Could not lock the NIAM workbook for {parsed_date.date()}: {exc}",
+        }
+
+    if workbook_file and Path(workbook_file).exists():
+        GLOBAL_LOGS.append(f"NIAM ticket workbook generated: {workbook_file} ---- {timestamp_fn()}")
+        return {
+            "status": "Completed",
+            "download_ready": True,
+            "download_name": str(workbook_file),
+            "message": f"NIAM ticket generated for {parsed_date.date()}.",
+        }
+
+    return {
+        "status": "Completed",
+        "download_ready": False,
+        "message": f"No NIAM tickets were required for {parsed_date.date()}.",
+    }

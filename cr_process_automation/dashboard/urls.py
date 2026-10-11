@@ -22,6 +22,11 @@ urlpatterns = [
     path('api/task/start/<int:task_id>/', views.start_task, name='start_task'),
     path('api/task/dashboard-data/', views.task_dashboard_data, name='task_dashboard_data'),
     path('download/task/<int:task_id>/', views.download_task_output, name='download_task_output'),
+
+    # Cross-user region locks (CR Planning page)
+    path('api/region-locks/acquire/', views.acquire_region_locks, name='acquire_region_locks'),
+    path('api/region-locks/release/', views.release_region_locks, name='release_region_locks'),
+    path('api/region-locks/status/', views.region_lock_status, name='region_lock_status'),
     
     # path("import-master-cr/", views.import_master_cr_view, name="import-master-cr")
     # path('playwright-auth-iframe/', views.playwright_auth_iframe, name='playwright_auth_iframe'),
@@ -75,6 +80,7 @@ urlpatterns = [
     path("niam-template-db/", views.niam_template_db_view, name="niam_template_db"),
     path("fetch-niam-template-data/", views.fetch_niam_template_data, name="fetch_niam_template_data"),
     path("download-niam-template/", views.download_niam_template, name="download_niam_template"),
+    path("api/niam/generate-ticket/", views.start_niam_ticket_generation, name="start_niam_ticket_generation"),
     path("niam-credentials/", views.niam_credentials_view, name="niam_credentials"),
     path("api/user/update-niam-credentials/", views.update_niam_credentials, name="update_niam_credentials"),
 ]

@@ -22,6 +22,7 @@ from django.db.models import QuerySet
 from django.http import JsonResponse
 from django_pandas.io import read_frame
 from dashboard.models import MasterCRDatabase, SelectedDateTable, CRWiseStatus
+from dashboard.utils.file_locks import file_lock
 import dashboard.task_modules.dependencies.batch_methods as bm
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
@@ -46,7 +47,7 @@ def cr_wise_status_modifier_update_func(
     status: str = "Success"
 ):
     with transaction.atomic(using='default'):
-        cr_wise_status = CRWiseStatus.objects.using('default').get(cr_no=cr, is_active=True)
+        cr_wise_status = CRWiseStatus.objects.using('default').select_for_update().get(cr_no=cr, is_active=True)
         cr_wise_status.CR_Hygiene_Checks = status
         cr_wise_status.save()
         # transaction.on_commit(lambda: sync_replica_task(), using='default')
@@ -59,13 +60,13 @@ def cr_details_update_func(
     test_cases: str
 ):
     with transaction.atomic(using='default'):
-        master_cr = MasterCRDatabase.objects.using('default').get(cr_no=cr, is_active=True)
+        master_cr = MasterCRDatabase.objects.using('default').select_for_update().get(cr_no=cr, is_active=True)
         master_cr.node_details = _make_serializable(node_details)
         master_cr.impact = _make_serializable(impact)
         master_cr.test_cases = _make_serializable(test_cases)
         master_cr.save()
 
-        selected_date_table = SelectedDateTable.objects.using('default').get(cr_no=cr, is_active=True)
+        selected_date_table = SelectedDateTable.objects.using('default').select_for_update().get(cr_no=cr, is_active=True)
         selected_date_table.node_details = _make_serializable(node_details)
         selected_date_table.impact = _make_serializable(impact)
         selected_date_table.test_cases = _make_serializable(test_cases)
@@ -184,6 +185,16 @@ def interdomain_measuring_kpis_remarks_lambda_func(x:str) -> str:
 
 
 def validation_summary_writer_and_planning_sheet_updater(filtered_df: pd.DataFrame, logs: list, date_: datetime) -> list:
+    """Serialise writes to the shared planning-sheet workbook across users."""
+    workbook = os.path.join(
+        os.getenv("PLANNING_SHEET_DOWNLOAD_FOLDER").format(date_.strftime('%d-%b-%y')),
+        os.getenv("PLANNING_SHEET_WORKBOOK_NAME"),
+    )
+    with file_lock(workbook):
+        return _validation_summary_writer_and_planning_sheet_updater_locked(filtered_df, logs, date_)
+
+
+def _validation_summary_writer_and_planning_sheet_updater_locked(filtered_df: pd.DataFrame, logs: list, date_: datetime) -> list:
     global interdomain_kpi_activity_name_interdomain_kpi_required_check_dictionary
     global cr_itsm_details_dictionary
     global work_details_cr_hygiene_dictionary

@@ -1,7 +1,11 @@
+import time
+import logging
 import pandas as pd
 from threading import Thread
+from zoneinfo import ZoneInfo
 from django.conf import settings
-from dashboard.models import CRWiseStatus
+from django.db import transaction
+from dashboard.models import CRWiseStatus, UserManagement, NIAMTicketGenerationTable
 from rest_framework.exceptions import APIException
 from rest_framework import status
 from django_pandas.io import read_frame
@@ -18,6 +22,54 @@ from openpyxl.styles import (
 )
 from openpyxl.utils import column_index_from_string, get_column_letter
 from openpyxl.worksheet.datavalidation import DataValidation
+
+
+logger = logging.getLogger(__name__)
+
+# Database aliases used for explicit master/replica routing.
+DB_MASTER = "default"
+DB_REPLICA = "replica"
+
+# Maps the columns produced by the NIAM input template to the fields of
+# NIAMTicketGenerationTable.
+NIAM_COLUMN_TO_FIELD_MAPPING = {
+    "SL. No": "sno",
+    "Request Type": "request_type",
+    "Node Managed By": "node_managed_by",
+    "Subtype": "subtype",
+    "UID Type": "uid_type",
+    "Policy period": "policy_period",
+    "User Type": "user_type",
+    "Request IP>10 ?": "request_ip",
+    "Business Justification": "business_justification",
+    "SR_CR_Start Date-Time": "sr_cr_start_date_time",
+    "SR_CR_End Date-Time": "sr_cr_end_date_time",
+    "NIAM Access Start Date": "niam_access_start_date_time",
+    "NIAM Access END Date": "niam_access_end_date_time",
+    "Execution Location": "execution_location",
+    "SR OR CHANGE NO": "sr_or_change_number",
+    "Activity Title": "activity_title",
+    "NIAM Node Name": "node_name",
+    "Total Node Details": "node_details",
+    "Requested For(email)": "requested_for_email",
+    "Activity Name": "activity_name",
+    "Project Name": "project_name",
+    "Request For": "request_for",
+    "Domain": "domain",
+    "Access Type": "access_type",
+}
+
+# Fields stored as DateTimeField on the model.
+NIAM_DATETIME_FIELDS = {
+    "sr_cr_start_date_time",
+    "sr_cr_end_date_time",
+    "niam_access_start_date_time",
+    "niam_access_end_date_time",
+}
+
+# Duplicate-prevention / update key for a NIAM input template row. A single CR
+# produces one row per node, so (execution_date, CR number, node name) is unique.
+NIAM_UPSERT_KEY_FIELDS = ("execution_date", "sr_or_change_number", "node_name")
 
 
 class CustomThread(Thread):
@@ -265,4 +317,261 @@ def _norm_series(series: pd.Series) -> pd.Series:
         .str.strip()
         .str.casefold()
     )
+
+
+def user_email_df_maker() -> pd.DataFrame:
+    """
+    This function creates a pandas DataFrame from the user_email_data.
+   
+    Parameters:
+        user_email_data (QuerySet): A queryset of objects, object representing a row of data.    
+        The keys of the queryset should match the field names in the settings file.
+    Returns:
+        pd.DataFrame: A pandas DataFrame with the user_email_data.
+    """
+    user_email_data = UserManagement.objects.all()
+    df = pd.DataFrame(user_email_data)
+    # df = df.rename(columns=settings.DB_TO_PL_COLUMNS_MAPPING)
+    return df
+
+def _niam_clean_value(field_name: str, value):
+    """
+    Normalize a raw DataFrame cell into a value Django can persist on the given
+    model field. Empty/NaN cells become None and datetime fields are parsed into
+    tz-aware (Asia/Kolkata) datetimes.
+    """
+    if value is None:
+        return None
+
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+
+    if field_name in NIAM_DATETIME_FIELDS:
+        ts = pd.to_datetime(value, errors="coerce")
+        if pd.isna(ts):
+            return None
+        dt = ts.to_pydatetime()
+        if timezone.is_naive(dt):
+            dt = timezone.make_aware(dt, ZoneInfo("Asia/Kolkata"))
+        return dt
+
+    # Convert numpy scalar types to native Python types for safe persistence.
+    if hasattr(value, "item") and not isinstance(value, (str, bytes)):
+        try:
+            value = value.item()
+        except (TypeError, ValueError):
+            pass
+
+    if isinstance(value, str):
+        value = value.strip()
+        if value == "" or value.lower() in ("nan", "nat", "none"):
+            return None
+
+    return value
+
+
+def _niam_key(value) -> str:
+    """Build a normalized lookup key component (blank-safe, case-insensitive)."""
+    if value is None:
+        return ""
+    if isinstance(value, float) and pd.isna(value):
+        return ""
+    return str(value).strip().casefold()
+
+
+def _verify_niam_replication(execution_date, timeout: int = 15, interval: float = 1.0):
+    """
+    Confirm the master rows for the given execution date have streamed to the
+    replica. Polls the replica until it matches master or the timeout elapses.
+
+    Returns:
+        Tuple[bool, str]: (replicated, message)
+    """
+    master_count = (
+        NIAMTicketGenerationTable.objects.using(DB_MASTER)
+        .filter(execution_date=execution_date)
+        .count()
+    )
+
+    replica_count = None
+    last_error = ""
+    deadline = time.monotonic() + timeout
+
+    while True:
+        try:
+            replica_count = (
+                NIAMTicketGenerationTable.objects.using(DB_REPLICA)
+                .filter(execution_date=execution_date)
+                .count()
+            )
+            if replica_count == master_count:
+                return (
+                    True,
+                    f"Replication in sync (master={master_count}, replica={replica_count}).",
+                )
+        except Exception as exc:  # replica may be unreachable / read-only not ready
+            last_error = str(exc)
+
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(interval)
+
+    if replica_count is None:
+        return False, f"Replica not reachable for verification: {last_error}"
+    return (
+        False,
+        f"Replication lag detected (master={master_count}, replica={replica_count}).",
+    )
+
+
+def niam_data_updater(df: pd.DataFrame, execution_date=None):
+    """
+    Push the NIAM input template DataFrame into NIAMTicketGenerationTable.
+
+    Behaviour:
+        * Prevents duplicate rows by upserting on
+          (execution_date, sr_or_change_number, node_name): a CR can produce one
+          row per node name.
+        * Updates existing rows in place instead of inserting copies.
+        * Removes any pre-existing duplicate rows for the same key on master.
+        * Verifies PostgreSQL streaming replication after the commit.
+
+    Args:
+        df (pd.DataFrame): The NIAM input template DataFrame produced by
+            niam_input_initiator.
+        execution_date (date | datetime | None): The CR execution date. When
+            omitted it is derived from the template's SR/CR start date-time.
+
+    Returns:
+        dict: Summary with inserted/updated/skipped counts and replication status.
+    """
+    summary = {
+        "inserted": 0,
+        "updated": 0,
+        "skipped": 0,
+        "replicated": None,
+        "message": "",
+    }
+
+    if df is None or len(df) == 0:
+        summary["message"] = "Empty NIAM input template; nothing to push."
+        logger.info(summary["message"])
+        return summary
+
+    if execution_date is not None:
+        execution_date = pd.to_datetime(execution_date).date()
+    else:
+        start_col = NIAM_COLUMN_TO_FIELD_MAPPING.get("SR_CR_Start Date-Time")
+        if start_col in df.columns:
+            derived = pd.to_datetime(df[start_col].iloc[0], errors="coerce")
+            execution_date = derived.date() if pd.notna(derived) else None
+
+    if execution_date is None:
+        summary["message"] = "Execution date unavailable; NIAM rows not pushed."
+        logger.warning(summary["message"])
+        return summary
+
+    mapped_df = df.rename(columns=NIAM_COLUMN_TO_FIELD_MAPPING)
+
+    valid_fields = {
+        field.name
+        for field in NIAMTicketGenerationTable._meta.get_fields()
+        if getattr(field, "concrete", False) and field.name != "id"
+    }
+
+    for key_field in ("sr_or_change_number", "node_name"):
+        if key_field not in mapped_df.columns:
+            mapped_df[key_field] = None
+
+    value_fields = [
+        col
+        for col in mapped_df.columns
+        if col in valid_fields and col not in NIAM_UPSERT_KEY_FIELDS
+    ]
+
+    # Drop duplicate rows inside the incoming dataframe, keeping the last entry.
+    mapped_df = mapped_df.drop_duplicates(
+        subset=["sr_or_change_number", "node_name"], keep="last"
+    )
+
+    try:
+        with transaction.atomic(using=DB_MASTER):
+            # Clean up any existing duplicate rows for this execution date so the
+            # upsert key stays unique (defensive against earlier buggy inserts).
+            existing_map = {}
+            duplicate_ids = []
+            existing_rows = (
+                NIAMTicketGenerationTable.objects.using(DB_MASTER)
+                .select_for_update()
+                .filter(execution_date=execution_date)
+                .order_by("id")
+            )
+            for obj in existing_rows:
+                key = (_niam_key(obj.sr_or_change_number), _niam_key(obj.node_name))
+                if key in existing_map:
+                    duplicate_ids.append(obj.pk)
+                else:
+                    existing_map[key] = obj
+
+            if duplicate_ids:
+                NIAMTicketGenerationTable.objects.using(DB_MASTER).filter(
+                    pk__in=duplicate_ids
+                ).delete()
+                logger.info(
+                    "Removed %d duplicate NIAM row(s) for execution_date=%s",
+                    len(duplicate_ids),
+                    execution_date,
+                )
+
+            for row in mapped_df.to_dict(orient="records"):
+                key = (
+                    _niam_key(row.get("sr_or_change_number")),
+                    _niam_key(row.get("node_name")),
+                )
+
+                defaults = {
+                    field: _niam_clean_value(field, row.get(field))
+                    for field in value_fields
+                }
+
+                obj = existing_map.get(key)
+                if obj is None:
+                    NIAMTicketGenerationTable.objects.using(DB_MASTER).create(
+                        execution_date=execution_date,
+                        sr_or_change_number=row.get("sr_or_change_number"),
+                        node_name=row.get("node_name"),
+                        **defaults,
+                    )
+                    summary["inserted"] += 1
+                    continue
+
+                changed_fields = []
+                for field, value in defaults.items():
+                    if getattr(obj, field) != value:
+                        setattr(obj, field, value)
+                        changed_fields.append(field)
+
+                if changed_fields:
+                    obj.save(using=DB_MASTER, update_fields=changed_fields)
+                    summary["updated"] += 1
+                else:
+                    summary["skipped"] += 1
+
+    except Exception as exc:
+        logger.exception("Failed to push NIAM input template into the database.")
+        summary["message"] = f"Database update failed: {exc}"
+        raise
+
+    replicated, replication_message = _verify_niam_replication(execution_date)
+    summary["replicated"] = replicated
+    summary["message"] = (
+        f"NIAM rows pushed for {execution_date}: "
+        f"{summary['inserted']} inserted, {summary['updated']} updated, "
+        f"{summary['skipped']} unchanged. {replication_message}"
+    )
+    logger.info(summary["message"])
+    return summary
 

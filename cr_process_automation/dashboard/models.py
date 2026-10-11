@@ -1,8 +1,13 @@
+import logging
+
 from django.conf import settings
 from django.db import models
 from django.contrib.auth.models import AbstractUser
 from django.db.models import Q, UniqueConstraint
 from django.db import transaction
+from django.utils import timezone
+
+logger = logging.getLogger(__name__)
 
 
 class CoWModel(models.Model):
@@ -120,6 +125,8 @@ class TaskRun(models.Model):
     status = models.CharField(max_length=30, choices=RUN_STATUS_CHOICES, default='Queued')
     uploaded_template = models.FileField(upload_to='task_templates/', null=True, blank=True)
     output_file = models.FileField(upload_to='task_outputs/', null=True, blank=True)
+    run_key = models.CharField(max_length=64, blank=True, default='', db_index=True)
+    message = models.TextField(blank=True, default='')
     started_at = models.DateTimeField(auto_now_add=True)
     completed_at = models.DateTimeField(null=True, blank=True)
 
@@ -396,17 +403,41 @@ class CRWiseStatus(models.Model):
     #     super().save(*args, **kwargs)
 
 
-    def save(self, *args, **kwargs):
-        # CoW Save Override
-        if self.pk is not None:
-            # Force read and update to master
-            old_instance = CRWiseStatus.objects.using('default').get(pk=self.pk)
-            CRWiseStatus.objects.using('default').filter(pk=self.pk).update(is_active=False)
-            self.parent_reference_id = old_instance.pk
-            self.version = old_instance.version + 1
-            self.pk = None 
-            self.is_active = True
-        super().save(*args, **kwargs)
+    def save(self, *args, skip_cow=False, **kwargs):
+        # CoW Save Override: deactivate the current active row and insert a new
+        # version. Wrapped in a single transaction with a row lock so concurrent
+        # task runs (multi-user) cannot flip the flag twice or create drift.
+        if skip_cow:
+            kwargs.setdefault("using", "default")
+            super().save(*args, **kwargs)
+            return
+
+        with transaction.atomic(using="default"):
+            old_instance = None
+            if self.pk is not None:
+                old_instance = (
+                    CRWiseStatus.objects.using('default')
+                    .select_for_update()
+                    .filter(pk=self.pk)
+                    .first()
+                )
+
+            if old_instance is not None:
+                kwargs.pop("force_insert", None)
+                kwargs.pop("update_fields", None)
+                CRWiseStatus.objects.using('default').filter(pk=self.pk).update(is_active=False)
+                self.parent_reference_id = old_instance.pk
+                self.version = (old_instance.version or 0) + 1
+                self.pk = None
+                self.is_active = True
+            else:
+                self.pk = None
+                if not self.version:
+                    self.version = 1
+                self.is_active = True
+
+            kwargs["using"] = "default"
+            super().save(*args, **kwargs)
     
     def __str__(self):
         return f"{self.cr_no} (v{self.version})"
@@ -733,9 +764,14 @@ class SelectedDateTable(CoWModel):
             niam_node_type=self.niam_node_type, additional_info=self.additional_info,
         ) # Keep your existing fields dictionary here
 
-        # Force read to master
+        # Force read to master and lock the active row(s) so two concurrent
+        # writers cannot both deactivate + insert and create drift. This runs
+        # inside the caller's transaction (SelectedDateTable.save -> atomic).
         active = list(
-            MasterCRDatabase.objects.using('default').filter(cr_no=self.cr_no, is_active=True).order_by("-version")
+            MasterCRDatabase.objects.using('default')
+            .select_for_update()
+            .filter(cr_no=self.cr_no, is_active=True)
+            .order_by("-version")
         )
 
         if not active:
@@ -773,6 +809,7 @@ class NIAMTicketGenerationTable(models.Model):
     execution_date = models.DateField(("Execution Date"), null=True)
     request_type = models.CharField(("Request Type"), max_length=50, blank=True, null=True)
     request_for = models.CharField(("Request For"), max_length=50, blank=True, null=True)
+    requested_for_email = models.CharField(("Requested For (Email)"), max_length=255, blank=True, null=True)
     node_managed_by = models.CharField(("Node Managed By"), max_length=50, blank=True, null=True)
     subtype = models.CharField(("Subtype"), max_length=50, blank=True, null=True)
     domain = models.CharField(("Domain"), max_length=50, blank=True, null=True)
@@ -868,4 +905,43 @@ class NIAMActivityNameTable(models.Model):
 
     def __str__(self):
         return self.activity_name
+
+
+class RegionLock(models.Model):
+    """
+    Cross-user, DB-backed soft lock on a CR region.
+
+    When a user selects a region on the CR Planning page the region is locked
+    so every other logged-in user sees it disabled until the owner releases it
+    (logout, uncheck, page unload) or the lock TTL expires (heartbeat lapse).
+    """
+
+    REGION_CHOICES = [
+        ("north", "North"),
+        ("west", "West"),
+        ("east", "East"),
+        ("south", "South"),
+    ]
+
+    region = models.CharField(max_length=20, choices=REGION_CHOICES, unique=True)
+    locked_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.CASCADE,
+        related_name="region_locks",
+    )
+    session_key = models.CharField(max_length=64, blank=True, default="")
+    locked_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+
+    class Meta:
+        db_table = "region_locks"
+
+    def is_expired(self):
+        return self.expires_at <= timezone.now()
+
+    def __str__(self):
+        owner = self.locked_by.username if self.locked_by_id else "unknown"
+        return f"{self.region} locked by {owner}"
         
