@@ -1642,10 +1642,15 @@ def login_to_itsm(
     # clicking the logon button
     # page.locator("//a[@id='loginBtn']", has_text="Log On").click()
 
-    resolved_user_email = user_email or str(os.getenv('EMAIL_USERNAME'))
-    
+    # Never let a missing email fall back to the literal string "None":
+    # os.getenv() returns None when the variable is unset, and str(None) is
+    # "None" - which used to get typed into the ITSM login email field.
+    resolved_user_email = user_email or (os.getenv("EMAIL_USERNAME") or "")
+
     if not user_email:
         logs.append(f"Warning: no user email provided, falling back to EMAIL_USERNAME env var ---- {timestamp_fn()}")
+    if not resolved_user_email:
+        logs.append(f"Warning: no user email available for ITSM login; leaving the email field blank ---- {timestamp_fn()}")
 
     # Filling the user name
     page.locator('//div/input[@id="i0116"]').fill(resolved_user_email)

@@ -359,6 +359,11 @@ def fetch_region_cr_details(request):
     columns_meta = _master_cr_columns()
     columns = [c["name"] for c in columns_meta]
     field_list = columns if columns else MASTER_CR_FIELDS
+    # The row "id" is required by the frontend to identify rows on save
+    # (data-row-id / collectChanges()), but it must NOT render as a column:
+    # the JS already hides it via HIDDEN_COLUMNS.
+    if "id" not in field_list:
+        field_list = ["id", *field_list]
     result = list(
         MasterCRDatabase.objects
         .using(DB_REPLICA)

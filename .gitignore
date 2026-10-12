@@ -27,3 +27,5 @@ db_replica_data/
 volumes/
 .continue/
 .kilo/
+docker-compose.yml
+stray_migrations_*/

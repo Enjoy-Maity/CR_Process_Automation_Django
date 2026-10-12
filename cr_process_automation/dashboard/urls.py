@@ -10,6 +10,8 @@ from dashboard.Night_Execution import views as NightExecution_views
 urlpatterns = [
     path("", views.login_view, name="login"),
     path("login/", views.login_view, name="login"),
+    path("health", views.health_check, name="health"),
+    path("health/", views.health_check, name="health_slash"),
     path("logout/", views.logout_view, name="logout"),
     # path("*logout/", views.logout_view, name="logout"),
     path("home/", views.cr_planning_view, name="cr_planning"),

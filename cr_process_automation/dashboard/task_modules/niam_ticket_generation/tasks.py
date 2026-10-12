@@ -14,6 +14,7 @@ from typing import AnyStr, List, Union, Tuple
 from queue import Queue
 import dateutil.parser as dp
 from dashboard.views import _timestamp
+from dashboard.exceptions import NotFoundException, ValidationException
 from dashboard.models import SelectedDateTable, MasterCRDatabase
 from django.conf import settings
 from django.http import JsonResponse
@@ -163,15 +164,15 @@ def niam_input_initiator(
         
         cr_niam_circle_to_niam_circle_name_mapping = dict(
             zip(
-                mail_id_worksheet_df["NIAM Circle"].astype(str).str.strip(),
-                mail_id_worksheet_df["Circle Name"].astype(str).str.strip()
+                mail_id_worksheet_df["NIAM Circles"].astype(str).str.strip(),
+                mail_id_worksheet_df["NIAM Circle Name"].astype(str).str.strip()
             )
         )
         
         cr_circle_to_niam_circle_mapping = dict(
             zip(
                 mail_id_worksheet_df["Circle"].astype(str).str.strip(),
-                mail_id_worksheet_df["NIAM Circle"].astype(str).str.strip()
+                mail_id_worksheet_df["NIAM Circles"].astype(str).str.strip()
             )
         )
         
@@ -441,6 +442,101 @@ def niam_input_initiator(
 
         
 
+# The "Fetch CRs" task (NIAM Template Database "Fetch CR" button). Kept aligned
+# with views.FETCH_CRS_TASK_ID so this module can serve both NIAM flows:
+#   id 7 = full NIAM Ticket Generation (run_task below)
+#   id 8 = Fetch CRs (fetch_crs_for_date) — date validation + SelectedDateTable
+#          rebuild for the selected date.
+FETCH_CRS_TASK_ID = 8
+
+
+def fetch_crs_for_date(selected_date, GLOBAL_LOGS, timestamp_fn, runtime=None):
+    """Validate the selected date and (re)build that date's SelectedDateTable.
+
+    - No date          -> ValidationException ("Missing Date")
+    - Date has no CRs  -> NotFoundException ("No Data")
+    - Otherwise        -> scoped rebuild of SelectedDateTable from the active
+                          MasterCRDatabase rows for that date.
+
+    The synchronous presence gate in start_task surfaces those errors to the
+    page as dialogs before this runs; this function is the task-side job.
+    """
+    if not selected_date:
+        raise ValidationException(
+            "Please select a Date before fetching CRs.",
+            title="Missing Date",
+        )
+
+    try:
+        parsed_date = dp.parse(selected_date).date()
+    except (ValueError, TypeError):
+        raise ValidationException(
+            "Invalid date format. Use YYYY-MM-DD.",
+            title="Invalid Date Format",
+        )
+
+    GLOBAL_LOGS.append(
+        f"Fetch CRs: validating date {parsed_date.isoformat()} ---- {timestamp_fn()}"
+    )
+
+    in_selected = SelectedDateTable.objects.filter(
+        execution_date=parsed_date, is_active=True
+    ).exists()
+    in_master = MasterCRDatabase.objects.filter(
+        execution_date=parsed_date, is_active=True
+    ).exists()
+
+    if not (in_selected or in_master):
+        raise NotFoundException(
+            f"No CR found for the selected date {parsed_date}. CRs must exist "
+            "in MasterCRDatabase / SelectedDateTable before fetching the NIAM "
+            "template data.",
+            title="No Data",
+        )
+
+    fields = settings.SELECTED_DATE_TABLE_FIELDS
+    source = list(
+        MasterCRDatabase.objects.filter(
+            execution_date=parsed_date, is_active=True
+        ).values(*fields)
+    )
+
+    # Scoped rebuild: only the selected date's rows are replaced; every other
+    # date's SelectedDateTable data is left untouched. The date's existing rows
+    # (active + legacy CoW versions) are replaced atomically with fresh rows
+    # built from the active MasterCRDatabase versions.
+    #
+    # NOTE: "id" is deliberately NOT copied from MasterCRDatabase — those ids
+    # are the *master* table's keys and are not free in SelectedDateTable
+    # (rows for other dates may already hold them). Letting the auto-pk assign
+    # fresh ids avoids primary-key collisions (selected_date_table_pkey).
+    with transaction.atomic(using="default"):
+        SelectedDateTable.objects.using("default").filter(
+            execution_date=parsed_date
+        ).delete()
+        if source:
+            valid_fields = {f.name for f in SelectedDateTable._meta.get_fields()}
+            instances = [
+                SelectedDateTable(
+                    **{k: v for k, v in row.items() if k in valid_fields and k != "id"}
+                )
+                for row in source
+            ]
+            SelectedDateTable.objects.using("default").bulk_create(instances)
+
+    if runtime is not None:
+        runtime["total_crs"] = len(source)
+
+    message = f"{len(source)} CR(s) found for {parsed_date}."
+    GLOBAL_LOGS.append(f"Fetch CRs: {message} ---- {timestamp_fn()}")
+    return {
+        "status": "Completed",
+        "download_ready": False,
+        "message": message,
+        "counts": {"total_crs": len(source)},
+    }
+
+
 def run_task(
     request, 
     task, 
@@ -455,6 +551,17 @@ def run_task(
     global glogs
     GLOBAL_LOGS = GLOBAL_LOGS or []
     timestamp_fn = timestamp_fn or _timestamp
+
+    # Fetch CRs (task id 8, NIAM page "Fetch CR" button) is handled here so the
+    # whole NIAM flow (fetch -> validate -> load -> ticket generation) shares
+    # this single module.
+    if task.get("id") == FETCH_CRS_TASK_ID:
+        return fetch_crs_for_date(
+            selected_date=selected_date,
+            GLOBAL_LOGS=GLOBAL_LOGS,
+            timestamp_fn=timestamp_fn,
+            runtime=runtime,
+        )
 
     runtime["status"] = "Running"
     runtime["download_ready"] = False
@@ -553,6 +660,9 @@ def run_task(
     if mail_id_df is not None:
         mail_id_df = mail_id_df[["employee_name", "email"]].rename(columns={"employee_name": "Change Responsible", "email": "Mail ID"})
 
+
+    niam_circle_df = niam_circle_df_maker()
+
     # Serialise generation for the same execution date: the workbook path is
     # shared by date, so two users generating for the same day must not write
     # it at the same time.
@@ -562,7 +672,7 @@ def run_task(
             workbook_file = niam_input_initiator(
                 selected_data_df,
                 mail_id_df,
-                None,
+                niam_circle_df,
                 parsed_date,
             )
     except TimeoutError as exc:

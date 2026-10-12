@@ -7,7 +7,7 @@
     </div>
     <div class="region-filter-panel" style="margin-bottom:16px;padding:14px;border:1px solid #d5dde8;border-radius:10px;background:#f7f9fc;">
         <div style="margin-bottom:12px;">
-            <span class="cr-history-filter-label">Note:- Select Date (or a period shortcut) before fetching data.</span>
+            <span class="cr-history-filter-label">Note:- Select Date before fetching data.</span>
         </div>
         <div style="display:flex;gap:20px;align-items:center;flex-wrap:wrap;">
             <div>
@@ -15,13 +15,8 @@
                 <input type="date" id="niam_date" name="niam_date">
             </div>
             <button type="button" id="fetch_niam_template_btn" class="action-btn compact-btn fetch-cr-black-btn">Fetch CR</button>
-            <button type="button" id="download_niam_template_btn" class="action-btn compact-btn download-btn">Download Template</button>
-        </div>
-        <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:12px;">
-            <button type="button" id="past_niam_week_btn" class="action-btn compact-btn region-tab-btn">Past 1 Week CRs</button>
-            <button type="button" id="past_niam_month_btn" class="action-btn compact-btn region-tab-btn">Past 1 Month CRs</button>
-            <button type="button" id="past_niam_year_btn" class="action-btn compact-btn region-tab-btn">Past 1 Year CRs</button>
             <button type="button" id="niam_generate_ticket_btn" class="action-btn compact-btn start-btn">NIAM Ticket Generator</button>
+            <button type="button" id="download_niam_template_btn" class="action-btn compact-btn download-btn">Download Template</button>
             <a id="niam_ticket_download_link" class="action-btn compact-btn download-btn" href="#" style="display:none;">Download NIAM Ticket</a>
         </div>
         <div id="niam_generate_status" class="cr-history-filter-label" style="margin-top:10px;"></div>
@@ -139,20 +134,50 @@ function loadNiam(params) {
 }
 
 document.getElementById('fetch_niam_template_btn').addEventListener('click', function () {
-    const date = selectedNiamDate();
+    const date = selectedNiamDate();   // alerts (dialog) when no date is selected
     if (!date) return;
-    currentPeriod = { date: date, range: null };
-    loadNiam({ date: date });
-});
 
-[['1w', 'past_niam_week_btn'], ['1m', 'past_niam_month_btn'], ['1y', 'past_niam_year_btn']].forEach(function (pair) {
-    const range = pair[0];
-    const btn = document.getElementById(pair[1]);
-    if (!btn) return;
-    btn.addEventListener('click', function () {
-        currentPeriod = { date: null, range: range };
-        loadNiam({ range: range });
-    });
+    const btn = this;
+    btn.disabled = true;
+    btn.textContent = 'Fetching CRs...';
+    setNiamStatus('Validating date and fetching CRs...');
+
+    // Run the "Fetch CRs" task: it validates the selected date (dialog when
+    // data is missing from MasterCRDatabase/SelectedDateTable) and (re)loads
+    // that date's CRs, then we fetch the NIAM template data for the same date.
+    const body = new FormData();
+    body.append('date', date);
+
+    fetch("{% url 'start_task' 8 %}", {
+        method: 'POST',
+        headers: { 'X-CSRFToken': (typeof getCookie === 'function' ? getCookie('csrftoken') : '') },
+        body: body,
+    })
+        .then(res => res.json())
+        .then(data => {
+            if (!data.ok) {
+                // Backend rejected: missing date / no CR data / invalid date.
+                if (typeof showErrorAlert === 'function') {
+                    showErrorAlert(data.title || 'Error', data.message || 'Failed to start Fetch CRs.');
+                } else {
+                    alert((data.title || 'Error') + '\n\n' + (data.message || 'Failed to start Fetch CRs.'));
+                }
+                btn.disabled = false;
+                btn.textContent = 'Fetch CR';
+                return;
+            }
+            // Fetch CRs task started (date validated + CRs loaded for it) —
+            // proceed to load the NIAM template data.
+            currentPeriod = { date: date, range: null };
+            loadNiam({ date: date });
+            btn.disabled = false;
+            btn.textContent = 'Fetch CR';
+        })
+        .catch(function () {
+            alert('Error starting the Fetch CRs task.');
+            btn.disabled = false;
+            btn.textContent = 'Fetch CR';
+        });
 });
 
 document.getElementById('download_niam_template_btn').addEventListener('click', function () {

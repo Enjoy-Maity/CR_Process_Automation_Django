@@ -316,6 +316,12 @@ DB_TO_PL_COLUMNS_MAPPING = {
     value : key for key, value in PL_TO_DB_COLUMNS_MAPPING.items()
 }
 
+DB_TO_NIAM_CIRCLE_COLUMNS_MAPPING = {
+    "sno": "SNO", "circle": "Circle", "niam_circles": "NIAM Circles",
+    "circle_name": "NIAM Circle Name"
+}
+
+
 
 BMC_REMEDY_IFRAME_MODAL_WATCHER_JS = r"""
 (() => {

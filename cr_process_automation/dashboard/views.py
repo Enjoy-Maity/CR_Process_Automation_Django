@@ -10,7 +10,7 @@ import traceback
 import threading
 from importlib import import_module
 import pandas as pd
-from django.db import connection, transaction, IntegrityError
+from django.db import connection, connections, transaction, IntegrityError
 from django.db.models import Q
 from django.conf import settings
 from django.contrib import messages
@@ -20,7 +20,7 @@ from django.http import JsonResponse, FileResponse, Http404
 from django.shortcuts import render, redirect
 from django.utils import timezone
 from django.views.decorators.clickjacking import xframe_options_sameorigin
-from django.views.decorators.http import require_GET, require_POST
+from django.views.decorators.http import require_GET, require_POST, require_http_methods
 from django.core.serializers.json import DjangoJSONEncoder
 from .forms import LoginForm, TwoFactorAuthForm, PasswordAuthForm, NiamCredentialsForm
 # from django.contrib.auth import get_user_model
@@ -72,7 +72,20 @@ NIAM_TASK = {
     "download_required": True,
 }
 
-ALL_TASKS = TASKS + [NIAM_TASK]
+# "Fetch CRs" is triggered from the NIAM Template Database "Fetch CR" button.
+# It validates that the selected date has CR data (MasterCRDatabase /
+# SelectedDateTable) and then (re)builds that date's SelectedDateTable rows
+# from MasterCRDatabase. Kept out of TASKS so it does not appear as a row on
+# the CR Planning page — it only runs from the NIAM page.
+FETCH_CRS_TASK_ID = 8
+FETCH_CRS_TASK = {
+    "id": FETCH_CRS_TASK_ID,
+    "sequence_no": FETCH_CRS_TASK_ID,
+    "name": "Fetch CRs",
+    "download_required": False,
+}
+
+ALL_TASKS = TASKS + [NIAM_TASK, FETCH_CRS_TASK]
 
 # Region locks are held for this long without a heartbeat, then become free.
 REGION_LOCK_TTL_SECONDS = 120
@@ -124,7 +137,31 @@ TASK_MODULE_MAP = {
     5: "dashboard.task_modules.mop_attachment_approvals.tasks",
     6: "dashboard.task_modules.final_email_package.tasks",
     7: "dashboard.task_modules.niam_ticket_generation.tasks",
+    8: "dashboard.task_modules.niam_ticket_generation.tasks",
 }
+
+
+@require_http_methods(["GET", "HEAD"])
+def health_check(request):
+    """
+    Liveness/readiness probe (used by monitoring / load balancers).
+
+    Intentionally unauthenticated and cheap: it only checks that the
+    application and the default database are reachable.
+    """
+    db_ok = True
+    try:
+        with connections["default"].cursor() as cursor:
+            cursor.execute("SELECT 1")
+            cursor.fetchone()
+    except Exception:
+        logger.exception("Health check: database is unreachable.")
+        db_ok = False
+
+    return JsonResponse(
+        {"status": "ok" if db_ok else "degraded", "database": db_ok},
+        status=200 if db_ok else 503,
+    )
 
 
 def login_view(request):
@@ -537,6 +574,32 @@ def region_lock_status(request):
     })
 
 
+def _validate_fetch_crs_date(date_str):
+    """Ensure the Fetch CRs date has active CR rows (Master or Selected Date)."""
+    try:
+        parsed_date = parser.parse(date_str).date()
+    except (ValueError, TypeError):
+        raise ValidationException(
+            "Invalid date format. Use YYYY-MM-DD.",
+            title="Invalid Date Format"
+        )
+
+    in_selected = SelectedDateTable.objects.filter(
+        execution_date=parsed_date, is_active=True
+    ).exists()
+    in_master = MasterCRDatabase.objects.filter(
+        execution_date=parsed_date, is_active=True
+    ).exists()
+
+    if not (in_selected or in_master):
+        raise NotFoundException(
+            f"No CR found for the selected date {parsed_date}. CRs must exist "
+            "in MasterCRDatabase / SelectedDateTable before fetching the NIAM "
+            "template data.",
+            title="No Data",
+        )
+
+
 @require_POST
 @login_required(login_url="login")
 @handle_exceptions
@@ -568,7 +631,7 @@ def start_task(request, task_id):
     # Parse date input
     selected_date = request.POST.get('date', '').strip()
 
-    if task_id in [1, 2, NIAM_TASK_ID] and not selected_date:
+    if task_id in [1, 2, NIAM_TASK_ID, FETCH_CRS_TASK_ID] and not selected_date:
         raise ValidationException(
             "Please select a Date before starting this task.",
             title="Missing Date"
@@ -581,6 +644,12 @@ def start_task(request, task_id):
             "Invalid date format. Use YYYY-MM-DD.",
             title="Invalid Date Format"
         )
+
+    # Fetch CRs (NIAM Template Database): the selected date must already have
+    # CR data before we rebuild SelectedDateTable / fetch NIAM rows. Raised
+    # here (synchronously) so the page shows an error dialog immediately.
+    if task_id == FETCH_CRS_TASK_ID:
+        _validate_fetch_crs_date(selected_date)
 
     # Parse region input
     region_values = _parse_regions(request.POST.get('region', ''))

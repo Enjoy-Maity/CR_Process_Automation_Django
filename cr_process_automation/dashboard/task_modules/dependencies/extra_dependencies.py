@@ -5,7 +5,11 @@ from threading import Thread
 from zoneinfo import ZoneInfo
 from django.conf import settings
 from django.db import transaction
-from dashboard.models import CRWiseStatus, UserManagement, NIAMTicketGenerationTable
+from dashboard.models import (
+    CRWiseStatus, 
+    UserManagement, 
+    NIAMCircleTable
+)
 from rest_framework.exceptions import APIException
 from rest_framework import status
 from django_pandas.io import read_frame
@@ -305,6 +309,26 @@ def selected_date_df_maker(selected_date_data: QuerySet) -> pd.DataFrame:
                 s = s.dt.tz_convert("Asia/Kolkata").dt.tz_localize(None)
             df[col] = s
     # print(f"selected_date_df = \n{df}")
+    return df
+
+
+def niam_circle_df_maker() -> pd.DataFrame:
+    """
+    This function creates a pandas DataFrame from the niam_circle_data.
+   
+    Parameters:
+        niam_circle_data (QuerySet): A queryset of objects, object representing a row of data.    
+        The keys of the queryset should match the field names in the settings file.
+    Returns:
+        pd.DataFrame: A pandas DataFrame with the niam_circle_data.
+    """
+    # niam_circle_data = pd.DataFrame(niam_circle_data)
+    # print(niam_circle_data.columns)
+    niam_circle_data = NIAMCircleTable.objects.all()
+    df = pd.DataFrame(niam_circle_data)
+    df = df.rename(columns=settings.DB_TO_NIAM_CIRCLE_COLUMNS_MAPPING)
+    # df = read_frame(niam_circle_data).rename(columns=settings.DB_TO_PL_COLUMNS_MAPPING)
+
     return df
 
 

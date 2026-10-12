@@ -194,8 +194,8 @@ def _parse_args(argv=None) -> argparse.Namespace:
     )
     parser.add_argument("--host", default=os.getenv("WSGI_HOST", "0.0.0.0"),
                         help="Interface to bind (default: 0.0.0.0, or WSGI_HOST).")
-    parser.add_argument("--port", type=int, default=_env_int("WSGI_PORT", 8000),
-                        help="Port to bind (default: 8000, or WSGI_PORT).")
+    parser.add_argument("--port", type=int, default=_env_int("WSGI_PORT", 9000),
+                        help="Port to bind (default: 9000, or WSGI_PORT).")
     parser.add_argument("--server", default=os.getenv("WSGI_SERVER", "auto"),
                         choices=["auto", "gunicorn", "waitress"],
                         help="WSGI server to use (default: auto by platform).")

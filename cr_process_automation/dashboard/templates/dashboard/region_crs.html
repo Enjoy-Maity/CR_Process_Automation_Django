@@ -1,5 +1,6 @@
 {% extends 'dashboard/base_module.html' %}
 {% block module_content %}
+{% csrf_token %}
 <div class="region-crs-page">
   <div class="region-cr-panel">
     <div class="region-filter-panel">
@@ -164,6 +165,7 @@ function restoreRegionCrSessionState() {
 
     if (!saved || !saved.date) return false;
 
+    // Restore the UI state (date + filters)...
     document.getElementById('region-cr-date').value = saved.date;
     const planningStatusFilter = document.getElementById("planning-status-filter");
 
@@ -171,22 +173,17 @@ function restoreRegionCrSessionState() {
 		planningStatusFilter.value = saved.planningStatus;
 	}
 
-    ALL_ROWS = Array.isArray(saved.allRows) ? saved.allRows : [];
-    ORIGINAL_ROWS_BY_ID = {};
-    cloneRows(ALL_ROWS).forEach(row => {
-        ORIGINAL_ROWS_BY_ID[row.id] = row;
-    });
-
     SELECTED_REGION = saved.selectedRegion || null;
 
     document.querySelectorAll('.region-tab-btn').forEach(btn => {
         btn.classList.toggle('active', btn.dataset.region === SELECTED_REGION);
     });
 
-    if (ALL_ROWS.length) {
-        applyRegionFilter();
-        bindDirtyTracking();
-    }
+    // ...then ALWAYS load fresh rows from the server. We deliberately do NOT
+    // reuse saved.allRows: rows persisted before the row-"id" fix have no id,
+    // which breaks collectChanges() (row ids are required to save changes) and
+    // produces "No changes to save." on an otherwise valid edit.
+    fetchAllForDate();
 
     return true;
 }
@@ -574,21 +571,21 @@ function fetchAllForDate() {
         clearStatus();
         setMeta('Please select a date.');
         setTableMessage('Select a date and click Fetch CRs to load data.', 20);
-        return;
+        return Promise.resolve();
     }
 
     if (isBeforeMinAllowedDate(date)) {
         clearStatus();
         setMeta('Please select yesterday, today, or a future date.');
         setTableMessage('Dates before yesterday are not allowed.', 20);
-        return;
+        return Promise.resolve();
     }
 
     clearStatus();
     setMeta(`Loading CRs for ${getDisplayDate(date)}...`);
     setTableMessage('Loading data...', 20);
 
-    fetch(`{% url 'fetch_region_cr_details' %}?${new URLSearchParams({ date }).toString()}`)
+    return fetch(`{% url 'fetch_region_cr_details' %}?${new URLSearchParams({ date }).toString()}`)
         .then(res => res.json())
         .then(data => {
             if (!data.ok) {
@@ -737,11 +734,12 @@ function saveChanges() {
             // } else {
             //     showStatus('Failed to save record.', 'error');
             // }
-                                        // CHANGED: show status after reload
+                                        // CHANGED: show status AFTER reload (re-fetch clears the bar first)
                 if (updatedCount > 0) {
                     const label = updatedCount === 1 ? 'record' : 'records';
-                    showStatus(`${updatedCount} ${label} updated successfully.`, 'success');
-                    fetchAllForDate();
+                    fetchAllForDate().then(() => {
+                        showStatus(`${updatedCount} ${label} updated successfully.`, 'success');
+                    });
                 } else {
                     showStatus('Failed to save record.', 'error');
                 }

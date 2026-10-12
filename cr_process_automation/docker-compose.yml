@@ -6,6 +6,9 @@ services:
       POSTGRES_USER: admin
       POSTGRES_PASSWORD: Django@123#
       POSTGRES_DB: master_db
+      # Existing db_master_volume was initialised with a pgdata/ subdirectory;
+      # without this the entrypoint sees a non-empty PGDATA and initdb fails.
+      PGDATA: /var/lib/postgresql/data/pgdata
     ports:
       - "5432:5432"
     healthcheck:
@@ -26,6 +29,8 @@ services:
       POSTGRES_USER: admin
       POSTGRES_PASSWORD: Django@123#
       POSTGRES_DB: master_db
+      # Must match the layout of the existing db_replica_volume (pgdata/ subdir).
+      PGDATA: /var/lib/postgresql/data/pgdata
     ports:
       - "5433:5432"
     depends_on:

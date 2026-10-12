@@ -62,5 +62,10 @@
     </div>
 </div>
 
+<script>
+    // Real server-side email for the logged-in user; consumed by night_execution.js
+    // (used to pre-fill the ITSM login form, avoiding the "None" fallback bug).
+    window.USER_EMAIL = "{{ user_email|default:''|escapejs }}";
+</script>
 <script src="{% static 'dashboard/js/night_execution.js' %}"></script>
 {% endblock %}

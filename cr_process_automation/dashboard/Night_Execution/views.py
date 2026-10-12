@@ -303,7 +303,11 @@ def fetch_night_cr_status(request):
             status=400,
         )
 
-    user_email = body.get("user_email") or ""
+    # Server-authoritative fallback: never trust the client blindly, and never
+    # let an empty email degrade to the literal string "None" downstream.
+    user_email = body.get("user_email") or (
+        request.user.email if request.user.is_authenticated else ""
+    )
     job_id = _new_job()
     job = _get_job(job_id)
 
