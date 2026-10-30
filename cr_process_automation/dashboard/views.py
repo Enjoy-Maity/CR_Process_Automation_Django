@@ -286,7 +286,9 @@ def _merge_runtime_for_request(user_id, task_id):
 
 def _build_tasks_for_ui(user_id=None, include_niam=False):
     """Build task data for UI, scoped to the requesting user when given."""
-    task_defs = TASKS + ([NIAM_TASK] if include_niam else [])
+    task_defs = list(TASKS)
+    if include_niam:
+        task_defs += [NIAM_TASK, FETCH_CRS_TASK]
     return [
         {**task, **_merge_runtime_for_request(user_id, task["id"])}
         for task in task_defs
@@ -575,27 +577,32 @@ def region_lock_status(request):
 
 
 def _validate_fetch_crs_date(date_str):
-    """Ensure the Fetch CRs date has active CR rows (Master or Selected Date)."""
+    """Ensure the Fetch CRs date has active CR rows for that night's execution.
+
+    The picked date is the *night* date; the CRs execute on ``picked + 1`` (see
+    fetch_crs_for_date), which is also where the NIAM access window belongs.
+    """
     try:
-        parsed_date = parser.parse(date_str).date()
+        picked_date = parser.parse(date_str).date()
     except (ValueError, TypeError):
         raise ValidationException(
             "Invalid date format. Use YYYY-MM-DD.",
             title="Invalid Date Format"
         )
 
+    execution_date = picked_date + timedelta(days=1)
+
     in_selected = SelectedDateTable.objects.filter(
-        execution_date=parsed_date, is_active=True
+        execution_date=execution_date, is_active=True
     ).exists()
     in_master = MasterCRDatabase.objects.filter(
-        execution_date=parsed_date, is_active=True
+        execution_date=execution_date, is_active=True
     ).exists()
 
     if not (in_selected or in_master):
         raise NotFoundException(
-            f"No CR found for the selected date {parsed_date}. CRs must exist "
-            "in MasterCRDatabase / SelectedDateTable before fetching the NIAM "
-            "template data.",
+            f"No CR found for the selected date {picked_date} (CRs execute on "
+            f"{execution_date}).",
             title="No Data",
         )
 
@@ -3357,28 +3364,60 @@ def _niam_period_query(from_dt, to_dt, limit):
     )
 
 
-# Fields hidden from the NIAM Template Database UI/export.
-NIAM_TEMPLATE_EXCLUDED_FIELDS = ("id",)
+# Fields hidden from the NIAM Template Database UI/export. ``execution_date`` is
+# the internal upsert/filter key and is not one of the 24 displayed columns.
+NIAM_TEMPLATE_EXCLUDED_FIELDS = ("id", "execution_date")
 
 
 def _niam_template_columns():
     """
-    Build the NIAM Template Database column skeleton from the model.
+    Build the NIAM Template Database column skeleton.
 
-    Returns a list of {"name": field_name, "label": verbose_name} dicts,
-    excluding hidden fields (id). Used for page-load skeleton and fetch responses.
+    The display order and labels come from NIAM_COLUMN_TO_FIELD_MAPPING (the
+    canonical 24 RITM_INPUT columns), and each column is flagged ``editable``
+    when it is one of NIAM_EDITABLE_FIELDS. Used for the page-load skeleton and
+    for fetch responses.
     """
     from .models import NIAMTicketGenerationTable
+    from dashboard.task_modules.dependencies.extra_dependencies import (
+        NIAM_COLUMN_TO_FIELD_MAPPING,
+        NIAM_EDITABLE_FIELDS,
+    )
+
+    valid_fields = {
+        field.name
+        for field in NIAMTicketGenerationTable._meta.get_fields()
+        if getattr(field, "concrete", False)
+    }
 
     columns = []
-    for field in NIAMTicketGenerationTable._meta.get_fields():
-        if not getattr(field, "concrete", False):
+    for label, field_name in NIAM_COLUMN_TO_FIELD_MAPPING.items():
+        if field_name not in valid_fields:
             continue
-        if field.name in NIAM_TEMPLATE_EXCLUDED_FIELDS:
-            continue
-        label = field.verbose_name if field.verbose_name else field.name
-        columns.append({"name": field.name, "label": str(label)})
+        columns.append({
+            "name": field_name,
+            "label": label,
+            "editable": field_name in NIAM_EDITABLE_FIELDS,
+        })
     return columns
+
+
+def _niam_dropdown_config():
+    """Editable-column metadata + allowed options for the page dropdowns."""
+    from dashboard.task_modules.dependencies.extra_dependencies import (
+        NIAM_EDITABLE_FIELDS,
+        NIAM_FIELD_TO_COLUMN,
+        niam_dropdown_options,
+    )
+
+    options = niam_dropdown_options()
+    editable = []
+    for field_name in NIAM_EDITABLE_FIELDS:
+        editable.append({
+            "name": field_name,
+            "label": NIAM_FIELD_TO_COLUMN.get(field_name, field_name),
+        })
+    return {"editable_columns": editable, "options": options}
 
 
 @login_required(login_url="login")
@@ -3386,6 +3425,11 @@ def niam_template_db_view(request):
     ctx = _common_context(request)
     ctx["selected_option"] = "niam_template_db"
     ctx["niam_columns"] = _niam_template_columns()
+    ctx["niam_editable_config"] = _niam_dropdown_config()
+    # Same roles as Region CRs may edit / save the NIAM template.
+    from .Region_CRs.views import _user_can_edit_region_crs
+
+    ctx["can_edit_niam"] = _user_can_edit_region_crs(request.user)
     return render(request, "dashboard/niam_template_db.html", ctx)
 
 
@@ -3418,12 +3462,21 @@ def fetch_niam_template_data(request):
         rows = []
         for obj in qs:
             d = model_to_dict(obj)
-            rows.append({name: d.get(name) for name in columns})
+            row = {"id": obj.pk}
+            row.update({name: d.get(name) for name in columns})
+            rows.append(row)
+
+        from .Region_CRs.views import _user_can_edit_region_crs
 
         return JsonResponse({
             "ok": True,
             "columns": columns,
             "column_labels": {c["name"]: c["label"] for c in columns_meta},
+            "editable_columns": [
+                c["name"] for c in columns_meta if c.get("editable")
+            ],
+            "options": _niam_dropdown_config()["options"],
+            "can_edit": _user_can_edit_region_crs(request.user),
             "rows": rows,
             "count": len(rows),
             "range": used_range,
@@ -3515,3 +3568,222 @@ def start_niam_ticket_generation(request):
 
     # Delegate to the shared, per-user task starter.
     return start_task(request, NIAM_TASK_ID)
+
+
+@require_POST
+@login_required(login_url="login")
+@handle_exceptions
+def start_niam_fetch_crs(request):
+    """
+    Trigger the "Fetch CRs" flow (task 8) from the NIAM Template Database page.
+
+    Delegates to the shared per-user task runner, which imports
+    ``dashboard.task_modules.niam_ticket_generation.tasks`` and calls its
+    ``run_task`` with task id 8: validate/rebuild the selected night's
+    SelectedDateTable, then build the NIAM input workbook so the page can show
+    the Input sheet straight away.
+    """
+    date_str = (request.POST.get("date") or "").strip()
+    if not date_str:
+        raise ValidationException(
+            "Please select a Date before fetching CRs.",
+            title="Missing Date",
+        )
+    try:
+        datetime.strptime(date_str, "%Y-%m-%d")
+    except ValueError:
+        raise ValidationException(
+            "Invalid date format. Use YYYY-MM-DD.",
+            title="Invalid Date Format",
+        )
+
+    # Delegate to the shared, per-user task starter (task 8 -> run_task).
+    return start_task(request, FETCH_CRS_TASK_ID)
+
+
+def _niam_workbook_target(date_str):
+    """Path of the dated RITM workbook for a night date (YYYY-MM-DD)."""
+    from dashboard.task_modules.niam_ticket_generation.tasks import (
+        niam_workbook_path_for,
+    )
+
+    return niam_workbook_path_for(datetime.strptime(date_str, "%Y-%m-%d"))
+
+
+def _write_niam_edits_to_workbook(workbook_path, updates):
+    """
+    Write edited values into the RITM_INPUT sheet of a generated workbook.
+
+    ``updates`` maps (sr_or_change_number_key, node_name_key) -> {field: value}.
+    Rows are matched on (SR OR CHANGE NO, NIAM Node Name). Returns
+    (rows_updated, warning_or_None); never raises.
+    """
+    from openpyxl import load_workbook
+
+    from dashboard.task_modules.dependencies.extra_dependencies import (
+        NIAM_EDITABLE_FIELDS,
+        NIAM_FIELD_TO_COLUMN,
+        _niam_key,
+    )
+
+    if workbook_path is None or not Path(workbook_path).exists():
+        return 0, f"Workbook not found at {workbook_path}."
+
+    wb = load_workbook(str(workbook_path))
+    if "RITM_INPUT" not in wb.sheetnames:
+        return 0, "RITM_INPUT sheet is missing from the workbook."
+    ws = wb["RITM_INPUT"]
+
+    header = {}
+    for cell in ws[1]:
+        if cell.value is not None:
+            header[str(cell.value).strip()] = cell.column
+
+    editable_cols = {
+        field: header[NIAM_FIELD_TO_COLUMN[field]]
+        for field in NIAM_EDITABLE_FIELDS
+        if NIAM_FIELD_TO_COLUMN.get(field) in header
+    }
+    col_sr = header.get("SR OR CHANGE NO")
+    col_node = header.get("NIAM Node Name")
+    if not (col_sr and col_node):
+        return 0, "Workbook is missing the SR/Node key columns."
+
+    updated = 0
+    for row_idx in range(2, ws.max_row + 1):
+        key = (
+            _niam_key(ws.cell(row=row_idx, column=col_sr).value),
+            _niam_key(ws.cell(row=row_idx, column=col_node).value),
+        )
+        values = updates.get(key)
+        if not values:
+            continue
+        for field, value in values.items():
+            col = editable_cols.get(field)
+            if col:
+                ws.cell(row=row_idx, column=col).value = value
+        updated += 1
+
+    wb.save(str(workbook_path))
+    return updated, None
+
+
+@require_POST
+@login_required(login_url="login")
+@handle_exceptions
+def save_niam_template_changes(request):
+    """
+    Save the editable NIAM columns for the visible rows.
+
+    The seven editable columns must all be filled and, for the list columns,
+    chosen from the allowed options. Values are written to both
+    NIAMTicketGenerationTable and the dated RITM workbook.
+    """
+    from dashboard.models import NIAMTicketGenerationTable
+    from dashboard.task_modules.dependencies.extra_dependencies import (
+        NIAM_EDITABLE_FIELDS,
+        _niam_key,
+        niam_dropdown_options,
+    )
+    from .Region_CRs.views import _user_can_edit_region_crs
+
+    if not _user_can_edit_region_crs(request.user):
+        return JsonResponse(
+            {"ok": False, "message": "Not authorized to edit the NIAM template."},
+            status=403,
+        )
+
+    try:
+        payload = json.loads(request.body.decode("utf-8") or "{}")
+    except (ValueError, UnicodeDecodeError):
+        return JsonResponse(
+            {"ok": False, "message": "Invalid request body."}, status=400
+        )
+
+    date_str = (payload.get("date") or "").strip()
+    rows = payload.get("rows") or []
+    if not isinstance(rows, list) or not rows:
+        return JsonResponse(
+            {"ok": False, "message": "No rows to save."}, status=400
+        )
+
+    options = niam_dropdown_options()
+
+    errors = []
+    cleaned = []
+    for idx, row in enumerate(rows):
+        row_id = row.get("id")
+        if row_id is None:
+            errors.append({"row": idx, "message": "Missing row id."})
+            continue
+
+        values = {}
+        for field in NIAM_EDITABLE_FIELDS:
+            raw = row.get(field)
+            value = ("" if raw is None else str(raw)).strip()
+            if not value:
+                errors.append({"row": idx, "field": field, "message": "Required."})
+                values[field] = ""
+                continue
+            allowed = options.get(field) or []
+            if allowed and value not in allowed:
+                errors.append({
+                    "row": idx,
+                    "field": field,
+                    "message": f"'{value}' is not an allowed value.",
+                })
+            values[field] = value
+        cleaned.append({"id": row_id, "values": values})
+
+    if errors:
+        return JsonResponse(
+            {
+                "ok": False,
+                "message": "Some rows are incomplete or have invalid values.",
+                "errors": errors,
+            },
+            status=400,
+        )
+
+    updates_by_key = {}
+    with transaction.atomic(using="default"):
+        objects = {
+            obj.pk: obj
+            for obj in NIAMTicketGenerationTable.objects.using("default")
+            .select_for_update()
+            .filter(pk__in=[item["id"] for item in cleaned])
+        }
+        for item in cleaned:
+            obj = objects.get(item["id"])
+            if obj is None:
+                continue
+            for field, value in item["values"].items():
+                setattr(obj, field, value)
+            obj.save(using="default", update_fields=list(item["values"].keys()))
+            updates_by_key[
+                (_niam_key(obj.sr_or_change_number), _niam_key(obj.node_name))
+            ] = item["values"]
+
+    workbook_updated = 0
+    warning = None
+    if date_str:
+        try:
+            workbook_path = _niam_workbook_target(date_str)
+            workbook_updated, warning = _write_niam_edits_to_workbook(
+                workbook_path, updates_by_key
+            )
+        except Exception as exc:  # never fail the DB save because of the file
+            warning = (
+                "Rows saved to the database, but the workbook could not be "
+                f"updated: {exc}"
+            )
+            logger.error("NIAM workbook write-back failed: %s", exc, exc_info=True)
+    else:
+        warning = "No date supplied, so the workbook was not updated."
+
+    return JsonResponse({
+        "ok": True,
+        "updated": len(updates_by_key),
+        "workbook_updated": workbook_updated,
+        "warning": warning,
+    })

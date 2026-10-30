@@ -16,6 +16,7 @@
             </div>
             <button type="button" id="fetch_niam_template_btn" class="action-btn compact-btn fetch-cr-black-btn">Fetch CR</button>
             <button type="button" id="niam_generate_ticket_btn" class="action-btn compact-btn start-btn">NIAM Ticket Generator</button>
+            <button type="button" id="save_niam_template_btn" class="action-btn compact-btn save-btn">Save Changes</button>
             <button type="button" id="download_niam_template_btn" class="action-btn compact-btn download-btn">Download Template</button>
             <a id="niam_ticket_download_link" class="action-btn compact-btn download-btn" href="#" style="display:none;">Download NIAM Ticket</a>
         </div>
@@ -33,14 +34,33 @@
         </div>
     </div>
 </div>
+{{ niam_columns|json_script:"niam-columns-data" }}
+{{ niam_editable_config|json_script:"niam-editable-config-data" }}
 <script>
 const FETCH_NIAM_URL = "{% url 'fetch_niam_template_data' %}";
 const DOWNLOAD_NIAM_URL = "{% url 'download_niam_template' %}";
 const GENERATE_NIAM_URL = "{% url 'start_niam_ticket_generation' %}";
-const NIAM_COLUMNS = {{ niam_columns|safe }};
+const SAVE_NIAM_URL = "{% url 'save_niam_template_changes' %}";
+const NIAM_COLUMNS = JSON.parse(document.getElementById('niam-columns-data').textContent);
+const NIAM_EDITABLE_CONFIG = JSON.parse(document.getElementById('niam-editable-config-data').textContent);
+const CAN_EDIT_NIAM = {{ can_edit_niam|yesno:"true,false" }};
+
+const EDITABLE_COLUMNS = (NIAM_EDITABLE_CONFIG.editable_columns || []).map(c => c.name);
+const NIAM_OPTIONS = NIAM_EDITABLE_CONFIG.options || {};
 
 // Tracks the period currently shown (used by "Download Template").
 let currentPeriod = { date: null, range: null };
+
+function escapeHtml(text) {
+    if (text === null || text === undefined) return '';
+    const div = document.createElement('div');
+    div.textContent = String(text);
+    return div.innerHTML;
+}
+
+function isEditable(name) {
+    return EDITABLE_COLUMNS.indexOf(name) !== -1;
+}
 
 function renderNiamSkeleton(columns) {
     const head = document.getElementById('niam_template_table_head');
@@ -58,6 +78,40 @@ function renderNiamSkeleton(columns) {
         head.appendChild(th);
     });
     body.innerHTML = '<tr><td colspan="' + columns.length + '" class="text-center">Select date and fetch data.</td></tr>';
+}
+
+function buildEditableCell(field, value) {
+    const td = document.createElement('td');
+    const select = document.createElement('select');
+    select.className = 'niam-input';
+    select.dataset.col = field;
+    select.style.width = '100%';
+    select.style.minWidth = '150px';
+
+    const options = (NIAM_OPTIONS[field] || []).slice();
+    const current = (value === null || value === undefined) ? '' : String(value);
+    // Keep any value that is not part of the configured list so existing data
+    // is never silently dropped from the view.
+    if (current && options.indexOf(current) === -1) {
+        options.unshift(current);
+    }
+
+    const placeholder = document.createElement('option');
+    placeholder.value = '';
+    placeholder.textContent = '-- Select --';
+    select.appendChild(placeholder);
+
+    options.forEach(opt => {
+        const o = document.createElement('option');
+        o.value = opt;
+        o.textContent = opt;
+        if (opt === current) o.selected = true;
+        select.appendChild(o);
+    });
+
+    if (!CAN_EDIT_NIAM) select.disabled = true;
+    td.appendChild(select);
+    return td;
 }
 
 function renderNiamTable(data) {
@@ -87,20 +141,18 @@ function renderNiamTable(data) {
 
     data.rows.forEach(row => {
         const tr = document.createElement('tr');
+        tr.dataset.rowId = row.id;
         columns.forEach(name => {
-            const td = document.createElement('td');
-            td.innerHTML = '<input type="text" class="niam-input" data-col="' + name + '" value="' + escapeHtml(row[name] ?? '') + '" style="width:100%;min-width:120px;">';
-            tr.appendChild(td);
+            if (isEditable(name)) {
+                tr.appendChild(buildEditableCell(name, row[name]));
+            } else {
+                const td = document.createElement('td');
+                td.innerHTML = escapeHtml(row[name] ?? '');
+                tr.appendChild(td);
+            }
         });
         body.appendChild(tr);
     });
-}
-
-function escapeHtml(text) {
-    if (text === null || text === undefined) return '';
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
 }
 
 function setNiamStatus(message) {
@@ -133,22 +185,63 @@ function loadNiam(params) {
         .catch(() => alert('Error fetching data'));
 }
 
+// ── Fetch CR (task 8) ──────────────────────────────────────────────────────
+// The Fetch CR button starts the "Fetch CRs" task, which now also builds the
+// NIAM input (same work as the NIAM Ticket Generator), then loads the Input
+// sheet into the table.
+let fetchCrPollTimer = null;
+
+function stopFetchCrPoll() {
+    if (fetchCrPollTimer) {
+        clearInterval(fetchCrPollTimer);
+        fetchCrPollTimer = null;
+    }
+}
+
+function setFetchCrEnabled(enabled) {
+    const btn = document.getElementById('fetch_niam_template_btn');
+    if (!btn) return;
+    btn.disabled = !enabled;
+    btn.textContent = enabled ? 'Fetch CR' : 'Fetching CRs...';
+}
+
+function pollFetchCr(date) {
+    fetch('/api/task/dashboard-data/')
+        .then(res => res.json())
+        .then(data => {
+            const task = (data.tasks || []).find(item => Number(item.id) === 8);
+            if (!task) return;
+
+            if (task.status === 'Failed') {
+                setNiamStatus('Fetch CRs / NIAM generation failed. Check the task log.');
+                stopFetchCrPoll();
+                setFetchCrEnabled(true);
+                return;
+            }
+            if (task.status === 'Completed') {
+                stopFetchCrPoll();
+                setFetchCrEnabled(true);
+                currentPeriod = { date: date, range: null };
+                setNiamStatus('CRs fetched. Loading NIAM Input sheet...');
+                loadNiam({ date: date });
+                return;
+            }
+            setNiamStatus('Fetching CRs and building NIAM input... (' + (task.status || 'Running') + ')');
+        })
+        .catch(function () { /* ignore transient poll errors */ });
+}
+
 document.getElementById('fetch_niam_template_btn').addEventListener('click', function () {
     const date = selectedNiamDate();   // alerts (dialog) when no date is selected
     if (!date) return;
 
-    const btn = this;
-    btn.disabled = true;
-    btn.textContent = 'Fetching CRs...';
+    setFetchCrEnabled(false);
     setNiamStatus('Validating date and fetching CRs...');
 
-    // Run the "Fetch CRs" task: it validates the selected date (dialog when
-    // data is missing from MasterCRDatabase/SelectedDateTable) and (re)loads
-    // that date's CRs, then we fetch the NIAM template data for the same date.
     const body = new FormData();
     body.append('date', date);
 
-    fetch("{% url 'start_task' 8 %}", {
+    fetch("{% url 'start_niam_fetch_crs' %}", {
         method: 'POST',
         headers: { 'X-CSRFToken': (typeof getCookie === 'function' ? getCookie('csrftoken') : '') },
         body: body,
@@ -162,21 +255,84 @@ document.getElementById('fetch_niam_template_btn').addEventListener('click', fun
                 } else {
                     alert((data.title || 'Error') + '\n\n' + (data.message || 'Failed to start Fetch CRs.'));
                 }
-                btn.disabled = false;
-                btn.textContent = 'Fetch CR';
+                setFetchCrEnabled(true);
                 return;
             }
-            // Fetch CRs task started (date validated + CRs loaded for it) —
-            // proceed to load the NIAM template data.
-            currentPeriod = { date: date, range: null };
-            loadNiam({ date: date });
-            btn.disabled = false;
-            btn.textContent = 'Fetch CR';
+            stopFetchCrPoll();
+            fetchCrPollTimer = setInterval(function () { pollFetchCr(date); }, 3000);
+            pollFetchCr(date);
         })
         .catch(function () {
             alert('Error starting the Fetch CRs task.');
+            setFetchCrEnabled(true);
+        });
+});
+
+// ── Save Changes ───────────────────────────────────────────────────────────
+function collectNiamRows() {
+    const rows = [];
+    document.querySelectorAll('#niam_template_table_body tr[data-row-id]').forEach(tr => {
+        const row = { id: tr.dataset.rowId };
+        tr.querySelectorAll('select.niam-input').forEach(sel => {
+            row[sel.dataset.col] = sel.value;
+        });
+        rows.push(row);
+    });
+    return rows;
+}
+
+document.getElementById('save_niam_template_btn').addEventListener('click', function () {
+    if (!CAN_EDIT_NIAM) {
+        alert('You are not authorized to edit the NIAM template.');
+        return;
+    }
+    const date = selectedNiamDate();
+    if (!date) return;
+
+    const rows = collectNiamRows();
+    if (!rows.length) {
+        alert('Nothing to save.');
+        return;
+    }
+
+    const btn = this;
+    btn.disabled = true;
+    setNiamStatus('Saving changes...');
+
+    fetch(SAVE_NIAM_URL, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'X-CSRFToken': (typeof getCookie === 'function' ? getCookie('csrftoken') : ''),
+        },
+        body: JSON.stringify({ date: date, rows: rows }),
+    })
+        .then(res => res.json())
+        .then(data => {
             btn.disabled = false;
-            btn.textContent = 'Fetch CR';
+            if (!data.ok) {
+                const detail = (data.errors || [])
+                    .slice(0, 3)
+                    .map(e => 'row ' + (e.row + 1) + ': ' + (e.field ? e.field + ' - ' : '') + e.message)
+                    .join('\n');
+                if (typeof showErrorAlert === 'function') {
+                    showErrorAlert('Save failed', (data.message || 'Failed to save changes.') + (detail ? '\n\n' + detail : ''));
+                } else {
+                    alert((data.message || 'Failed to save changes.') + (detail ? '\n\n' + detail : ''));
+                }
+                setNiamStatus('Save failed.');
+                return;
+            }
+            let msg = 'Saved ' + (data.updated || 0) + ' row(s) to the database';
+            msg += data.workbook_updated ? ' and ' + data.workbook_updated + ' row(s) to the workbook.' : '.';
+            if (data.warning) msg += ' ' + data.warning;
+            setNiamStatus(msg);
+            loadNiam({ date: date });
+        })
+        .catch(function () {
+            btn.disabled = false;
+            alert('Error saving changes.');
+            setNiamStatus('Save failed.');
         });
 });
 
@@ -275,5 +431,9 @@ document.getElementById('niam_generate_ticket_btn').addEventListener('click', fu
 
 // Render DB column skeleton on page load (before any fetch).
 renderNiamSkeleton(NIAM_COLUMNS);
+if (!CAN_EDIT_NIAM) {
+    const saveBtn = document.getElementById('save_niam_template_btn');
+    if (saveBtn) saveBtn.style.display = 'none';
+}
 </script>
 {% endblock %}

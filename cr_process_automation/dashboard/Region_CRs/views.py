@@ -321,6 +321,24 @@ def _master_cr_columns():
     return columns
 
 
+def _view_cr_columns():
+    """Skeleton (page-load) columns for the Region CRs table.
+
+    Only the business columns (CR_HISTORY_EXPORT_FIELDS_VIEW) — never the CoW
+    metadata (is_active / version / parent_reference_id) that plain model
+    introspection would include — preceded by the leading S.No row-number
+    column, exactly as the loaded table shows it. Labels reuse the model's
+    verbose names (the S.No column is labelled to match the loaded table).
+    """
+    labels = {c["name"]: c["label"] for c in _master_cr_columns()}
+    columns = [
+        {"name": name, "label": labels.get(name) or name.replace("_", " ")}
+        for name in CR_HISTORY_EXPORT_FIELDS_VIEW
+    ]
+    # Leading S.No column (row number), matching the loaded table's header.
+    return [{"name": "sno", "label": "S.No"}, *columns]
+
+
 @login_required(login_url="login")
 def region_crs_view(request):
     ctx = _common_context(request)
@@ -328,7 +346,9 @@ def region_crs_view(request):
     ctx["field_labels"] = MASTER_CR_FIELDS
     ctx["editable_region_cr_fields"] = EDITABLE_REGION_CR_FIELDS
     ctx["can_edit_region_crs"] = getattr(request.user, "role", "") in ALLOWED_REGION_CR_EDIT_ROLES
-    ctx["region_cr_columns"] = _master_cr_columns()
+    # Skeletal table shown on page load: only the CR-history view columns
+    # (CR_HISTORY_EXPORT_FIELDS_VIEW), not every model field.
+    ctx["region_cr_columns"] = _view_cr_columns()
     return render(request, "dashboard/region_crs.html", ctx)
 
 

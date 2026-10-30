@@ -805,38 +805,49 @@ class SelectedDateTable(CoWModel):
         
 
 class NIAMTicketGenerationTable(models.Model):
-    sno = models.IntegerField(("SNO"), blank=True, null=True)
+    """
+    One row per CR per NIAM node, as shown on the NIAM Template Database page
+    and written to the dated RITM Input workbook.
+
+    Field order and verbose names mirror the 24 RITM_INPUT columns exactly (see
+    NIAM_COLUMN_TO_FIELD_MAPPING); ``execution_date`` is the internal
+    upsert/filter key and is not one of the displayed columns.
+    """
+
+    # Internal key (hidden from the page): CR execution date.
     execution_date = models.DateField(("Execution Date"), null=True)
+
+    # 1..24 - RITM_INPUT columns, in canonical order.
+    sno = models.IntegerField(("SL. No"), blank=True, null=True)
     request_type = models.CharField(("Request Type"), max_length=50, blank=True, null=True)
-    request_for = models.CharField(("Request For"), max_length=50, blank=True, null=True)
-    requested_for_email = models.CharField(("Requested For (Email)"), max_length=255, blank=True, null=True)
     node_managed_by = models.CharField(("Node Managed By"), max_length=50, blank=True, null=True)
     subtype = models.CharField(("Subtype"), max_length=50, blank=True, null=True)
-    domain = models.CharField(("Domain"), max_length=50, blank=True, null=True)
-    access_type = models.CharField(("Access Type"), max_length=50, blank=True, null=True)
     uid_type = models.CharField(("UID Type"), max_length=50, blank=True, null=True)
-    policy_period = models.CharField(("Policy Period"), max_length=50, blank=True, null=True)
+    policy_period = models.CharField(("Policy period"), max_length=50, blank=True, null=True)
     user_type = models.CharField(("User Type"), max_length=50, blank=True, null=True)
-    request_ip = models.CharField(("Request IP"), max_length=50, blank=True, null=True)
-    sr_or_change_number = models.CharField(("SR/Change Number"), max_length=50, blank=True, null=True)
-    activity_title = models.TextField(("Activity Title"), blank=True, null=True)
-    sr_cr_start_date_time = models.DateTimeField(("SR/CR Start Date Time"), blank=True, null=True)
-    sr_cr_end_date_time = models.DateTimeField(("SR/CR End Date Time"), blank=True, null=True)
-    niam_access_start_date_time = models.DateTimeField(("NIAM Access Start Date Time"), blank=True, null=True)
-    niam_access_end_date_time = models.DateTimeField(("NIAM Access End Date Time"), blank=True, null=True)
+    request_ip = models.CharField(("Request IP>10 ?"), max_length=50, blank=True, null=True)
     business_justification = models.TextField(("Business Justification"), blank=True, null=True)
-    node_name = models.TextField(("Node Name"), blank=True, null=True)
-    node_details = models.TextField(("Node Details"), blank=True, null=True)
+    sr_cr_start_date_time = models.DateTimeField(("SR_CR_Start Date-Time"), blank=True, null=True)
+    sr_cr_end_date_time = models.DateTimeField(("SR_CR_End Date-Time"), blank=True, null=True)
+    niam_access_start_date_time = models.DateTimeField(("NIAM Access Start Date"), blank=True, null=True)
+    niam_access_end_date_time = models.DateTimeField(("NIAM Access END Date"), blank=True, null=True)
+    execution_location = models.TextField(("Execution Location"), blank=True, null=True)
+    sr_or_change_number = models.CharField(("SR OR CHANGE NO"), max_length=50, blank=True, null=True)
+    activity_title = models.TextField(("Activity Title"), blank=True, null=True)
+    node_name = models.TextField(("NIAM Node Name"), blank=True, null=True)
+    node_details = models.TextField(("Total Node Details"), blank=True, null=True)
+    requested_for_email = models.CharField(("Requested For(email)"), max_length=255, blank=True, null=True)
     activity_name = models.TextField(("Activity Name"), blank=True, null=True)
     project_name = models.TextField(("Project Name"), blank=True, null=True)
-    execution_location = models.TextField(("Execution Location"), blank=True, null=True)
-    niam_ticket_generated = models.CharField(("NIAM Ticket Generated"), max_length=50, blank=True, null=True)
+    request_for = models.CharField(("Request For"), max_length=50, blank=True, null=True)
+    domain = models.CharField(("Domain"), max_length=50, blank=True, null=True)
+    access_type = models.CharField(("Access Type"), max_length=50, blank=True, null=True)
 
     class Meta:
         db_table = "niam_ticket_generation_table"
 
     def __str__(self):
-        return self.sr_or_change_number
+        return self.sr_or_change_number or ""
 
 
 class NiamDomainsTable(models.Model):

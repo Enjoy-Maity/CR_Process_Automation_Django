@@ -82,7 +82,9 @@ urlpatterns = [
     path("niam-template-db/", views.niam_template_db_view, name="niam_template_db"),
     path("fetch-niam-template-data/", views.fetch_niam_template_data, name="fetch_niam_template_data"),
     path("download-niam-template/", views.download_niam_template, name="download_niam_template"),
+    path("api/niam/fetch-crs/", views.start_niam_fetch_crs, name="start_niam_fetch_crs"),
     path("api/niam/generate-ticket/", views.start_niam_ticket_generation, name="start_niam_ticket_generation"),
+    path("api/niam/save-changes/", views.save_niam_template_changes, name="save_niam_template_changes"),
     path("niam-credentials/", views.niam_credentials_view, name="niam_credentials"),
     path("api/user/update-niam-credentials/", views.update_niam_credentials, name="update_niam_credentials"),
 ]
