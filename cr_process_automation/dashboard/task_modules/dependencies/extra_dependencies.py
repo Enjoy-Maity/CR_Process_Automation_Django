@@ -5,6 +5,7 @@ from threading import Thread
 from zoneinfo import ZoneInfo
 from django.conf import settings
 from django.db import transaction
+from django.db.models import QuerySet
 from dashboard.models import (
     CRWiseStatus, 
     UserManagement, 
@@ -21,7 +22,7 @@ from rest_framework import status
 from django_pandas.io import read_frame
 from django.utils import timezone
 from django.core.management import call_command
-from datetime import timedelta
+from datetime import datetime, timedelta
 from openpyxl import load_workbook
 from openpyxl.styles import (
     Alignment,

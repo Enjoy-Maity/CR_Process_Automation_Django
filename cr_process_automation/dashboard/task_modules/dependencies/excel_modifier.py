@@ -1,9 +1,8 @@
-from ast import Tuple
 import os
 from numpy._core.numerictypes import str_
 import pandas as pd
 from functools import singledispatchmethod
-from typing import AnyStr, List, Optional, Dict
+from typing import AnyStr, List, Optional, Dict, Tuple
 from openpyxl import load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter, column_index_from_string
