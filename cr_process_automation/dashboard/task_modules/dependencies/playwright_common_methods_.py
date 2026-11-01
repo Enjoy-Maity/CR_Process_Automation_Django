@@ -2535,3 +2535,915 @@ def session_breaker():
     
     except Exception:
         pass
+
+
+def exception_returner(
+    playwright: Playwright,
+    context: BrowserContext,
+    browser: Browser,
+    page: Page,
+):
+    if page:
+        page.wait_for_timeout(1000)
+        if page.locator("//div[@class='f9' and text() = 'Logout']").is_visible():
+            page.locator("//div[@class='f9' and text() = 'Logout']").click()
+            page.wait_for_timeout(2000)
+        page.close()
+    
+    if context:
+        context.close()
+    
+    if browser:
+        browser.close()
+
+    return None, None, None
+
+
+def handle_niam_login(
+    page: Page,
+    context: BrowserContext,
+    password: str,
+    playwright: Playwright
+):
+    # password = ""
+
+    page.wait_for_load_state("load")
+    page.wait_for_timeout(500)
+    while True:
+        page.wait_for_timeout(500)
+        try:
+            # if page.locator('//div/form/div/div/div/span[text()="Bharti Airtel"]').is_visible():
+            #     break
+            if page.locator('//div[text()="Enter password"]').is_visible():
+                break
+        except:
+            pass
+    
+    # Enter the password
+    # page.locator('[id="passwordInput"]').fill(self.password)
+    page.locator('//input[@id="i0118"]').fill(password)
+
+    # Clicking on Sign in
+    # page.locator('[id="submitButton"]').click()
+    page.locator('//input[@id="idSIButton9"]').click()
+    
+    page.wait_for_load_state("load")
+    
+    mfa_prompt_locator = page.locator(
+        "//*[text()='Approve sign in request' or text()='Verify your identity' or text()='Face, fingerprint, PIN, or security key']"
+    )
+    
+    try:
+        # Wait for either prompt to appear
+        mfa_prompt_locator.first.wait_for(state="visible", timeout=15000)
+
+        prompt_text = mfa_prompt_locator.first.text_content()
+        
+        # Now check which one it is
+        if "Approve sign in request" in prompt_text:
+            # print("Line No. 356 - Waiting for sign in approval.")
+            try:
+                # Wait for the prompt to disappear
+                page.get_by_text("Approve sign in request").wait_for(
+                    state="hidden", timeout=60000
+                )
+                if live_feed:
+                    live_feed.emit("Waiting for sign in approval.")
+                # print("Sign in approved by user.")
+            except Exception as e:
+                # if manager:
+                #     # manager.show_info_signal.emit(
+                #     #     "  Timeout Error!",
+                #     #     "Timed out waiting for sign-in approval. Please try again.",
+                #     #     "error"
+                #     # )
+                #     pass
+
+                # else:
+                #     # from tkinter import messagebox
+                #     # from messages import Messagebox
+                #     # messagebox = Messagebox()
+                #     # messagebox.showerror(
+                #     #     "Timeout",
+                #     #     "Timed out waiting for sign-in approval. Please try again.",
+                #     # )
+                #     pass
+                # raise e
+                pass
+
+        elif "Verify your identity" in prompt_text:
+            # print("Line No. 367 - Verifying identity.")
+            while page.get_by_text(
+                "Approve a request on my Microsoft Authenticator app"
+            ).is_visible():
+                page.get_by_text(
+                    "Approve a request on my Microsoft Authenticator app"
+                ).click(button="left")
+                page.wait_for_timeout(1000)
+
+            try:
+                approve_prompt = page.get_by_text("Approve sign in request")
+                while True:
+                    if approve_prompt.is_visible():
+                        break
+                    else:
+                        
+                        approve_prompt_failed_prompt = page.get_by_text(
+                            "Approve a request on my Microsoft Authenticator app"
+                        )
+                        while not approve_prompt_failed_prompt.is_visible():
+                            approve_prompt_failed_prompt.click(button="left")
+                            page.wait_for_timeout(1000)
+                        approve_prompt.wait_for(state="visible", timeout=10000)
+                # print("Waiting for sign in approval after verification step.")
+                approve_prompt.wait_for(state="hidden", timeout=60000)
+                # print("Sign in approved by user after verification.")
+
+            except Exception as e:
+                # if manager:
+                #     # manager.show_info_signal.emit(
+                #     #     "   Timeout",
+                #     #     "Timed out waiting for sign-in approval after verification. Please try again.",
+                #     #     "error"
+                #     # )
+                #     pass
+
+                # else:
+                #     # from tkinter import messagebox
+                #     # from messages import Messagebox
+                #     # messagebox = Messagebox()
+                #     # messagebox.showerror(
+                #     #     "Timeout",
+                #     #     "Timed out waiting for sign-in approval after verification. Please try again.",
+                #     # )
+                #     pass
+                # context_playwright_deleter(context, playwright)
+                pass
+
+        elif "Face, fingerprint, PIN, or security key" in prompt_text:
+            try:
+                approve_prompt = page.get_by_text(
+                    "Face, fingerprint, PIN, or security key"
+                )
+                while True:
+                    if not approve_prompt.is_visible():
+                        break
+                    else:
+                        approve_prompt.wait_for(state="hidden", timeout=10000)
+            except Exception as e:
+                # if manager:
+                #     # manager.show_info_signal.emit(
+                #     #     "   Timeout",
+                #     #     "Timed out waiting for sign-in approval after verification. Please try again.",
+                #     #     "error"
+                #     # )
+                #     pass
+                # else:
+                #     # from tkinter import messagebox
+                #     # from messages import Messagebox
+                #     # messagebox = Messagebox()
+                #     # messagebox.showerror(
+                #     #     "   Timeout",
+                #     #     "Timed out waiting for sign-in approval after verification. Please try again.",
+                #     # )
+                #     pass
+                # context_playwright_deleter(context, playwright)
+                pass
+
+    except Exception:
+        # If neither prompt appeared after waiting
+        # if manager:
+        #     # manager.show_info_signal.emit(
+        #     #     "  Timeout Error!",
+        #     #     "MFA prompt not detected within the timeout. Assuming no MFA is required or page is different than expected.",
+        #     #     "error"
+        #     # )
+        #     pass
+        # else:
+        #     # from tkinter import messagebox
+        #     # from messages import Messagebox
+        #     # messagebox = Messagebox()
+        #     # messagebox.showerror(
+        #     #     "  Timeout Error!",
+        #     #     "MFA prompt not detected within the timeout. Assuming no MFA is required or page is different than expected.",
+        #     # )
+        #     pass
+        pass
+    
+
+def get_niam_password(user_name: str) -> dict:
+    from dashboard.models import UserManagement
+    user = UserManagement.objects.get(user_name=user_name)
+    return {
+        "username": user.user_name,
+        "password": user.password,
+    }
+
+def login_to_niam(
+    page: Page,
+    user_name: str,
+):
+    __niam_data = get_niam_password(user_name)
+    username = f"{str(__niam_data['username']).strip().upper()}@airtel.com"
+    password = __niam_data['password']
+    
+    while True:
+        page.wait_for_timeout(500)
+        try:
+            # print("page.locator('//input[@id=\"username\"]').is_visible() = {}".format(page.locator('//input[@id=\"username\"]').is_visible()))
+            # if page.locator('//input[@id="username"]').is_visible():
+            #     break
+            if page.locator('//div[text()="Sign in"]').is_visible():
+                break
+        except:
+            pass
+    # print(f"{self.olmid = }")
+    page.wait_for_timeout(500)
+    # page.locator('//input[@id="username"]').fill(self.olmid)
+    page.locator('//input[@id="i0116"]').fill(username)
+
+    # Clicking the Next Button
+    # page.locator('[name="login"]').click()
+    page.locator('//input[@id="idSIButton9"]').click()
+    
+    return password
+
+
+def niam_logger(
+    playwright: Playwright,
+    user_name: str,
+    logs: list = [],
+) -> Tuple[Browser, BrowserContext, Page, list]:
+    selected_path_for_browser = ""
+
+    selected_path_for_browser = get_browser()
+
+    browser = playwright.chromium.launch(
+        executable_path=selected_path_for_browser, headless=False
+    )
+
+    # context = browser.new_context(viewport={"width": 1920, "height": 1080})
+    context = browser.new_context()
+    page = context.new_page()
+
+    try:
+        # page.goto("https://nextgentm-in.sdt.ericsson.net/arsys", wait_until="load")
+        page.goto(
+            "https://airtel.service-now.com/",
+            wait_until="load",
+        )
+
+        # finding the id 'domain' and 'Employee' in the option value
+        # select_element = page.locator("select#domain")
+        # select_element.select_option("Employee")
+        # page.wait_for_selector("//a[@id='loginBtn']")
+        # page.locator(selector="//a[@id='loginBtn']", has_text="Log On").click()
+
+        password = login_to_niam(page, user_name)
+
+        page.wait_for_load_state("load")
+
+        # if page.locator("//span[@class='detail-text error' and text()='Try again after some time or contact your help desk']").is_visible():
+        #     # from tkinter import messagebox
+        #     messagebox.showerror("Error", "Please enter the correct password")
+        #     main_func(workbook=workbook)
+
+        expect(
+            page.get_by_text("Try again after some time or contact your help desk")
+        ).to_be_hidden()
+
+        handle_niam_login(page, context, password, playwright)
+        
+        page.wait_for_timeout(500)
+        page.wait_for_load_state("networkidle")
+
+        while True:
+            page.wait_for_timeout(500)
+            page.wait_for_load_state("networkidle")
+            try:
+                if page.locator(
+                    '//div[@class="row text-title" and text()="Stay signed in?"]'
+                ).is_visible(timeout=3000):
+                    page.locator('//input[@id="idBtn_Back"]').click()
+                    continue
+
+                if page.locator(
+                    '//*[@id="homepage-search"]/div/h2',
+                    has_text="We're Here to Help You.",
+                ).is_visible():
+                    break
+            except:
+                pass
+
+        page.wait_for_timeout(500)
+        page.wait_for_load_state("networkidle")
+        
+    except TimeoutError:
+        exception_returner(playwright, context, browser, page)
+
+    except Exception as e:
+        # from tkinter import messagebox
+
+        if logs:
+            logs.append(
+                f"   Exception Occurred ({e.__class__.__name__})",
+                f"{traceback.format_exc()}\n\n{str(e)}",
+                "error",
+            )
+        # else:
+        #     messagebox = Messagebox()
+        #     messagebox.showerror(
+        #         f"   Exception Occurred ({e.__class__.__name__})",
+        #         f"{traceback.format_exc()}\n\n{str(e)}",
+        #     )
+        exception_returner(playwright, context, browser, page)
+
+    return browser, context, page, logs
+
+
+
+def niam_session_maker(
+    user_name: str,
+    logs: list = [],
+) -> Tuple[bool, None | PathLike, list]:
+    try:
+        with sync_playwright() as playwright:
+            browser, main_context, login_page, logs = niam_logger(
+                playwright,
+                user_name=user_name, logs=logs
+            )
+            session_file = main_context.storage_state(path=str(os.getenv("NIAM_SESSION_FILE")))
+            if main_context:
+                main_context.close()
+                del main_context
+                
+            if browser:
+                browser.close()
+                del browser
+
+            if playwright:
+                playwright.stop()
+                # keyboard.press_and_release("ctrl+c")
+                del playwright
+
+            return True, session_file, logs
+    
+    except Exception as e:
+        if logs:
+            logs.append(
+                f"  Exception Occurred {str(e.__class__.__name__)}",
+                f"{traceback.format_exc()}\n\n{e}",
+                "error",
+            )
+        return False, None, logs
+
+
+def niam_session_breaker(
+):
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            headless=True, executable_path=get_browser()
+        )
+        main_context = browser.new_context(storage_state=str(os.getenv("NIAM_SESSION_FILE")))
+        login_page = main_context.new_page()
+        login_page.goto(
+            "https://airtel.service-now.com/airtel?id=sc_cat_item&sys_id=01caf3ecdbaac30018af9ea3db9619f0",
+            wait_until="load"
+        )
+        login_page.wait_for_timeout(1000)
+        if login_page.locator(
+            "//div/div/nav/div/ul/li/a[@id='profile-dropdown']"
+        ).is_visible():
+            login_page.locator(
+                "//div/div/nav/div/ul/li/a[@id='profile-dropdown']"
+            ).click()
+            login_page.wait_for_timeout(1000)
+        login_page.close()
+
+        if main_context:
+            main_context.close()
+
+        if playwright:
+            playwright.stop()
+            # keyboard.press_and_release("ctrl+c")
+            del playwright
+
+    if Path(os.getenv("NIAM_SESSION_FILE")).exists():
+        Path(os.getenv("NIAM_SESSION_FILE")).unlink()
+
+
+def niam_new_page_opener(
+    context: BrowserContext,
+    logs: list
+):
+    result = None
+    try:
+        if logs:
+            logs.append("Opening a new page....")
+
+        page = context.new_page()
+        
+        result = page
+
+    except Exception as e:
+        if logs:
+            logs.append(
+                f"  Exception Occurred {str(e.__class__.__name__)}",
+                f"{traceback.format_exc()}\n\n{e}",
+                "error",
+            )
+
+    return result, logs
+    
+    
+def send_input_wait_for_result_and_click(page, input_data):
+    page.wait_for_load_state("networkidle")
+    page.wait_for_load_state("domcontentloaded")
+    page.wait_for_load_state("load")
+    # page.wait_for_timeout(500)
+
+    page.wait_for_selector(
+        "//div[contains(@id, 'select2-drop')]//input[contains(@id, 's2id_autogen')]"
+    )
+    if page.locator(
+        "//div[contains(@id, 'select2-drop')]//input[contains(@id, 's2id_autogen')]"
+    ).is_visible():
+        page.locator(
+            "//div[contains(@id, 'select2-drop')]//input[contains(@id, 's2id_autogen')]"
+        ).fill(input_data)
+
+    start = time.time()
+    while True:
+        if page.locator(
+            "//ul[@class='select2-results']/li/div", has_text=input_data
+        ).first.is_visible():
+            page.wait_for_timeout(200)
+            break
+        if time.time() - start > 5:
+            if (
+                page.locator(
+                    "//div[contains(@id, 'select2-drop')]//input[contains(@id, 's2id_autogen')]"
+                ).first.is_visible()
+                and not page.locator(
+                    "//ul[@class='select2-results']/li/div", has_text=input_data
+                ).first.is_visible()
+            ):
+                raise Exception("Time Out")
+    try:
+        # options = page.locator("//ul[@class='select2-results']/li/div")
+        # target_option = options.filter(has_text=re.compile(f"^{re.escape(input_data)}$"))
+        # target_option.first.click()
+        # page.get_by_text(input_data, exact=True).click()
+        page.get_by_role("option", name=input_data, exact=True).click()
+    except Exception:
+        # print(f"Error clicking on input: {e}")
+        try:
+            page.locator(
+            "//ul[@class='select2-results']/li/div", has_text=input_data
+            ).first.click()
+        
+        except Exception as e:
+            raise Exception(
+                "Error clicking on input"
+            )
+    
+
+def niam_locator_finder_and_input_provider(locator_list: List[AnyStr], variable_list: List[AnyStr], page: Page):
+    j = 0
+    while j < len(locator_list):
+        locator = locator_list[j]
+        var = variable_list[j]
+
+        page.wait_for_timeout(800)
+        page.locator(locator).click()
+        page.wait_for_timeout(600)
+        send_input_wait_for_result_and_click(page, var)
+        j += 1
+        
+        
+def wait_for_niam_ne_search_results(page: Page, results_list: Locator, timeout_ms: int = 15000) -> list:
+    deadline = time.monotonic() + (timeout_ms / 1000)
+    while time.monotonic() < deadline:
+        items = results_list.all()
+        if items:
+            first_text = items[0].inner_text().strip()
+            # Skip transient states
+            if first_text and first_text not in ('Searching...', 'Searching…', 'Loading...'):
+                return items
+        page.wait_for_timeout(200)
+    # timeout — return whatever we have (may be empty / still searching)
+    return results_list.all()
+
+
+def search_niam_ne_node(page: Page, search_input: Locator, results_list: Locator, query: str) -> list:
+    search_input.fill(query)
+    return wait_for_niam_ne_search_results(page, results_list)  # ← UNCOMMENT THIS
+
+
+# ✅ SAFE — reads all text in a single JS call, no stale refs
+def get_dropdown_texts(results_list) -> list[str]:
+    try:
+        texts = results_list.evaluate_all(
+            "items => items.map(el => el.innerText.trim()).filter(t => t.length > 0)"
+        )
+        return texts
+    except Exception:
+        return []
+
+
+def niam_tt_raiser(
+    row_dict: Dict[AnyStr, AnyStr],
+    page: Page,
+) -> Tuple[AnyStr, AnyStr, Union[List[AnyStr], None], Dict[AnyStr, AnyStr]]:
+    cr = row_dict['SR OR CHANGE NO']
+    node_names = row_dict['NIAM Node Name']
+    
+    result = {}
+    
+    Requested_For_email = row_dict["Requested For(email)"]
+    Request_Type = row_dict["Request Type"]
+
+    Request_For = row_dict["Request For"]
+    Node_Managed_By = row_dict["Node Managed By"]
+    Subtype = row_dict["Subtype"]
+
+    Domain = row_dict["Domain"]
+
+    Access_Type = str(row_dict["Access Type"])
+
+    UID_Type = row_dict["UID Type"]
+
+    Policy_period = row_dict["Policy period"]
+
+    User_Type = row_dict["User Type"]
+
+    Request_IP_10 = row_dict["Request IP>10 ?"]
+
+    SR_CR_Start_Date_Time = str(
+        row_dict["SR_CR_Start Date-Time"]
+    )
+    SR_CR_End_Date_Time = str(row_dict["SR_CR_End Date-Time"])
+
+    # NIAM_Access_Start_Date_Time = str(
+    #     row_dict["NIAM Access Start Date"]
+    # )
+    # NIAM_Access_End_Date_Time = str(
+    #     row_dict["NIAM Access END Date"]
+    # )
+    
+    Business_Justification = row_dict["Business Justification"]
+    NIAM_Activity_Name = row_dict["Activity Name"]
+    NIAM_Project_Name = row_dict["Project Name"]
+    Execution_Location = row_dict["Execution Location"]
+    
+    loop_break = False
+    
+    first_locator_batch = [
+        "//div[@id='s2id_sp_formfield_v_request_type']/a",  # Request Type
+        "//div[@id='s2id_sp_formfield_node_managed_by']/a",  # Node Managed By
+        "//div[@id='s2id_sp_formfield_niam_domain']/a",  # Domain
+    ]
+    
+    second_locator_batch = [
+        "//div[@id='s2id_sp_formfield_access_type']/a",  # Access Type
+        "//div[@id='s2id_sp_formfield_request_ip_more_than']/a",  # Request IP > 10?
+    ]
+    
+    first_locator_batch_variable_list = [
+        Request_Type,
+        Node_Managed_By,
+        Domain,
+    ]
+    
+    third_locator_batch =[
+        "//div[@id='s2id_sp_formfield_v_request_for']/a",  # Request For
+        "//div[@id='s2id_sp_formfield_v_subtype']/a",  # Subtype
+        "//div[@id='s2id_sp_formfield_v_uid_type']/a",  # UID Type
+        "//div[@id='s2id_sp_formfield_execution_location']/a",  # Execution Location
+        "//div[@id='s2id_sp_formfield_policy_period']/a",  # Policy period
+        "//div[@id='s2id_sp_formfield_project_name']/a",  # Project Name
+        "//div[@id='s2id_sp_formfield_user_type']/a",  # User Type
+        "//div[@id='s2id_sp_formfield_activity_name']/a",  # Activity Name
+    ]
+    
+    third_locator_batch_variable_list = [
+        Request_For,
+        Subtype,
+        UID_Type,
+        Execution_Location,
+        Policy_period,
+        NIAM_Project_Name,
+        User_Type,
+        NIAM_Activity_Name,
+    ]
+    
+    output_dict = {
+        "Activity Title": str(row_dict["Activity Title"]),
+        "Circle": User_Type,
+        "Change Responsible": Requested_For_email,
+        "Request For": Request_For,
+        "Activity Name": NIAM_Activity_Name,
+        "Project Name": NIAM_Project_Name,
+        "Execution Location": Execution_Location,
+        "Execution Date": str(SR_CR_Start_Date_Time)
+    }
+    
+    Access_Type_List = [str(element).strip() for element in Access_Type.split('and')]
+    
+    i = 0
+    while i < len(Access_Type_List):
+        try:
+            if not loop_break:
+                # Login to the NIAM TT Page
+                page.goto(
+                    "https://airtel.service-now.com/airtel?id=sc_cat_item&sys_id=01caf3ecdbaac30018af9ea3db9619f0",
+                        wait_until="load",
+                )
+                
+                page.wait_for_load_state("domcontentloaded")
+                page.wait_for_load_state("load")
+                page.on("dialog", lambda dialog: dialog.dismiss())
+                
+                # Request For (Email)
+                page.locator(
+                    "//div[@id='s2id_sp_formfield_requested_for']/a"
+                ).click()
+                
+                page.locator(
+                            "//div[contains(@id, 'select2-drop')]//input[contains(@id, 's2id_autogen')]"
+                        ).fill(Requested_For_email)
+                
+                while (
+                        len(
+                            page.locator("//ul[@class='select2-results']/li/div").all()
+                        )
+                        > 1
+                    ):
+                        page.wait_for_timeout(1000)
+                page.wait_for_timeout(1000)
+
+                page.locator("//ul[@class='select2-results']/li/div").click()
+                
+                # if condition for M2M 4G Network Optimization to add location
+                if (
+                    str(Requested_For_email).strip()
+                    == "M2M 4G Network Optimization"
+                ):
+                    page.locator(
+                        "//div[@id='s2id_sp_formfield_current_location']/a"
+                    ).click()
+
+                    # page.wait_for_timeout(1000)
+                    page.wait_for_timeout(500)
+                    page.locator(
+                        "//div[contains(@id, 'select2-drop')]//input[contains(@id, 's2id_autogen')]"
+                    ).fill("Noida")
+                    page.wait_for_timeout(500)
+
+                    if (
+                        len(
+                            page.locator(
+                                "//ul[@class='select2-results']/li/div"
+                            ).all()
+                        )
+                        > 0
+                    ):
+                        if (
+                            len(
+                                page.locator(
+                                    "//ul[@class='select2-results']/li/div/*[text()='Noida']"
+                                ).all()
+                            )
+                            > 0
+                        ):
+                            for element in page.locator(
+                                "//ul[@class='select2-results']/li/div/*[text()='Noida']"
+                            ).all():
+                                element.click()
+                                break
+                
+                niam_locator_finder_and_input_provider(
+                    first_locator_batch, 
+                    first_locator_batch_variable_list, 
+                    page
+                )
+                
+                niam_locator_finder_and_input_provider(
+                    second_locator_batch, 
+                    [
+                        Access_Type_List[i],
+                        Request_IP_10,
+                    ],
+                    page
+                )
+                
+                node_names_list = [str(element).strip() for element in str(node_names).split('\n')]
+                
+                ne_field_opener = page.locator('//div[@id="select2-drop"]/ul')  # ← adjust if needed
+                search_input = page.locator('//input[@id="s2id_autogen34"]')
+                results_list = page.locator('//ul[@id="s2id_autogen34_results"]/li')
+
+                loop_break = False
+
+                for name in node_names_list:
+                    selected_node = f"*{name}"
+                    clicked_texts = set()
+                    consecutive_failures = 0
+                    MAX_FAILURES = 3
+                    iteration = 0
+                    MAX_ITERATIONS = 50  # hard cap — never loop more than 50 times per node
+
+                    while iteration < MAX_ITERATIONS:
+                        iteration += 1
+                        # print(f"\n--- [{name}] iteration {iteration} ---")
+
+                        # ===== STEP 1: Open the dropdown =====
+                        try:
+                            if not search_input.is_visible(timeout=1000):
+                                ne_field_opener.click()
+                                page.wait_for_timeout(400)
+                        except Exception:
+                            try:
+                                ne_field_opener.click()
+                                page.wait_for_timeout(400)
+                            except Exception as e:
+                                # print(f"[{name}] cannot open dropdown: {e}")
+                                consecutive_failures += 1
+                                if consecutive_failures >= MAX_FAILURES:
+                                    break
+                                continue
+
+                        # ===== STEP 2: Type the search query =====
+                        try:
+                            search_input.fill("")
+                            page.wait_for_timeout(150)
+                            search_input.fill(selected_node)
+                        except Exception as e:
+                            # print(f"[{name}] cannot fill search: {e}")
+                            consecutive_failures += 1
+                            if consecutive_failures >= MAX_FAILURES:
+                                break
+                            continue
+
+                        # ===== STEP 3: Wait for AJAX to settle =====
+                        ajax_done = False
+                        ajax_deadline = time.monotonic() + 10  # 10s max
+                        while time.monotonic() < ajax_deadline:
+                            page.wait_for_timeout(200)
+                            texts = get_dropdown_texts(results_list)
+                            if not texts:
+                                continue
+                            first_text = texts[0]
+                            if first_text and first_text not in ('Searching...', 'Searching…', 'Loading...'):
+                                ajax_done = True
+                                break
+
+                        if not ajax_done:
+                            # print(f"[{name}] AJAX never settled")
+                            consecutive_failures += 1
+                            if consecutive_failures >= MAX_FAILURES:
+                                break
+                            continue
+
+                        # ===== STEP 4: Read all options IN ONE JS CALL =====
+                        all_texts = get_dropdown_texts(results_list)
+                        # print(f"[{name}] options visible: {all_texts}")
+
+                        # ===== STEP 5: Decide what to do =====
+                        # Case A: dropdown shows "No matches found"
+                        if all_texts == ['No matches found']:
+                            if not clicked_texts:
+                                # Never clicked anything → node truly missing
+                                # print(f"[{name}] NOT FOUND in DB")
+                                loop_break = True
+                            # else:
+                            #     # Already clicked some → exhausted matches
+                            #     print(f"[{name}] all {len(clicked_texts)} matches clicked")
+                            break
+
+                        # Case B: find first option not yet clicked
+                        target = None
+                        for t in all_texts:
+                            if t == 'No matches found':
+                                continue
+                            if t not in clicked_texts:
+                                target = t
+                                break
+
+                        if target is None:
+                            # Every visible option already clicked → done
+                            # print(f"[{name}] no new options ({len(clicked_texts)} clicked total)")
+                            break
+
+                        # ===== STEP 6: Click it =====
+                        try:
+                            page.get_by_role('option', name=target, exact=True).click(timeout=5000)
+                            clicked_texts.add(target)
+                            consecutive_failures = 0
+                            page.wait_for_timeout(400)
+                            # print(f"[{name}] ✓ clicked: {target}")
+                        except Exception as e:
+                            # print(f"[{name}] click failed for {target!r}: {e}")
+                            consecutive_failures += 1
+                            if consecutive_failures >= MAX_FAILURES:
+                                break
+
+                    if iteration >= MAX_ITERATIONS:
+                        # print(f"[{name}] hit iteration cap — bailing")
+                        loop_break = True
+
+                    if loop_break:
+                        break
+
+                if loop_break:
+                    raise Exception(f"Node selection failed for: {name}")
+                
+                # === END OF NODE SELECTION LOOP ===
+
+                # 1. Close dropdown
+                try:
+                    search_input.press("Escape")
+                    page.wait_for_timeout(200)
+                except Exception:
+                    # 2. Tab away from the field
+                    try:
+                        search_input.press("Tab")
+                        page.wait_for_timeout(300)
+                    except Exception:
+                        # 3. Click neutral area to fully defocus
+                        try:
+                            page.locator("//body").click(position={"x": 10, "y": 10})
+                            page.wait_for_timeout(300)
+                        except Exception:
+                            pass
+
+                # print("[node select] \u2705 Select2 field released. Proceeding to next field.")
+
+                
+                niam_locator_finder_and_input_provider(
+                    third_locator_batch, 
+                    third_locator_batch_variable_list, 
+                    page
+                )
+                
+                # CR No
+                # page.locator('/html/body/div[1]/section/main/div[1]/div/sp-page-row/div/div/span[1]/div/div/div/div[2]/div/div[3]/sp-cat-item/form/div[1]/div/sp-variable-layout/div[4]/div/div[1]/div[25]/div/span/span/input').fill(cr)
+                page.locator('[id="sp_formfield_sr_or_change_no"]').fill(cr)
+                # page.wait_for_timeout(1000)
+
+                # Start Date-Time
+                page.locator('[id="sp_formfield_sr_cr_start_date"]').fill(
+                    SR_CR_Start_Date_Time
+                )
+                page.keyboard.press("Enter")
+                
+                # End Date-Time
+                page.locator('[id="sp_formfield_sr_cr_end_date"]').fill(
+                    SR_CR_End_Date_Time
+                )
+                
+                # Business Justification
+                page.locator('[id="sp_formfield_v_business_justification"]').fill(
+                    Business_Justification
+                )
+                
+                # Submitting the Ticket
+                
+                # page.wait_for_timeout(1000)
+                # page.locator('//*[text()="Submit"]').click()
+                # while True:
+                #     page.wait_for_timeout(500)
+                #     page.wait_for_load_state("networkidle")
+                #     try:
+                #         if page.locator('//*[text()="Submitted"]').is_visible():
+                #             # print("NIAM_Playwright Line 466")
+                #             break
+                #     except Exception:
+                #         pass
+                    
+                # page.wait_for_timeout(1000)
+
+                # page.goto(
+                #     "https://airtel.service-now.com/airtel?id=requests_lists&table=sc_req_item"
+                # )
+                # page.wait_for_load_state("networkidle")
+                # page.wait_for_timeout(500)
+
+                # table = page.locator(
+                #     '//section/main/div/div/sp-page-row/div/div/div/sp-page-row/div/div/span/div/div/div/div/div/div[2]/table/tbody/tr/td[@role="text"]'
+                # ).all()
+                # ritm = ""
+                # if len(table) > 0:
+                #     ritm = table[0].text_content().strip()
+                #     result.append(ritm)
+                result[Access_Type_List[i]] = "Success"
+            else:
+                result[Access_Type_List[i]] = "Failure"
+                break
+        
+        except Exception:
+            result[Access_Type_List[i]] = "Failure"
+        i += 1
+    
+    return cr,node_names,result, output_dict
+

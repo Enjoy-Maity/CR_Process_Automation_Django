@@ -8,7 +8,13 @@ from django.db import transaction
 from dashboard.models import (
     CRWiseStatus, 
     UserManagement, 
-    NIAMCircleTable
+    NIAMCircleTable,
+    NIAMProjectNameTable,
+    NIAMRequestForTable,
+    NIAMAccessTypeTable,
+    NIAMActivityNameTable,
+    NiamDomainsTable,
+    NIAMTicketGenerationTable,
 )
 from rest_framework.exceptions import APIException
 from rest_framework import status
@@ -74,6 +80,44 @@ NIAM_DATETIME_FIELDS = {
 # Duplicate-prevention / update key for a NIAM input template row. A single CR
 # produces one row per node, so (execution_date, CR number, node name) is unique.
 NIAM_UPSERT_KEY_FIELDS = ("execution_date", "sr_or_change_number", "node_name")
+
+# ---------------------------------------------------------------------------
+# NIAM Template Database editable columns
+# ---------------------------------------------------------------------------
+# The seven RITM_INPUT columns a user fills in on the NIAM Template Database
+# page. Each renders as a dropdown; on Save the chosen values are written back
+# to both NIAMTicketGenerationTable and the dated RITM workbook. All seven must
+# be filled before a row can be saved.
+NIAM_EDITABLE_FIELDS = (
+    "request_ip",
+    "requested_for_email",
+    "activity_name",
+    "project_name",
+    "request_for",
+    "domain",
+    "access_type",
+)
+
+# Reference table/field that supplies the allowed values for the five "list"
+# editable columns (the ones the generated workbook validates with Excel
+# data-validation dropdowns).
+NIAM_DROPDOWN_SOURCES = {
+    "project_name": (NIAMProjectNameTable, "project_name"),
+    "activity_name": (NIAMActivityNameTable, "activity_name"),
+    "access_type": (NIAMAccessTypeTable, "access_type"),
+    "request_for": (NIAMRequestForTable, "request_for"),
+    "domain": (NiamDomainsTable, "domain"),
+}
+
+# Editable columns whose options are fixed rather than table-driven.
+NIAM_STATIC_DROPDOWN_OPTIONS = {
+    "request_ip": ("Yes", "No"),
+}
+
+# Reverse of NIAM_COLUMN_TO_FIELD_MAPPING: model field -> RITM workbook header.
+NIAM_FIELD_TO_COLUMN = {
+    field: column for column, field in NIAM_COLUMN_TO_FIELD_MAPPING.items()
+}
 
 
 class CustomThread(Thread):
@@ -324,8 +368,8 @@ def niam_circle_df_maker() -> pd.DataFrame:
     """
     # niam_circle_data = pd.DataFrame(niam_circle_data)
     # print(niam_circle_data.columns)
-    niam_circle_data = NIAMCircleTable.objects.all()
-    df = pd.DataFrame(niam_circle_data)
+    niam_circle_records = list(NIAMCircleTable.objects.all().values())
+    df = pd.DataFrame(niam_circle_records)
     df = df.rename(columns=settings.DB_TO_NIAM_CIRCLE_COLUMNS_MAPPING)
     # df = read_frame(niam_circle_data).rename(columns=settings.DB_TO_PL_COLUMNS_MAPPING)
 
@@ -353,10 +397,101 @@ def user_email_df_maker() -> pd.DataFrame:
     Returns:
         pd.DataFrame: A pandas DataFrame with the user_email_data.
     """
+    # pandas >= 3 no longer expands a QuerySet of model instances into columns,
+    # so materialise the row dicts explicitly.
     user_email_data = UserManagement.objects.all()
-    df = pd.DataFrame(user_email_data)
+    df = pd.DataFrame(list(user_email_data.values()))
     # df = df.rename(columns=settings.DB_TO_PL_COLUMNS_MAPPING)
     return df
+
+
+def _clean_option_values(values) -> list:
+    """Normalise a column of option values: strip, drop blanks/NaN, de-dupe."""
+    options = []
+    for value in values:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if not text or text.lower() in ("nan", "none"):
+            continue
+        if text not in options:
+            options.append(text)
+    return options
+
+
+def niam_dropdown_options() -> dict:
+    """
+    Allowed values for every editable NIAM column, keyed by model field.
+
+    Used both to populate the page dropdowns and to validate saved values.
+    """
+    options = {}
+    for field, (model, source_field) in NIAM_DROPDOWN_SOURCES.items():
+        options[field] = _clean_option_values(
+            model.objects.values_list(source_field, flat=True)
+        )
+    for field, values in NIAM_STATIC_DROPDOWN_OPTIONS.items():
+        options[field] = list(values)
+    options["requested_for_email"] = _clean_option_values(
+        UserManagement.objects.filter(is_active=True)
+        .exclude(email__isnull=True)
+        .exclude(email__exact="")
+        .values_list("email", flat=True)
+    )
+    return options
+
+
+def mail_id_worksheet_df_maker() -> pd.DataFrame:
+    """
+    Build the hidden "Mail_ID_Worksheet" source frame for a RITM workbook.
+
+    It backs (a) the Change Responsible -> Mail ID lookup used for the requester
+    email, (b) the Circle -> NIAM Circle -> NIAM Circle Name mapping used for the
+    "User Type" column, and (c) the five dropdown lists the RITM_INPUT sheet
+    validates against. The columns have different lengths, so shorter ones are
+    padded with None to keep the sheet rectangular.
+    """
+    change_responsible, mail_ids = [], []
+    for name, email in (
+        UserManagement.objects.filter(is_active=True)
+        .exclude(email__isnull=True)
+        .exclude(email__exact="")
+        .values_list("employee_name", "email")
+        .order_by("employee_name")
+    ):
+        name = (name or "").strip()
+        email = (email or "").strip()
+        if name and email:
+            change_responsible.append(name)
+            mail_ids.append(email)
+
+    circle, niam_circles, circle_names = [], [], []
+    for circ, niam_circ, circ_name in (
+        NIAMCircleTable.objects.values_list("circle", "niam_circles", "circle_name")
+        .order_by("sno")
+    ):
+        circle.append((circ or "").strip())
+        niam_circles.append((niam_circ or "").strip())
+        circle_names.append((circ_name or "").strip())
+
+    columns = {
+        "Change Responsible": change_responsible,
+        "Mail ID": mail_ids,
+        "Circle": circle,
+        "NIAM Circles": niam_circles,
+        "NIAM Circle Name": circle_names,
+    }
+    for field, (model, source_field) in NIAM_DROPDOWN_SOURCES.items():
+        columns[NIAM_FIELD_TO_COLUMN[field]] = _clean_option_values(
+            model.objects.values_list(source_field, flat=True)
+        )
+
+    height = max((len(values) for values in columns.values()), default=0)
+    framed = {
+        name: values + [None] * (height - len(values))
+        for name, values in columns.items()
+    }
+    return pd.DataFrame(framed, columns=list(columns.keys()))
 
 def _niam_clean_value(field_name: str, value):
     """

@@ -1,5 +1,5 @@
 import os
-import queue
+import re
 import time
 import traceback
 import subprocess
@@ -13,6 +13,9 @@ from playwright.sync_api import sync_playwright
 from typing import AnyStr, List, Union, Tuple
 from queue import Queue
 import dateutil.parser as dp
+from openpyxl import load_workbook
+from openpyxl.worksheet.datavalidation import DataValidation
+from openpyxl.utils import column_index_from_string, get_column_letter
 from dashboard.views import _timestamp
 from dashboard.exceptions import NotFoundException, ValidationException
 from dashboard.models import SelectedDateTable, MasterCRDatabase
@@ -20,12 +23,16 @@ from django.conf import settings
 from django.http import JsonResponse
 from django.db import transaction
 from dashboard.utils.file_locks import file_lock
+from dashboard.task_modules.dependencies.excel_modifier import ExcelModifier
 from dashboard.task_modules.dependencies.extra_dependencies import (
     selected_date_df_maker, 
     cr_wise_status_df_maker,
     _norm_series,
-    user_email_df_maker,
-    niam_data_updater
+    niam_circle_df_maker,
+    mail_id_worksheet_df_maker,
+    niam_data_updater,
+    NIAM_DROPDOWN_SOURCES,
+    NIAM_FIELD_TO_COLUMN,
 )
 
 
@@ -41,6 +48,51 @@ def niam_workbook_path_for(date_: datetime) -> Path:
         date_.strftime("%d_%b_%Y"),
         f"RITM Input_PS_Core_{date_.strftime('%d_%b_%Y')}.xlsx",
     )
+
+
+def get_max_row_in_column(worksheet, column_index: int) -> int:
+    """Return the last row holding a value in the given 1-based column."""
+    last_row = 1
+    for row in range(1, worksheet.max_row + 1):
+        if worksheet.cell(row=row, column=column_index).value not in (None, ""):
+            last_row = row
+    return last_row
+
+
+def node_names_checker(node_type_var_list, node_names):
+    """
+    Decide which NIAM node rows to create for a single CR.
+
+    The helper used by the legacy automation script was never committed to this
+    repository, so this is a faithful-contract stand-in: it returns
+    ``(ok, node_names)`` where ``node_names`` is the list of individual node
+    names to raise a NIAM row for, applying the safest defensible behaviour:
+
+      * a CR is only eligible when a NIAM Node Type is present, and
+      * every non-empty entry of "Node Details" becomes one node row,
+        de-duplicated while preserving order.
+
+    Swap in the canonical implementation if/when it becomes available.
+    """
+    types = [
+        str(t).strip()
+        for t in (node_type_var_list or [])
+        if str(t).strip() and str(t).strip().lower() not in ("nan", "none")
+    ]
+    if not types:
+        return False, []
+
+    cleaned = []
+    for name in node_names or []:
+        text = str(name).strip()
+        if not text or text.lower() in ("nan", "none"):
+            continue
+        if text not in cleaned:
+            cleaned.append(text)
+
+    if not cleaned:
+        return False, []
+    return True, cleaned
 
 
 def niam_workbook_template_maker(df: pd.DataFrame, mail_id_worksheet_df: pd.DataFrame, date_: datetime):
@@ -65,66 +117,42 @@ def niam_workbook_template_maker(df: pd.DataFrame, mail_id_worksheet_df: pd.Data
     mail_id_worksheet = wkbk[mail_id_sheetname]
     mail_id_worksheet.sheet_state = "hidden"
     
-    project_name_range = f"'{mail_id_sheetname}'!$R$2:$R${get_max_row_in_column(mail_id_worksheet, column_index_from_string('R'))}"
-    activity_name_range = f"'{mail_id_sheetname}'!$S$2:$S${get_max_row_in_column(mail_id_worksheet, column_index_from_string('S'))}"
-    access_type_range = f"'{mail_id_sheetname}'!$T$2:$T${get_max_row_in_column(mail_id_worksheet, column_index_from_string('T'))}"
-    request_for_range = f"'{mail_id_sheetname}'!$U$2:$U${get_max_row_in_column(mail_id_worksheet, column_index_from_string('U'))}"
-    domain_range = f"'{mail_id_sheetname}'!$V$2:$V${get_max_row_in_column(mail_id_worksheet, column_index_from_string('V'))}"
-    
-    dv1=DataValidation(
-        type="list",
-        formula1=project_name_range,
-        allow_blank=True,
-        error="Select from list only",
-        errorTitle="Invalid Option"
-    )
-    
-    dv2=DataValidation(
-        type="list",
-        formula1=activity_name_range,
-        allow_blank=True,
-        error="Select from list only",
-        errorTitle="Invalid Option"
-    )
-    
-    dv3=DataValidation(
-        type="list",
-        formula1=access_type_range,
-        allow_blank=True,
-        error="Select from list only",
-        errorTitle="Invalid Option"
-    )
-    
-    dv4=DataValidation(
-        type="list",
-        formula1=request_for_range,
-        allow_blank=True,
-        error="Select from list only",
-        errorTitle="Invalid Option"
-    )
-    
-    dv5=DataValidation(
-        type="list",
-        formula1=domain_range,
-        allow_blank=True,
-        error="Select from list only",
-        errorTitle="Invalid Option"
-    )
-    
-    input_worksheet.add_data_validation(dv1)
-    input_worksheet.add_data_validation(dv2)
-    input_worksheet.add_data_validation(dv3)
-    input_worksheet.add_data_validation(dv4)
-    input_worksheet.add_data_validation(dv5)
-    
+    project_name_range = None  # placeholder replaced below by dynamic ranges
+
+    # The five dropdown lists live in the hidden Mail_ID_Worksheet sheet. Build
+    # each validation range from the actual position of its list column in the
+    # sheet (and target the matching RITM_INPUT column), so the layout of the
+    # generated sheet is free to change without silently breaking the dropdowns.
     max_row = input_worksheet.max_row
-    
-    dv1.add(f"U2:U{max_row}")
-    dv2.add(f"T2:T{max_row}")
-    dv3.add(f"X2:X{max_row}")
-    dv4.add(f"V2:V{max_row}")
-    dv5.add(f"W2:W{max_row}")
-    
+    input_columns = list(df.columns)
+    list_columns = list(mail_id_worksheet_df.columns)
+
+    for field in NIAM_DROPDOWN_SOURCES:
+        col_name = NIAM_FIELD_TO_COLUMN[field]
+        if col_name not in input_columns or col_name not in list_columns:
+            continue
+
+        target_letter = get_column_letter(input_columns.index(col_name) + 1)
+        source_letter = get_column_letter(list_columns.index(col_name) + 1)
+        source_last_row = get_max_row_in_column(
+            mail_id_worksheet, column_index_from_string(source_letter)
+        )
+        if source_last_row < 2:
+            continue
+
+        dv = DataValidation(
+            type="list",
+            formula1=(
+                f"'{mail_id_sheetname}'!"
+                f"${source_letter}$2:${source_letter}${source_last_row}"
+            ),
+            allow_blank=True,
+            error="Select from list only",
+            errorTitle="Invalid Option",
+        )
+        input_worksheet.add_data_validation(dv)
+        dv.add(f"{target_letter}2:{target_letter}{max_row}")
+
     wkbk.save(str(niam_workbook_path))
     wkbk.close()
     del wkbk
@@ -253,7 +281,7 @@ def niam_input_initiator(
             
             node_type_var_list = [str(element).strip() for element in node_type_var.split(",")]
             node_names = re.sub(r",", "", selected_cr_df.iloc[0, node_details_index])
-            node_names = [str(element).strip() for element in re.split("\n", node_names)]
+            node_names = [str(element).strip() for element in re.split("\n", node_names) if len(str(element).strip())> 0]
             # print(f"{cr = }\n{node_type_var = }\n{node_type_var_list = }\n{node_names = }\n")
             
             bool_result, node_names_list = node_names_checker(node_type_var_list, node_names)
@@ -445,18 +473,24 @@ def niam_input_initiator(
 # The "Fetch CRs" task (NIAM Template Database "Fetch CR" button). Kept aligned
 # with views.FETCH_CRS_TASK_ID so this module can serve both NIAM flows:
 #   id 7 = full NIAM Ticket Generation (run_task below)
-#   id 8 = Fetch CRs (fetch_crs_for_date) — date validation + SelectedDateTable
-#          rebuild for the selected date.
+#   id 8 = Fetch CRs — validate/rebuild SelectedDateTable for the selected
+#          night's execution date and then build the NIAM input (generate_niam_input)
+#          so the page can display the Input sheet straight away.
 FETCH_CRS_TASK_ID = 8
 
 
 def fetch_crs_for_date(selected_date, GLOBAL_LOGS, timestamp_fn, runtime=None):
-    """Validate the selected date and (re)build that date's SelectedDateTable.
+    """Validate the selected (night) date and (re)build that night's CRs.
 
-    - No date          -> ValidationException ("Missing Date")
-    - Date has no CRs  -> NotFoundException ("No Data")
-    - Otherwise        -> scoped rebuild of SelectedDateTable from the active
-                          MasterCRDatabase rows for that date.
+    The app-wide convention is that the date picked in the UI is the *night*
+    date: the CRs execute on the following day (execution_date = picked + 1),
+    which is the window the NIAM access (22:00 -> 08:00) belongs to. This
+    matches every other task module and ``filter_region_crs``.
+
+    - No date           -> ValidationException ("Missing Date")
+    - No CRs that night -> NotFoundException ("No Data")
+    - Otherwise         -> scoped rebuild of SelectedDateTable for the execution
+                           date from the active MasterCRDatabase rows.
 
     The synchronous presence gate in start_task surfaces those errors to the
     page as dialogs before this runs; this function is the task-side job.
@@ -468,40 +502,42 @@ def fetch_crs_for_date(selected_date, GLOBAL_LOGS, timestamp_fn, runtime=None):
         )
 
     try:
-        parsed_date = dp.parse(selected_date).date()
+        picked_date = dp.parse(selected_date).date()
     except (ValueError, TypeError):
         raise ValidationException(
             "Invalid date format. Use YYYY-MM-DD.",
             title="Invalid Date Format",
         )
 
+    execution_date = picked_date + timedelta(days=1)
+
     GLOBAL_LOGS.append(
-        f"Fetch CRs: validating date {parsed_date.isoformat()} ---- {timestamp_fn()}"
+        f"Fetch CRs: night {picked_date.isoformat()} -> execution "
+        f"{execution_date.isoformat()} ---- {timestamp_fn()}"
     )
 
     in_selected = SelectedDateTable.objects.filter(
-        execution_date=parsed_date, is_active=True
+        execution_date=execution_date, is_active=True
     ).exists()
     in_master = MasterCRDatabase.objects.filter(
-        execution_date=parsed_date, is_active=True
+        execution_date=execution_date, is_active=True
     ).exists()
 
     if not (in_selected or in_master):
         raise NotFoundException(
-            f"No CR found for the selected date {parsed_date}. CRs must exist "
-            "in MasterCRDatabase / SelectedDateTable before fetching the NIAM "
-            "template data.",
+            f"No CR found for the selected date {picked_date} (CRs execute on "
+            f"{execution_date}).",
             title="No Data",
         )
 
     fields = settings.SELECTED_DATE_TABLE_FIELDS
     source = list(
         MasterCRDatabase.objects.filter(
-            execution_date=parsed_date, is_active=True
+            execution_date=execution_date, is_active=True
         ).values(*fields)
     )
 
-    # Scoped rebuild: only the selected date's rows are replaced; every other
+    # Scoped rebuild: only the execution date's rows are replaced; every other
     # date's SelectedDateTable data is left untouched. The date's existing rows
     # (active + legacy CoW versions) are replaced atomically with fresh rows
     # built from the active MasterCRDatabase versions.
@@ -512,7 +548,7 @@ def fetch_crs_for_date(selected_date, GLOBAL_LOGS, timestamp_fn, runtime=None):
     # fresh ids avoids primary-key collisions (selected_date_table_pkey).
     with transaction.atomic(using="default"):
         SelectedDateTable.objects.using("default").filter(
-            execution_date=parsed_date
+            execution_date=execution_date
         ).delete()
         if source:
             valid_fields = {f.name for f in SelectedDateTable._meta.get_fields()}
@@ -527,98 +563,81 @@ def fetch_crs_for_date(selected_date, GLOBAL_LOGS, timestamp_fn, runtime=None):
     if runtime is not None:
         runtime["total_crs"] = len(source)
 
-    message = f"{len(source)} CR(s) found for {parsed_date}."
+    message = (
+        f"{len(source)} CR(s) found for {picked_date} (execute {execution_date})."
+    )
     GLOBAL_LOGS.append(f"Fetch CRs: {message} ---- {timestamp_fn()}")
     return {
         "status": "Completed",
         "download_ready": False,
         "message": message,
-        "counts": {"total_crs": len(source)},
+        "counts": {"total_crs": len(source), "execution_date": execution_date.isoformat()},
     }
 
 
-def run_task(
-    request, 
-    task, 
-    runtime, 
-    GLOBAL_LOGS=None, 
-    timestamp_fn=None, 
-    selected_date=None, 
-    user_email=None, 
-    user_name=None, 
-    regions=None
-):
-    global glogs
+def generate_niam_input(night_date, GLOBAL_LOGS=None, timestamp_fn=None, runtime=None):
+    """
+    Build the NIAM input template for the night date ``night_date`` and:
+
+      * upsert one row per CR per node into NIAMTicketGenerationTable, and
+      * (re)write the dated RITM workbook
+        (RITM Input_PS_Core_<night_date>.xlsx).
+
+    The CRs are read from SelectedDateTable for the execution date
+    (``night_date`` + 1), matching the rest of the app. This is the single
+    implementation shared by the "NIAM Ticket Generator" task (id 7) and the
+    NIAM page's "Fetch CR" task (id 8), so both produce an identical Input
+    sheet.
+
+    Returns a dict in the same shape the task runner expects
+    (``status`` / ``download_ready`` / ``message`` / optional ``download_name``).
+    """
     GLOBAL_LOGS = GLOBAL_LOGS or []
     timestamp_fn = timestamp_fn or _timestamp
 
-    # Fetch CRs (task id 8, NIAM page "Fetch CR" button) is handled here so the
-    # whole NIAM flow (fetch -> validate -> load -> ticket generation) shares
-    # this single module.
-    if task.get("id") == FETCH_CRS_TASK_ID:
-        return fetch_crs_for_date(
-            selected_date=selected_date,
-            GLOBAL_LOGS=GLOBAL_LOGS,
-            timestamp_fn=timestamp_fn,
-            runtime=runtime,
+    parsed_date = night_date
+    if isinstance(parsed_date, str):
+        parsed_date = dp.parse(parsed_date)
+    if not isinstance(parsed_date, datetime):
+        parsed_date = datetime.combine(parsed_date, datetime.min.time())
+
+    execution_date = (parsed_date + timedelta(days=1)).date()
+    label = f"{parsed_date.date()}"
+
+    empty_result = {
+        "status": "Completed",
+        "download_ready": False,
+        "message": f"No NIAM tickets were required for {label}.",
+    }
+
+    selected_date_data = list(
+        SelectedDateTable.objects.filter(
+            execution_date=execution_date, is_active=True
+        ).values(*settings.SELECTED_DATE_TABLE_FIELDS)
+    )
+
+    if not selected_date_data:
+        GLOBAL_LOGS.append(
+            f"NIAM: no CRs in SelectedDateTable for execution {execution_date} "
+            f"---- {timestamp_fn()}"
         )
+        return empty_result
 
-    runtime["status"] = "Running"
-    runtime["download_ready"] = False
-    
-    # Password fields (new)
-    runtime["password_required"] = False
-    runtime["password"] = None
-    runtime["pwd_event"] = Event()
+    selected_data_df = selected_date_df_maker(selected_date_data)
+    if selected_data_df is None or selected_data_df.empty:
+        return empty_result
 
-    # OTP fields (existing)
-    runtime["otp_required"] = False
-    runtime["otp"] = None
-    runtime["otp_event"] = Event()
-
-    parsed_date = dp.parse(selected_date)
-
-    selected_data_df = pd.DataFrame()
-
-    selected_date_data = SelectedDateTable.objects.filter(execution_date=parsed_date + timedelta(days=1), is_active=True).values(*settings.SELECTED_DATE_TABLE_FIELDS)
-    
-    # print(selected_date_data)
-    
-    if selected_date_data:
-        selected_data_df = selected_date_df_maker(selected_date_data)
-
-    else:
-        # print("Line No. 793")
-        SelectedDateTable.objects.all().delete()
-        objects = MasterCRDatabase.objects.filter(execution_date=parsed_date + timedelta(days=1), is_active=True).values(*settings.SELECTED_DATE_TABLE_FIELDS)
-        # print(f"{objects = }")
-        if len(objects) == 0:
-            return JsonResponse({"ok": False, "message": "No CR found for the selected date."}, status=400)
-
-        else:
-            valid_fields = {f.name for f in SelectedDateTable._meta.get_fields()}
-
-            model_instances = [
-                SelectedDateTable(**{k: v for k, v in data.items() if k in valid_fields})
-                for data in objects
-            ]
-
-            # print(f"{model_instances = }")
-
-            with transaction.atomic(using='default'):
-                SelectedDateTable.objects.using('default').bulk_create(model_instances)
-                # transaction.on_commit(lambda: sync_replica_task(), using='default')
-
-            selected_date_data = SelectedDateTable.objects.filter(execution_date=parsed_date + timedelta(days=1), is_active=True).values(*settings.SELECTED_DATE_TABLE_FIELDS)
-            # print(f"{selected_date_data = }")
-        selected_data_df = selected_date_df_maker(selected_date_data)
-    
     cr_wise_status_df = cr_wise_status_df_maker(parsed_date)
-    # cr_wise_status_df = cr_wise_status_df.where(~pd.notna(cr_wise_status_df["CR_Hygiene_Checks"]), "")
-    cr_wise_status_df["NIAM_Ticket"].fillna("", inplace=True)
+    if cr_wise_status_df is None or cr_wise_status_df.empty:
+        return empty_result
+
+    # Added (not inplace) to stay copy-on-write safe and avoid chained-assignment.
+    cr_wise_status_df["NIAM_Ticket"] = (
+        cr_wise_status_df["NIAM_Ticket"].fillna("").astype(str).str.strip().str.lower()
+    )
 
     cr_wise_status_df = cr_wise_status_df.loc[
-        cr_wise_status_df["NIAM_Ticket"].astype(str).str.lower().str.strip() != 'success'
+        cr_wise_status_df["NIAM_Ticket"] != "success"
     ]
 
     planning_status_norm = _norm_series(selected_data_df["Planning Status"])
@@ -626,41 +645,28 @@ def run_task(
     niam_node_type = _norm_series(selected_data_df["NIAM Node Type"])
 
     selected_data_df = selected_data_df.loc[
-        (
-            planning_status_norm.eq("planned") & niam_cr_norm.eq("yes")
-        )
-        &
-        (
-            (
-                niam_node_type.astype(str).str.strip().map(len) > 0
-            )
-            &
-            (
-                ~niam_node_type.astype(str).str.strip().str.lower().isin(
-                    [
-                        "nan",
-                        "tempna",
-                        "na",
-                    ]
-                )
-            )
+        (planning_status_norm.eq("planned") & niam_cr_norm.eq("yes"))
+        & (niam_node_type.astype(str).str.strip().map(len) > 0)
+        & (
+            ~niam_node_type.astype(str)
+            .str.strip()
+            .str.lower()
+            .isin(["nan", "tempna", "na"])
         )
     ]
 
     to_be_filter_crs = list(cr_wise_status_df["cr_no"].astype(str).str.strip().unique())
-    # print(f"\n\nto_be_filter_crs = \n{to_be_filter_crs}\n")
-    # print(f"selected_data_df_crs=\n{selected_data_df['CR No'].tolist()}\n")
-
     selected_data_df = selected_data_df.loc[
         selected_data_df["CR No"].astype(str).str.strip().isin(to_be_filter_crs)
     ]
 
+    if selected_data_df.empty:
+        return empty_result
 
-    mail_id_df = (user_email_df_maker())
-    if mail_id_df is not None:
-        mail_id_df = mail_id_df[["employee_name", "email"]].rename(columns={"employee_name": "Change Responsible", "email": "Mail ID"})
-
-
+    # The hidden "Mail_ID_Worksheet" frame supplies the Change Responsible ->
+    # Mail ID lookup, the Circle -> NIAM Circle mapping, and the five dropdown
+    # lists used by the generated workbook.
+    mail_id_df = mail_id_worksheet_df_maker()
     niam_circle_df = niam_circle_df_maker()
 
     # Serialise generation for the same execution date: the workbook path is
@@ -679,20 +685,77 @@ def run_task(
         return {
             "status": "Failed",
             "download_ready": False,
-            "message": f"Could not lock the NIAM workbook for {parsed_date.date()}: {exc}",
+            "message": f"Could not lock the NIAM workbook for {label}: {exc}",
         }
 
     if workbook_file and Path(workbook_file).exists():
-        GLOBAL_LOGS.append(f"NIAM ticket workbook generated: {workbook_file} ---- {timestamp_fn()}")
+        GLOBAL_LOGS.append(
+            f"NIAM ticket workbook generated: {workbook_file} ---- {timestamp_fn()}"
+        )
         return {
             "status": "Completed",
             "download_ready": True,
             "download_name": str(workbook_file),
-            "message": f"NIAM ticket generated for {parsed_date.date()}.",
+            "message": f"NIAM ticket generated for {label}.",
         }
 
-    return {
-        "status": "Completed",
-        "download_ready": False,
-        "message": f"No NIAM tickets were required for {parsed_date.date()}.",
-    }
+    return empty_result
+
+
+def run_task(
+    request, 
+    task, 
+    runtime, 
+    GLOBAL_LOGS=None, 
+    timestamp_fn=None, 
+    selected_date=None, 
+    user_email=None, 
+    user_name=None, 
+    regions=None
+):
+    global glogs
+    GLOBAL_LOGS = GLOBAL_LOGS or []
+    timestamp_fn = timestamp_fn or _timestamp
+
+    runtime["status"] = "Running"
+    runtime["download_ready"] = False
+
+    # Password fields (new)
+    runtime["password_required"] = False
+    runtime["password"] = None
+    runtime["pwd_event"] = None
+
+    # OTP fields (existing)
+    runtime["otp_required"] = False
+    runtime["otp"] = None
+    runtime["otp_event"] = Event()
+
+    # "Fetch CR" (task id 8, NIAM Template Database page): fetch the selected
+    # night's CRs, then immediately build the NIAM input (same work the "NIAM
+    # Ticket Generator" button does) so the Input sheet is ready to display.
+    if task.get("id") == FETCH_CRS_TASK_ID:
+        fetch_result = fetch_crs_for_date(
+            selected_date=selected_date,
+            GLOBAL_LOGS=GLOBAL_LOGS,
+            timestamp_fn=timestamp_fn,
+            runtime=runtime,
+        )
+        if fetch_result.get("status") != "Completed":
+            return fetch_result
+
+        gen_result = generate_niam_input(
+            selected_date,
+            GLOBAL_LOGS=GLOBAL_LOGS,
+            timestamp_fn=timestamp_fn,
+            runtime=runtime,
+        )
+        gen_result["counts"] = fetch_result.get("counts", {})
+        return gen_result
+
+    # Task id 7: NIAM Ticket Generation on its own.
+    return generate_niam_input(
+        selected_date,
+        GLOBAL_LOGS=GLOBAL_LOGS,
+        timestamp_fn=timestamp_fn,
+        runtime=runtime,
+    )
