@@ -366,7 +366,6 @@ class CRWiseStatus(models.Model):
     Install_Test_Plan_Downloads = models.CharField(max_length=100, null=True, blank=True)
     MOP_Attachment = models.CharField(max_length=100, null=True, blank=True)
     CR_Approvals = models.CharField(max_length=100, null=True, blank=True)
-    NIAM_Ticket = models.CharField(max_length=100, null=True, blank=True)
 
     # --- Copy-on-Write (CoW) Architecture Fields ---
     is_active = models.BooleanField(default=True, help_text="Indicates the current active version")
@@ -842,6 +841,7 @@ class NIAMTicketGenerationTable(models.Model):
     request_for = models.CharField(("Request For"), max_length=50, blank=True, null=True)
     domain = models.CharField(("Domain"), max_length=50, blank=True, null=True)
     access_type = models.CharField(("Access Type"), max_length=50, blank=True, null=True)
+    niam_ticket_status = models.CharField(("NIAM Ticket Status"), max_length=50, blank=True, null=True)
 
     class Meta:
         db_table = "niam_ticket_generation_table"

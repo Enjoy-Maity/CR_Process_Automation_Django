@@ -67,6 +67,7 @@ NIAM_COLUMN_TO_FIELD_MAPPING = {
     "Request For": "request_for",
     "Domain": "domain",
     "Access Type": "access_type",
+    "NIAM Ticket Status": "niam_ticket_status",
 }
 
 # Fields stored as DateTimeField on the model.
@@ -372,6 +373,31 @@ def niam_circle_df_maker() -> pd.DataFrame:
     df = pd.DataFrame(niam_circle_records)
     df = df.rename(columns=settings.DB_TO_NIAM_CIRCLE_COLUMNS_MAPPING)
     # df = read_frame(niam_circle_data).rename(columns=settings.DB_TO_PL_COLUMNS_MAPPING)
+
+    return df
+
+
+def niam_ticket_generation_df_maker(_date: datetime) -> pd.DataFrame:
+    """
+    This function creates a pandas DataFrame from the niam_ticket_generation_data.
+   
+    Parameters:
+        niam_ticket_generation_data (QuerySet): A queryset of objects, object representing a row of data.    
+        The keys of the queryset should match the field names in the settings file.
+    Returns:
+        pd.DataFrame: A pandas DataFrame with the niam_ticket_generation_data.
+    """
+    # niam_ticket_generation_data = pd.DataFrame(niam_ticket_generation_data)
+    # print(niam_ticket_generation_data.columns)
+    print(pd.DataFrame(
+        list(
+            NIAMTicketGenerationTable.objects.all().values()
+        )
+    ))
+    niam_ticket_generation_records = list(NIAMTicketGenerationTable.objects.filter(niam_access_start_date=_date.replace(hour=22, minute=0, second=0)).values())
+    df = pd.DataFrame(niam_ticket_generation_records)
+    df = df.rename(columns={value: key for key, value in NIAM_TICKET_GENERATION_COLUMNS_MAPPING.items()})
+    # df = read_frame(niam_ticket_generation_data).rename(columns=settings.DB_TO_PL_COLUMNS_MAPPING)
 
     return df
 

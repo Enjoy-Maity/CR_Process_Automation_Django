@@ -406,7 +406,7 @@ def sync_cr_databases(planning_workbook_df: DataFrame, logs: List[AnyStr], runti
                             bpms_cr_yes_no=row.bpms_cr_yes_no, circle=row.circle, region=row.region,
                             technical_validator=row.technical_validator,
                             CR_Hygiene_Checks="Pending", Install_Test_Plan_Downloads="Pending",
-                            MOP_Attachment="Pending", CR_Approvals="Pending", NIAM_Ticket=" ",
+                            MOP_Attachment="Pending", CR_Approvals="Pending",
                             # CoW Fields
                             is_active=True,
                             version=(active_status.version + 1) if active_status else 1,
@@ -449,7 +449,7 @@ def sync_cr_databases(planning_workbook_df: DataFrame, logs: List[AnyStr], runti
                             bpms_cr_yes_no=row.bpms_cr_yes_no, circle=row.circle, region=row.region,
                             technical_validator=row.technical_validator,
                             CR_Hygiene_Checks="Pending", Install_Test_Plan_Downloads="Pending",
-                            MOP_Attachment="Pending", CR_Approvals="Pending", NIAM_Ticket=" ",
+                            MOP_Attachment="Pending", CR_Approvals="Pending",
                             is_active=True,
                             version=1
                         )

@@ -5,18 +5,22 @@ import numpy as np
 from queue import Queue
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
+from pathlib import Path
 from playwright.sync_api import sync_playwright
 from django.conf import settings
 from django.db import transaction
 from typing import List, AnyStr, Optional
 from dashboard.task_modules.dependencies import playwright_common_methods_ as pcm
+import dashboard.task_modules.dependencies.batch_methods as cbm
+from dashboard.task_modules.dependencies.extra_dependencies import niam_ticket_generation_df_maker
 from dashboard.models import UserManagement, NIAMTicketGenerationTable
 from dashboard.views import _timestamp
+from .tasks import niam_workbook_path_for
 
 
-glogs = []
+glogs = Queue()
 queue_ = Queue()
-sr_or_change_index = None
+sr_or_change_index = 14
 GENERATE_NIAM_TICKET_TASK_ID = 9
 
 def thread_task(
@@ -24,7 +28,7 @@ def thread_task(
     df: pd.DataFrame,
     headless_var: bool = true
     ):
-    global queue_, sr_or_change_index
+    global queue_, sr_or_change_index, glogs
 
     stop_event = Event()
 
@@ -98,6 +102,10 @@ def thread_task(
             )
 
         finally:
+            if glogs:
+                while len(logs) > 0:
+                    glogs.put(logs.pop(0))
+
             if page:
                 page.close()
 
@@ -171,53 +179,53 @@ def output_df_maker():
     return output_df
 
 
-def niam_tt_raised_failure_reattempt_row_maker(
-    result_df: pd.DataFrame, 
-    required_input_from_main_input_df: pd.DataFrame,
-    selected_cr_df_from_failed_tt_raised_df: pd.DataFrame
-) -> pd.DataFrame:
-    selected_cr_failed_tt_raised_df_node_names_column_index = selected_cr_df_from_failed_tt_raised_df.columns.get_loc('Node Names')
-    selected_cr_failed_tt_raised_df_access_type_column_index = selected_cr_df_from_failed_tt_raised_df.columns.get_loc('Access Type')
-    selected_cr_failed_tt_raised_df_request_for_column_index = selected_cr_df_from_failed_tt_raised_df.columns.get_loc('Request For')
+# def niam_tt_raised_failure_reattempt_row_maker(
+#     result_df: pd.DataFrame, 
+#     required_input_from_main_input_df: pd.DataFrame,
+#     selected_cr_df_from_failed_tt_raised_df: pd.DataFrame
+# ) -> pd.DataFrame:
+#     selected_cr_failed_tt_raised_df_node_names_column_index = selected_cr_df_from_failed_tt_raised_df.columns.get_loc('Node Names')
+#     selected_cr_failed_tt_raised_df_access_type_column_index = selected_cr_df_from_failed_tt_raised_df.columns.get_loc('Access Type')
+#     selected_cr_failed_tt_raised_df_request_for_column_index = selected_cr_df_from_failed_tt_raised_df.columns.get_loc('Request For')
     
-    i = 0
-    while i < selected_cr_df_from_failed_tt_raised_df.shape[0]:
+#     i = 0
+#     while i < selected_cr_df_from_failed_tt_raised_df.shape[0]:
                 
-        access_type_of_the_selected_row = str(selected_cr_df_from_failed_tt_raised_df.iloc[
-            i, selected_cr_failed_tt_raised_df_access_type_column_index
-        ]).lower()
+#         access_type_of_the_selected_row = str(selected_cr_df_from_failed_tt_raised_df.iloc[
+#             i, selected_cr_failed_tt_raised_df_access_type_column_index
+#         ]).lower()
         
-        request_for_for_selected_row = str(selected_cr_df_from_failed_tt_raised_df.iloc[
-                i, selected_cr_failed_tt_raised_df_request_for_column_index
-            ])
+#         request_for_for_selected_row = str(selected_cr_df_from_failed_tt_raised_df.iloc[
+#                 i, selected_cr_failed_tt_raised_df_request_for_column_index
+#             ])
         
-        selected_input_from_input_df = required_input_from_main_input_df.loc[
-            required_input_from_main_input_df['Access Type'].astype(str).str.lower().str.contains(
-                access_type_of_the_selected_row
-            )
-        ]
+#         selected_input_from_input_df = required_input_from_main_input_df.loc[
+#             required_input_from_main_input_df['Access Type'].astype(str).str.lower().str.contains(
+#                 access_type_of_the_selected_row
+#             )
+#         ]
         
-        if selected_input_from_input_df.shape[0] > 0:
-            request_type_filtered_df = selected_input_from_input_df.loc[
-                selected_input_from_input_df["Request For"].astype(str).str.strip() == request_for_for_selected_row
-            ]
+#         if selected_input_from_input_df.shape[0] > 0:
+#             request_type_filtered_df = selected_input_from_input_df.loc[
+#                 selected_input_from_input_df["Request For"].astype(str).str.strip() == request_for_for_selected_row
+#             ]
             
-            if request_type_filtered_df.shape[0] > 0:
-                # Process the filtered data
-                required_row = request_type_filtered_df.iloc[0].to_dict()
+#             if request_type_filtered_df.shape[0] > 0:
+#                 # Process the filtered data
+#                 required_row = request_type_filtered_df.iloc[0].to_dict()
 
-                required_row["Access Type"] = access_type_of_the_selected_row.upper()
+#                 required_row["Access Type"] = access_type_of_the_selected_row.upper()
                 
-                result_df = pd.concat(
-                    [
-                        result_df,
-                        pd.DataFrame([required_row])
-                    ],
-                    ignore_index=True
-                )
-        i += 1
+#                 result_df = pd.concat(
+#                     [
+#                         result_df,
+#                         pd.DataFrame([required_row])
+#                     ],
+#                     ignore_index=True
+#                 )
+#         i += 1
     
-    return result_df
+#     return result_df
             
 
 def output_niam_file_maker():
@@ -364,29 +372,26 @@ def output_file_checker():
     return niam_ticket_output_excel.exists()
 
 
-def niam_ticket_raise_using_thread(df: pd.DataFrame):
-    batch_creation_success, batches = cbm.main_method(
-                    manager, live_feed, df.shape[0]
+def niam_ticket_raise_using_thread(df: pd.DataFrame, user_name: str, logs: List[AnyStr] = [], headless_mode: bool = False) -> List[AnyStr]:
+    batch_creation_success, batches, logs = cbm.main_method(
+                    df.shape[0], logs
                 )
 
     if batch_creation_success:
-        if live_feed:
-            live_feed.emit(
-                orange_text(
-                    f"Created {len(batches)} batches from {df.shape[0]} NIAM TT Entries"
-                )
-            )
+        logs.append(
+                f"Created {len(batches)} batches from {df.shape[0]} NIAM TT Entries"
+        )
     
         session_created = None
         # print(batches)
 
         while not session_created:
-            session_created, session_file = pcm.niam_session_maker(manager, live_feed)
+            session_created, session_file, logs = pcm.niam_session_maker(user_name, logs)
 
         with ThreadPoolExecutor(max_workers=3) as executor:
             futures = [
                 executor.submit(
-                    thread_task, batch, df
+                    thread_task, batch, df, headless_mode
                 )
                 for batch in batches
             ]
@@ -394,12 +399,16 @@ def niam_ticket_raise_using_thread(df: pd.DataFrame):
             for future in futures:
                 future.result()
         
-        pcm.niam_session_breaker(manager, live_feed)
+        pcm.niam_session_breaker()
+    
+    if glogs:
+        while not glogs.empty():
+            logs.append(glogs.get())
+    
+    return logs
 
 
-def niam_ticket_raiser(df: pd.DataFrame):
-    global flag
-    global manager, live_feed
+def niam_ticket_raiser(df: pd.DataFrame, user_name: str, _date: datetime, logs: List[AnyStr] = [], headless_mode: bool = False) -> List[AnyStr]:
     
     # global request_type_index
     # global node_managed_by_index
@@ -453,13 +462,7 @@ def niam_ticket_raiser(df: pd.DataFrame):
     output_file_check = output_file_checker()
     
     if output_file_check:
-        niam_ticket_output_excel = Path(
-            workbook_path
-        ).parent.joinpath(
-            "NIAM_Excel_files",
-            datetime.now().strftime("%d_%b_%Y"),
-            f"RITM Output_PS_Core_{datetime.now().strftime('%d_%b_%Y')}.xlsx"
-        )
+        niam_ticket_output_excel = niam_workbook_path_for(_date)
         
         output_file_reader = pd.ExcelFile(str(niam_ticket_output_excel), engine="openpyxl")
         output_excel_df = output_file_reader.parse("RITM Data Table")
@@ -599,31 +602,38 @@ def niam_ticket_raiser(df: pd.DataFrame):
         
         # print(f"result_df\n{result_df[["SL. No", "SR OR CHANGE NO", "Access Type"]]}")
         
-        niam_ticket_raise_using_thread(result_df)        
+        logs = niam_ticket_raise_using_thread(result_df, user_name, logs, headless_mode)        
     
     elif df.shape[0] > 0:
-        niam_ticket_raise_using_thread(df)
+        logs = niam_ticket_raise_using_thread(df, user_name, logs, headless_mode)
+
+    df = niam_ticket_generation_df_maker(_date)
+    df = df[df['NIAM Ticket Status'].astype(str).str.strip().str.lower().isin(
+        [
+            'failure',
+            'failed',
+            '',
+            'na',
+            'nan',
+            'n/a',
+            'none'
+        ]
+    )]
         
     output_niam_file_maker()
 
 
-def pre_checks() -> Tuple[bool, Union[pd.DataFrame, None]]:
+def pre_checks(_date: datetime, logs: List[AnyStr]=[]) -> Tuple[bool, Union[pd.DataFrame, None]]:
     global workbook_path, flag
-    global live_feed, manager
     
-    niam_input_workbook_path = Path(
-            workbook_path
-        ).parent.joinpath(
-            "NIAM_Excel_files",
-            datetime.now().strftime("%d_%b_%Y"),
-            f"RITM Input_PS_Core_{datetime.now().strftime('%d_%b_%Y')}.xlsx"
-        )
+    niam_input_workbook_path = get_niam_workbook_path_for(_date)
     # print(f"NIAM Input Workbook Path: {niam_input_workbook_path}")
     # print(f"{niam_input_workbook_path.exists() = }")
     if not niam_input_workbook_path.exists():
         flag = "Unsuccessful"
-        if live_feed:
-            live_feed.emit("NIAM Input Excel file not found")
+        logs.append(
+            "NIAM Input Excel file not found",
+        )
         
         if manager:
             manager.show_info_signal.emit(
@@ -632,14 +642,8 @@ def pre_checks() -> Tuple[bool, Union[pd.DataFrame, None]]:
                 "error"
             )
         
-        else:
-            messagebox = Messagebox()
-            messagebox.showerror(
-                "File Not Found",
-                "NIAM File not found",
-            )
             
-        return False, None
+        return False, None, logs
     
     else:
         excel_file = pd.ExcelFile(str(niam_input_workbook_path), engine='openpyxl')
@@ -649,10 +653,9 @@ def pre_checks() -> Tuple[bool, Union[pd.DataFrame, None]]:
             excel_file.close()
             del excel_file
             
-            if live_feed:
-                live_feed.emit(
+            logs.append(
                     "Worksheet named 'RITM_INPUT' not found in the 'NIAM Input_PS_Core' Workbook"
-                )
+            )
                 
             if manager:
                 manager.show_info_signal.emit(
@@ -661,14 +664,7 @@ def pre_checks() -> Tuple[bool, Union[pd.DataFrame, None]]:
                     "error"
                 )
             
-            else:
-                messagebox = Messagebox()
-                messagebox.showerror(
-                    "Worksheet Not Found",
-                    "Worksheet named 'RITM_INPUT' not found in the 'NIAM Input_PS_Core' Workbook",
-                )
-                
-            return False, None
+            return False, None, logs
         
         else:
             niam_input_file_df = excel_file.parse("RITM_INPUT")
@@ -731,7 +727,8 @@ def run_task(
     runtime["otp_event"] = Event()
 
     queue_ = Queue()
-    glogs = []
+    glogs = Queue()
+    sr_or_change_index = 14
 
     if task.get("id") == GENERATE_NIAM_TICKET_TASK_ID:
         pass

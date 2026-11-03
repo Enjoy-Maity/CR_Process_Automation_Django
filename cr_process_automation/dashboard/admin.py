@@ -82,12 +82,12 @@ class UserManagementAdmin(UserAdmin):
 class CRWiseStatusAdmin(admin.ModelAdmin):
     list_display = (
         "cr_no", "execution_date", "activity_description", "circle", "region", "technical_validator",
-        "CR_Hygiene_Checks", "Install_Test_Plan_Downloads", "MOP_Attachment", "CR_Approvals", "NIAM_Ticket"
+        "CR_Hygiene_Checks", "Install_Test_Plan_Downloads", "MOP_Attachment", "CR_Approvals"
     )
     list_filter = (
         "is_active",
         "region", "circle", "cr_no", "technical_validator", 
-        "CR_Hygiene_Checks", "Install_Test_Plan_Downloads", "MOP_Attachment", "CR_Approvals", "NIAM_Ticket"
+        "CR_Hygiene_Checks", "Install_Test_Plan_Downloads", "MOP_Attachment", "CR_Approvals"
     )
     search_fields = (
         "region", "circle", "cr_no", "technical_validator"

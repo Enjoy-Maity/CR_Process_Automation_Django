@@ -27,7 +27,7 @@ from django.conf import settings
 from datetime import datetime, timedelta, date
 from dateutil import parser
 from pathlib import Path
-from typing import Union, Tuple, List, Literal, AnyStr
+from typing import Union, Tuple, List, Literal, AnyStr, Dict
 import threading
 import  dateutil.parser as dp
 
@@ -3054,7 +3054,7 @@ def get_dropdown_texts(results_list) -> list[str]:
 def niam_tt_raiser(
     row_dict: Dict[AnyStr, AnyStr],
     page: Page,
-) -> Tuple[AnyStr, AnyStr, Union[List[AnyStr], None], Dict[AnyStr, AnyStr]]:
+) -> Tuple[AnyStr, Union[List[AnyStr], None], Dict[AnyStr, AnyStr], Dict[AnyStr, AnyStr]]:
     cr = row_dict['SR OR CHANGE NO']
     node_names = row_dict['NIAM Node Name']
     

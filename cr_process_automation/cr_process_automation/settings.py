@@ -262,7 +262,7 @@ HOST_DOWNLOAD_DIR = os.environ.get(
 CR_WISE_STATUS_FIELDS = [
     "id", "sno", "execution_date", "cr_no", "activity_description", "region", "circle",
     "CR_Hygiene_Checks", "Install_Test_Plan_Downloads",
-    "MOP_Attachment", "CR_Approvals", "NIAM_Ticket",
+    "MOP_Attachment", "CR_Approvals",
 ]
 
 SELECTED_DATE_TABLE_FIELDS = [
