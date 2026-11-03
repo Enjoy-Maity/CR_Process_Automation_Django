@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import re
 import time
@@ -2865,7 +2867,7 @@ def niam_logger(
 def niam_session_maker(
     user_name: str,
     logs: list = [],
-) -> Tuple[bool, None | PathLike, list]:
+) -> Tuple[bool, None | os.PathLike, list]:
     try:
         with sync_playwright() as playwright:
             browser, main_context, login_page, logs = niam_logger(
@@ -3054,7 +3056,9 @@ def get_dropdown_texts(results_list) -> list[str]:
 def niam_tt_raiser(
     row_dict: Dict[AnyStr, AnyStr],
     page: Page,
-) -> Tuple[AnyStr, Union[List[AnyStr], None], Dict[AnyStr, AnyStr], Dict[AnyStr, AnyStr]]:
+    manager: DialogManager|None = None,
+    live_feed: Signal|None = None
+) -> Tuple[AnyStr, AnyStr, Union[List[AnyStr], None], Dict[AnyStr, AnyStr]]:
     cr = row_dict['SR OR CHANGE NO']
     node_names = row_dict['NIAM Node Name']
     

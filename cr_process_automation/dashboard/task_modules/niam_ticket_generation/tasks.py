@@ -1,4 +1,5 @@
 import os
+import queue
 import re
 import time
 import traceback
@@ -631,6 +632,16 @@ def generate_niam_input(night_date, GLOBAL_LOGS=None, timestamp_fn=None, runtime
     if cr_wise_status_df is None or cr_wise_status_df.empty:
         return empty_result
 
+    # NIAM_Ticket column removed; treat all as not success
+    if "NIAM_Ticket" in cr_wise_status_df.columns:
+        cr_wise_status_df["NIAM_Ticket"] = (
+            cr_wise_status_df["NIAM_Ticket"].fillna("").astype(str).str.strip().str.lower()
+        )
+        cr_wise_status_df = cr_wise_status_df.loc[
+            cr_wise_status_df["NIAM_Ticket"] != "success"
+        ]
+    # else include all CRs from cr_wise_status_df
+
     planning_status_norm = _norm_series(selected_data_df["Planning Status"])
     niam_cr_norm = _norm_series(selected_data_df["NIAM Ticket Required (Yes/No)"])
     niam_node_type = _norm_series(selected_data_df["NIAM Node Type"])
@@ -714,7 +725,7 @@ def run_task(
     # Password fields (new)
     runtime["password_required"] = False
     runtime["password"] = None
-    runtime["pwd_event"] = None
+    runtime["pwd_event"] = Event()
 
     # OTP fields (existing)
     runtime["otp_required"] = False

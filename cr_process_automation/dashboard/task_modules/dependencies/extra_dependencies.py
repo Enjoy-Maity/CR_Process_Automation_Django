@@ -5,6 +5,7 @@ from threading import Thread
 from zoneinfo import ZoneInfo
 from django.conf import settings
 from django.db import transaction
+from django.db.models import QuerySet
 from dashboard.models import (
     CRWiseStatus, 
     UserManagement, 
@@ -21,7 +22,7 @@ from rest_framework import status
 from django_pandas.io import read_frame
 from django.utils import timezone
 from django.core.management import call_command
-from datetime import timedelta
+from datetime import datetime, timedelta
 from openpyxl import load_workbook
 from openpyxl.styles import (
     Alignment,
@@ -377,18 +378,12 @@ def niam_circle_df_maker() -> pd.DataFrame:
     return df
 
 
-def niam_ticket_generation_df_maker(_date: datetime) -> pd.DataFrame:
+def _niam_ticket_generation_df_maker_by_date(_date: datetime) -> pd.DataFrame:
     """
-    This function creates a pandas DataFrame from the niam_ticket_generation_data.
-   
-    Parameters:
-        niam_ticket_generation_data (QuerySet): A queryset of objects, object representing a row of data.    
-        The keys of the queryset should match the field names in the settings file.
-    Returns:
-        pd.DataFrame: A pandas DataFrame with the niam_ticket_generation_data.
+    (Laptop form) Creates a pandas DataFrame from the NIAM Ticket Generation Table
+    for the 22:00 window of the given date. Kept for reference; the active
+    implementation is the `_date=` branch of niam_ticket_generation_df_maker below.
     """
-    # niam_ticket_generation_data = pd.DataFrame(niam_ticket_generation_data)
-    # print(niam_ticket_generation_data.columns)
     print(pd.DataFrame(
         list(
             NIAMTicketGenerationTable.objects.all().values()
@@ -759,4 +754,38 @@ def niam_data_updater(df: pd.DataFrame, execution_date=None):
     )
     logger.info(summary["message"])
     return summary
+
+
+def niam_ticket_generation_df_maker(selected_data_df=None, mail_id_worksheet_df=None, niam_circle_df=None, date_=None, _date: datetime = None):
+    """
+    Maker/fetcher for the NIAM ticket generation dataframe.
+
+    Two supported forms:
+    1. Dataframe maker (C Drive pipeline):
+       niam_ticket_generation_df_maker(selected_data_df, mail_id_worksheet_df, niam_circle_df, date_)
+       Delegates to tasks.niam_input_initiator to build the input frame.
+    2. Database fetcher (laptop pipeline):
+       niam_ticket_generation_df_maker(_date=<datetime>)
+       Returns NIAM rows for the 22:00 window of that date.
+    """
+    try:
+        # Form 2: database fetch used by niam_ticket_generation_tasks.py
+        if selected_data_df is None and _date is not None:
+            niam_ticket_generation_records = list(
+                NIAMTicketGenerationTable.objects.filter(
+                    niam_access_start_date=_date.replace(hour=22, minute=0, second=0)
+                ).values()
+            )
+            df = pd.DataFrame(niam_ticket_generation_records)
+            df = df.rename(
+                columns={value: key for key, value in NIAM_TICKET_GENERATION_COLUMNS_MAPPING.items()}
+            )
+            return df
+
+        # Form 1: delegate to existing implementation
+        from dashboard.task_modules.niam_ticket_generation import tasks
+        return tasks.niam_input_initiator(selected_data_df, mail_id_worksheet_df, niam_circle_df, date_)
+    except Exception as e:
+        logger.error(f"Error in niam_ticket_generation_df_maker: {e}", exc_info=True)
+        raise
 

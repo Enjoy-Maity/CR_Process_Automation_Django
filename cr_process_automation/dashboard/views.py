@@ -3351,6 +3351,12 @@ def _niam_period_query(from_dt, to_dt, limit):
     """Build the NIAM rows queryset for a datetime window."""
     from .models import NIAMTicketGenerationTable
 
+    from_date = from_dt.date() if hasattr(from_dt, 'date') else from_dt
+    to_date = to_dt.date() if hasattr(to_dt, 'date') else to_dt
+    # Also include execution_date = selected night date + 1 (common case)
+    exec_from = from_date + timedelta(days=1)
+    exec_to = to_date + timedelta(days=1)
+
     return (
         NIAMTicketGenerationTable.objects.filter(execution_date__isnull=False)
         .filter(
@@ -3358,7 +3364,8 @@ def _niam_period_query(from_dt, to_dt, limit):
               niam_access_start_date_time__range=(from_dt, to_dt)) |
             Q(sr_cr_start_date_time__isnull=False,
               sr_cr_start_date_time__range=(from_dt, to_dt)) |
-            Q(execution_date__range=(from_dt.date(), to_dt.date()))
+            Q(execution_date__range=(from_date, to_date)) |
+            Q(execution_date__range=(exec_from, exec_to))
         )
         .order_by("-id")[:limit]
     )
@@ -3753,10 +3760,76 @@ def save_niam_template_changes(request):
             .select_for_update()
             .filter(pk__in=[item["id"] for item in cleaned])
         }
+        from dashboard.models import NIAMTicketGenerationTable
         for item in cleaned:
             obj = objects.get(item["id"])
             if obj is None:
                 continue
+            access_type_val = (item["values"].get("access_type") or "").strip()
+            # Handle special case: "ADMIN and READWRITE" creates two rows
+            if access_type_val.upper() == "ADMIN AND READWRITE":
+                # Get all field values from original
+                base_vals = {}
+                for field in obj._meta.fields:
+                    if field.name in ['id', 'pk']:
+                        continue
+                    base_vals[field.name] = getattr(obj, field.name)
+                # Update base values with cleaned values
+                for k, v in item["values"].items():
+                    base_vals[k] = v
+                # Create two rows: ADMIN and READWRITE
+                # Delete original
+                sr_key = obj.sr_or_change_number
+                node_key = obj.node_name
+                exec_date = obj.execution_date
+                obj.delete()
+                # Create first row
+                base_vals['access_type'] = 'ADMIN'
+                NIAMTicketGenerationTable.objects.using("default").create(**base_vals)
+                # Create second row
+                base_vals2 = dict(base_vals)
+                base_vals2['access_type'] = 'READWRITE'
+                NIAMTicketGenerationTable.objects.using("default").create(**base_vals2)
+                updates_by_key[(_niam_key(sr_key), _niam_key(node_key))] = item["values"]
+                continue
+            # Check if reverting from split rows back to single
+            # Look for other rows with same CR and node
+            sr_key = obj.sr_or_change_number
+            node_key = obj.node_name
+            exec_date = obj.execution_date
+            # Find if there are other rows for same (sr, node, exec_date) that would form the split
+            related = list(NIAMTicketGenerationTable.objects.using("default").filter(
+                sr_or_change_number=sr_key,
+                node_name=node_key,
+                execution_date=exec_date
+            ).exclude(pk=obj.pk))
+            if related and access_type_val.upper() in ["ADMIN", "READWRITE"]:
+                # Check if related has the other split value
+                related_types = [(getattr(r, 'access_type') or '').strip().upper() for r in related]
+                if set(related_types + [access_type_val.upper()]) == {"ADMIN", "READWRITE"}:
+                    # Merge: keep one row with new access_type, delete others
+                    # Collect all values from both
+                    merged = {}
+                    for r in [obj] + related:
+                        for field in r._meta.fields:
+                            if field.name in ['id', 'pk']:
+                                continue
+                            if field.name == 'access_type':
+                                continue  # will set below
+                            merged[field.name] = getattr(r, field.name)
+                    # Apply cleaned values
+                    for k, v in item["values"].items():
+                        if k != 'access_type':
+                            merged[k] = v
+                    merged['access_type'] = access_type_val
+                    # Delete all related
+                    for r in related:
+                        r.delete()
+                    obj.delete()
+                    NIAMTicketGenerationTable.objects.using("default").create(**merged)
+                    updates_by_key[(_niam_key(sr_key), _niam_key(node_key))] = item["values"]
+                    continue
+            # Normal update
             for field, value in item["values"].items():
                 setattr(obj, field, value)
             obj.save(using="default", update_fields=list(item["values"].keys()))

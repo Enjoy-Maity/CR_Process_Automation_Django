@@ -379,6 +379,10 @@ def fetch_region_cr_details(request):
     columns_meta = _master_cr_columns()
     columns = [c["name"] for c in columns_meta]
     field_list = columns if columns else MASTER_CR_FIELDS
+    # Remove NIAM Ticket related fields if present
+    field_list = [f for f in field_list if f not in ("niam_ticket_required", "niam_node_type", "NIAM_Ticket")]
+    columns_meta = [c for c in columns_meta if c["name"] not in ("niam_ticket_required", "niam_node_type", "NIAM_Ticket")]
+    columns = [c["name"] for c in columns_meta]
     # The row "id" is required by the frontend to identify rows on save
     # (data-row-id / collectChanges()), but it must NOT render as a column:
     # the JS already hides it via HIDDEN_COLUMNS.
