@@ -366,7 +366,6 @@ class CRWiseStatus(models.Model):
     Install_Test_Plan_Downloads = models.CharField(max_length=100, null=True, blank=True)
     MOP_Attachment = models.CharField(max_length=100, null=True, blank=True)
     CR_Approvals = models.CharField(max_length=100, null=True, blank=True)
-    NIAM_Ticket = models.CharField(max_length=100, null=True, blank=True)
 
     # --- Copy-on-Write (CoW) Architecture Fields ---
     is_active = models.BooleanField(default=True, help_text="Indicates the current active version")

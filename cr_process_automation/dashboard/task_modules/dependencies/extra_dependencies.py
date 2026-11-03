@@ -735,3 +735,17 @@ def niam_data_updater(df: pd.DataFrame, execution_date=None):
     logger.info(summary["message"])
     return summary
 
+
+def niam_ticket_generation_df_maker(selected_data_df, mail_id_worksheet_df, niam_circle_df, date_):
+    """
+    Maker function for NIAM ticket generation dataframe.
+    Ensures CR rows are properly fetched and prepared for NIAM Template Database.
+    """
+    try:
+        from dashboard.task_modules.niam_ticket_generation import tasks
+        # Delegate to existing implementation
+        return tasks.niam_input_initiator(selected_data_df, mail_id_worksheet_df, niam_circle_df, date_)
+    except Exception as e:
+        logger.error(f"Error in niam_ticket_generation_df_maker: {e}", exc_info=True)
+        raise
+
