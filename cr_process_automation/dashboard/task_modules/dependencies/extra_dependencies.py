@@ -5,7 +5,7 @@ from threading import Thread
 from zoneinfo import ZoneInfo
 from django.conf import settings
 from django.db import transaction
-from django.db.models import QuerySet
+from django.db.models import F, QuerySet
 from dashboard.models import (
     CRWiseStatus, 
     UserManagement, 
@@ -447,14 +447,19 @@ def niam_dropdown_options() -> dict:
     Used both to populate the page dropdowns and to validate saved values.
     """
     options = {}
+    # Read the reference lists from the master database. The page (and the save
+    # validator) must not depend on replica lag for their dropdown options: if
+    # the replica has not caught up, an entire column (for example Access Type)
+    # would render without any selectable values.
     for field, (model, source_field) in NIAM_DROPDOWN_SOURCES.items():
         options[field] = _clean_option_values(
-            model.objects.values_list(source_field, flat=True)
+            model.objects.using("default").values_list(source_field, flat=True)
         )
     for field, values in NIAM_STATIC_DROPDOWN_OPTIONS.items():
         options[field] = list(values)
     options["requested_for_email"] = _clean_option_values(
-        UserManagement.objects.filter(is_active=True)
+        UserManagement.objects.using("default")
+        .filter(is_active=True)
         .exclude(email__isnull=True)
         .exclude(email__exact="")
         .values_list("email", flat=True)
@@ -607,6 +612,51 @@ def _verify_niam_replication(execution_date, timeout: int = 15, interval: float 
     )
 
 
+def renumber_niam_sno(execution_date, using=DB_MASTER, compact=False):
+    """
+    Maintain the SL. No sequence of one execution date.
+
+    Rows are ordered by their current SL. No, then by id.
+
+    * ``compact=False`` (new CR rows): a number that is unique is kept, so
+      existing rows do not move. Rows without a number, or sharing one with an
+      earlier row, get the next free number after the highest one in use.
+    * ``compact=True`` (rows removed or split): rows are numbered 1..N so no gap
+      is left behind.
+
+    Only rows whose number changes are written. Returns the number of updates.
+    """
+    rows = list(
+        NIAMTicketGenerationTable.objects.using(using)
+        .filter(execution_date=execution_date)
+        .order_by(F("sno").asc(nulls_last=True), "id")
+        .only("id", "sno")
+    )
+    if compact:
+        new_numbers = list(range(1, len(rows) + 1))
+    else:
+        used = set()
+        next_number = max((row.sno for row in rows if row.sno is not None), default=0) + 1
+        new_numbers = []
+        for row in rows:
+            if row.sno is None or row.sno in used:
+                number = next_number
+                next_number += 1
+            else:
+                number = row.sno
+            used.add(number)
+            new_numbers.append(number)
+
+    changed = []
+    for row, number in zip(rows, new_numbers):
+        if row.sno != number:
+            row.sno = number
+            changed.append(row)
+    if changed:
+        NIAMTicketGenerationTable.objects.using(using).bulk_update(changed, ["sno"])
+    return len(changed)
+
+
 def niam_data_updater(df: pd.DataFrame, execution_date=None):
     """
     Push the NIAM input template DataFrame into NIAMTicketGenerationTable.
@@ -666,10 +716,12 @@ def niam_data_updater(df: pd.DataFrame, execution_date=None):
         if key_field not in mapped_df.columns:
             mapped_df[key_field] = None
 
+    # SL. No is never copied from the template: renumber_niam_sno assigns it, so
+    # existing rows keep their number and new rows continue the sequence.
     value_fields = [
         col
         for col in mapped_df.columns
-        if col in valid_fields and col not in NIAM_UPSERT_KEY_FIELDS
+        if col in valid_fields and col not in NIAM_UPSERT_KEY_FIELDS and col != "sno"
     ]
 
     # Drop duplicate rows inside the incoming dataframe, keeping the last entry.
@@ -740,6 +792,9 @@ def niam_data_updater(df: pd.DataFrame, execution_date=None):
                 else:
                     summary["skipped"] += 1
 
+            if summary["inserted"] or duplicate_ids:
+                renumber_niam_sno(execution_date, using=DB_MASTER)
+
     except Exception as exc:
         logger.exception("Failed to push NIAM input template into the database.")
         summary["message"] = f"Database update failed: {exc}"
@@ -756,35 +811,43 @@ def niam_data_updater(df: pd.DataFrame, execution_date=None):
     return summary
 
 
-def niam_ticket_generation_df_maker(selected_data_df=None, mail_id_worksheet_df=None, niam_circle_df=None, date_=None, _date: datetime = None):
+def niam_ticket_generation_df_maker(selected_data_df=None, mail_id_worksheet_df=None, niam_circle_df=None, _date: datetime = None):
     """
     Maker/fetcher for the NIAM ticket generation dataframe.
 
     Two supported forms:
     1. Dataframe maker (C Drive pipeline):
-       niam_ticket_generation_df_maker(selected_data_df, mail_id_worksheet_df, niam_circle_df, date_)
+       niam_ticket_generation_df_maker(selected_data_df, mail_id_worksheet_df, niam_circle_df, _date)
        Delegates to tasks.niam_input_initiator to build the input frame.
     2. Database fetcher (laptop pipeline):
        niam_ticket_generation_df_maker(_date=<datetime>)
        Returns NIAM rows for the 22:00 window of that date.
+
+    ``_date`` is the fourth positional parameter, so both
+    ``niam_ticket_generation_df_maker(df1, df2, df3, day)`` and
+    ``niam_ticket_generation_df_maker(_date=day)`` work. Pass the date for the
+    database form by keyword: putting it first positionally binds it to
+    ``selected_data_df``.
     """
     try:
         # Form 2: database fetch used by niam_ticket_generation_tasks.py
         if selected_data_df is None and _date is not None:
+            day = _date.date() if isinstance(_date, datetime) else _date
             niam_ticket_generation_records = list(
                 NIAMTicketGenerationTable.objects.filter(
-                    niam_access_start_date=_date.replace(hour=22, minute=0, second=0)
+                    niam_access_start_date_time__date=day,
+                    niam_access_start_date_time__hour=22,
                 ).values()
             )
             df = pd.DataFrame(niam_ticket_generation_records)
             df = df.rename(
-                columns={value: key for key, value in NIAM_TICKET_GENERATION_COLUMNS_MAPPING.items()}
+                columns={value: key for key, value in NIAM_COLUMN_TO_FIELD_MAPPING.items()}
             )
             return df
 
         # Form 1: delegate to existing implementation
         from dashboard.task_modules.niam_ticket_generation import tasks
-        return tasks.niam_input_initiator(selected_data_df, mail_id_worksheet_df, niam_circle_df, date_)
+        return tasks.niam_input_initiator(selected_data_df, mail_id_worksheet_df, niam_circle_df,_date)
     except Exception as e:
         logger.error(f"Error in niam_ticket_generation_df_maker: {e}", exc_info=True)
         raise

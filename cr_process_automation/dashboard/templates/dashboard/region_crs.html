@@ -80,6 +80,13 @@ const HIDDEN_COLUMNS = new Set([
     'parent_reference'
 ]);
 
+// Loaded-table headers use these overrides instead of the generic
+// "Title Cased field name" formatting.
+const COLUMN_LABEL_OVERRIDES = {
+    niam_ticket_required: 'NIAM Ticket Required (Yes/No)',
+    niam_node_type: 'NIAM Node Type',
+};
+
 let USER_OPTIONS = [];   // [{ value: 'jdoe', label: 'jdoe' }, ...]
 
 // Generalized editable-field renderer config.
@@ -443,6 +450,7 @@ function renderTable(rows) {
 
 function formatHeaderLabel(col) {
     if (col === 'sno') return 'S.No';
+    if (COLUMN_LABEL_OVERRIDES[col]) return COLUMN_LABEL_OVERRIDES[col];
     return col
         .split('_')
         .map(word => word.charAt(0).toUpperCase() + word.slice(1))
@@ -737,8 +745,14 @@ function saveChanges() {
                                         // CHANGED: show status AFTER reload (re-fetch clears the bar first)
                 if (updatedCount > 0) {
                     const label = updatedCount === 1 ? 'record' : 'records';
+                    const niamRemoved = Number(data.niam_rows_removed || 0);
+                    const niamCrs = Object.keys(data.niam_removed_crs || {});
                     fetchAllForDate().then(() => {
-                        showStatus(`${updatedCount} ${label} updated successfully.`, 'success');
+                        let message = `${updatedCount} ${label} updated successfully.`;
+                        if (niamRemoved > 0) {
+                            message += ` Removed ${niamRemoved} NIAM row(s) for ${niamCrs.join(', ')} (NIAM Ticket Required changed to No).`;
+                        }
+                        showStatus(message, 'success');
                     });
                 } else {
                     showStatus('Failed to save record.', 'error');
