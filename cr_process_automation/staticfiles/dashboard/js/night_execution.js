@@ -22,7 +22,9 @@
     }
     
     const CSRF_TOKEN = getCookie('csrftoken');
-    const USER_EMAIL = ""; // Will be populated from server if needed
+    // Injected by night_execution.html as window.USER_EMAIL; falls back to ""
+    // if the page doesn't provide it (never sends the literal string "None").
+    const USER_EMAIL = (typeof window.USER_EMAIL === "string" && window.USER_EMAIL) ? window.USER_EMAIL : "";
 
     const FETCH_CRS_URL = "/night-execution/fetch-crs/";
     const FETCH_STATUS_URL = "/night-execution/fetch-cr-status/";

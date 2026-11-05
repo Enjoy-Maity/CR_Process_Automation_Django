@@ -55,15 +55,26 @@ def fetch_cr_wise_status(request):
         return JsonResponse({"ok": False, "message": "Invalid date format."}, status=400)
 
     columns_meta = _cr_wise_status_columns()
-    field_list_clean = [c["name"] for c in columns_meta if c["name"] != 'NIAM_Ticket']
-    if not field_list_clean:
-        field_list_clean = [f for f in settings.CR_WISE_STATUS_FIELDS if f != 'NIAM_Ticket']
+    field_list = [c["name"] for c in columns_meta if c["name"] != "NIAM_Ticket"]
+    if not field_list:
+        field_list = [f for f in settings.CR_WISE_STATUS_FIELDS if f != "NIAM_Ticket"]
+    columns = field_list
+
     try:
         result = list(
-            CRWiseStatus.objects.filter(execution_date=parsed_date, is_active=True).values(*field_list_clean)
+            CRWiseStatus.objects.filter(
+                execution_date=parsed_date, is_active=True
+            ).values(*field_list)
         )
     except Exception:
-        result = []
+        traceback.print_exc()
+        return JsonResponse(
+            {
+                "ok": False,
+                "message": "Failed to fetch CR status because of a database error.",
+            },
+            status=500,
+        )
 
     return JsonResponse({
         "ok": True,

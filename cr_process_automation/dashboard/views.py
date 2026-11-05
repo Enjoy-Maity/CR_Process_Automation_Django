@@ -592,6 +592,14 @@ def _validate_fetch_crs_date(date_str):
 
     execution_date = picked_date + timedelta(days=1)
 
+    from .models import NIAMTicketGenerationTable
+
+    in_niam = NIAMTicketGenerationTable.objects.filter(
+        execution_date=execution_date
+    ).exists()
+    if in_niam:
+        return
+
     in_selected = SelectedDateTable.objects.filter(
         execution_date=execution_date, is_active=True
     ).exists()
@@ -3341,31 +3349,68 @@ def _niam_period_bounds(date_str=None, range_key=None):
         start = today - timedelta(days=NIAM_RANGE_DAYS[key])
         from_dt = datetime.combine(start, datetime.min.time())
         to_dt = datetime.combine(today, datetime.max.time())
-        return from_dt, to_dt, NIAM_RANGE_LABELS[key], key
+        used_range = key
+    else:
+        from_dt, to_dt = _parse_niam_date_range(date_str)
+        used_range = ""
 
-    from_dt, to_dt = _parse_niam_date_range(date_str)
+    # Only the calendar dates of the bounds are used (the rows are matched on
+    # the CR start date-time's own date), so the bounds stay naive. No
+    # timezone-aware values are built or compared anywhere on this page.
+    if used_range:
+        return from_dt, to_dt, NIAM_RANGE_LABELS[used_range], used_range
     return from_dt, to_dt, from_dt.strftime("%d-%m-%Y"), ""
 
 
+def _niam_table_order(obj):
+    """Table order: newest night first, then SL. No (1 at the top), then id."""
+    night = obj.execution_date or datetime.min.date()
+    sno = obj.sno if obj.sno is not None else float("inf")
+    return (-night.toordinal(), sno, obj.pk)
+
+
+def _niam_naive_local(value):
+    """
+    Render a stored NIAM datetime as a naive Asia/Kolkata wall-clock string.
+
+    The page and the RITM workbook show the same wall-clock values, e.g.
+    "2026-11-05 00:00:00". Timezone information exists only inside the
+    database: it is never surfaced to the page (no offsets, no "Z" suffix),
+    which also keeps pandas/openpyxl from rejecting the values.
+    """
+    if value in (None, ""):
+        return ""
+    if isinstance(value, str):
+        return value
+    try:
+        parsed = timezone.localtime(value) if timezone.is_aware(value) else value
+    except (ValueError, TypeError, OverflowError):
+        return str(value)
+    return parsed.replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
+
+
 def _niam_period_query(from_dt, to_dt, limit):
-    """Build the NIAM rows queryset for a datetime window."""
+    """
+    NIAM rows whose SR/CR start date-time falls on the selected date(s).
+
+    The selected date is matched against the CR's start date-time exactly
+    (its calendar day), so every row appears for one date only — never for
+    the neighbouring nights. Rows without a CR start datetime fall back to
+    their execution_date.
+    """
     from .models import NIAMTicketGenerationTable
 
     from_date = from_dt.date() if hasattr(from_dt, 'date') else from_dt
     to_date = to_dt.date() if hasattr(to_dt, 'date') else to_dt
-    # Also include execution_date = selected night date + 1 (common case)
-    exec_from = from_date + timedelta(days=1)
-    exec_to = to_date + timedelta(days=1)
 
     return (
-        NIAMTicketGenerationTable.objects.filter(execution_date__isnull=False)
+        NIAMTicketGenerationTable.objects.using("default")
         .filter(
-            Q(niam_access_start_date_time__isnull=False,
-              niam_access_start_date_time__range=(from_dt, to_dt)) |
-            Q(sr_cr_start_date_time__isnull=False,
-              sr_cr_start_date_time__range=(from_dt, to_dt)) |
-            Q(execution_date__range=(from_date, to_date)) |
-            Q(execution_date__range=(exec_from, exec_to))
+            Q(sr_cr_start_date_time__date__range=(from_date, to_date))
+            | Q(
+                sr_cr_start_date_time__isnull=True,
+                execution_date__range=(from_date, to_date),
+            )
         )
         .order_by("-id")[:limit]
     )
@@ -3444,6 +3489,9 @@ def niam_template_db_view(request):
 @login_required(login_url="login")
 def fetch_niam_template_data(request):
     from django.forms.models import model_to_dict
+    from dashboard.task_modules.dependencies.extra_dependencies import (
+        NIAM_DATETIME_FIELDS,
+    )
 
     try:
         date_str = request.GET.get("date")
@@ -3467,10 +3515,15 @@ def fetch_niam_template_data(request):
         columns = [c["name"] for c in columns_meta]
 
         rows = []
-        for obj in qs:
+        for obj in sorted(qs, key=_niam_table_order):
             d = model_to_dict(obj)
             row = {"id": obj.pk}
             row.update({name: d.get(name) for name in columns})
+            # Datetime columns are returned as naive IST wall-clock strings —
+            # the same values the RITM workbook holds, without any timezone.
+            for field in NIAM_DATETIME_FIELDS:
+                if field in row:
+                    row[field] = _niam_naive_local(row[field])
             rows.append(row)
 
         from .Region_CRs.views import _user_can_edit_region_crs
@@ -3501,6 +3554,7 @@ def fetch_niam_template_data(request):
 def download_niam_template(request):
     from django.forms.models import model_to_dict
     import io
+    from dashboard.task_modules.dependencies.extra_dependencies import NIAM_DATETIME_FIELDS
 
     try:
         date_str = request.GET.get("date")
@@ -3519,7 +3573,7 @@ def download_niam_template(request):
             )
 
         qs = _niam_period_query(from_dt, to_dt, limit=5000)
-        rows = [model_to_dict(o) for o in qs]
+        rows = [model_to_dict(o) for o in sorted(qs, key=_niam_table_order)]
         if not rows:
             return JsonResponse(
                 {"ok": False, "message": "No data found for the selected period"},
@@ -3529,6 +3583,14 @@ def download_niam_template(request):
         columns_meta = _niam_template_columns()
         columns = [c["name"] for c in columns_meta]
         df = pd.DataFrame([{name: row.get(name) for name in columns} for row in rows])
+        # Excel cannot store timezone-aware datetimes. Write the app-local
+        # wall-clock time (Asia/Kolkata), as the RITM workbook does.
+        for field in NIAM_DATETIME_FIELDS:
+            if field in df.columns:
+                series = pd.to_datetime(df[field], errors="coerce")
+                if getattr(series.dt, "tz", None) is not None:
+                    series = series.dt.tz_convert("Asia/Kolkata").dt.tz_localize(None)
+                df[field] = series
         output = io.BytesIO()
         df.to_excel(output, index=False, sheet_name="NIAM_Template")
         output.seek(0)
@@ -3608,15 +3670,6 @@ def start_niam_fetch_crs(request):
     return start_task(request, FETCH_CRS_TASK_ID)
 
 
-def _niam_workbook_target(date_str):
-    """Path of the dated RITM workbook for a night date (YYYY-MM-DD)."""
-    from dashboard.task_modules.niam_ticket_generation.tasks import (
-        niam_workbook_path_for,
-    )
-
-    return niam_workbook_path_for(datetime.strptime(date_str, "%Y-%m-%d"))
-
-
 def _write_niam_edits_to_workbook(workbook_path, updates):
     """
     Write edited values into the RITM_INPUT sheet of a generated workbook.
@@ -3682,15 +3735,17 @@ def save_niam_template_changes(request):
     """
     Save the editable NIAM columns for the visible rows.
 
-    The seven editable columns must all be filled and, for the list columns,
-    chosen from the allowed options. Values are written to both
-    NIAMTicketGenerationTable and the dated RITM workbook.
+    Rows may be saved at any stage: blank values are allowed (a freshly fetched
+    CR is a placeholder that still needs its NIAM details), while any value that
+    is supplied for a list column must be one of the allowed options. Values are
+    written to both NIAMTicketGenerationTable and the dated RITM workbook.
     """
     from dashboard.models import NIAMTicketGenerationTable
     from dashboard.task_modules.dependencies.extra_dependencies import (
         NIAM_EDITABLE_FIELDS,
         _niam_key,
         niam_dropdown_options,
+        renumber_niam_sno,
     )
     from .Region_CRs.views import _user_can_edit_region_crs
 
@@ -3716,24 +3771,41 @@ def save_niam_template_changes(request):
 
     options = niam_dropdown_options()
 
+    # The browser sends row ids as strings (data attributes). Some stored values
+    # may predate the current option lists, so an unchanged value is accepted
+    # even when it is no longer offered in the dropdown.
+    requested_ids = []
+    for row in rows:
+        try:
+            requested_ids.append(int(row.get("id")))
+        except (TypeError, ValueError):
+            continue
+    current_values = {}
+    if requested_ids:
+        for obj in NIAMTicketGenerationTable.objects.using("default").filter(
+            pk__in=requested_ids
+        ):
+            current_values[obj.pk] = {
+                field: (getattr(obj, field) or "").strip()
+                for field in NIAM_EDITABLE_FIELDS
+            }
+
     errors = []
     cleaned = []
     for idx, row in enumerate(rows):
-        row_id = row.get("id")
-        if row_id is None:
-            errors.append({"row": idx, "message": "Missing row id."})
+        try:
+            row_id = int(row.get("id"))
+        except (TypeError, ValueError):
+            errors.append({"row": idx, "message": "Missing or invalid row id."})
             continue
 
         values = {}
         for field in NIAM_EDITABLE_FIELDS:
             raw = row.get(field)
             value = ("" if raw is None else str(raw)).strip()
-            if not value:
-                errors.append({"row": idx, "field": field, "message": "Required."})
-                values[field] = ""
-                continue
             allowed = options.get(field) or []
-            if allowed and value not in allowed:
+            unchanged = value == current_values.get(row_id, {}).get(field)
+            if value and allowed and value not in allowed and not unchanged:
                 errors.append({
                     "row": idx,
                     "field": field,
@@ -3746,13 +3818,14 @@ def save_niam_template_changes(request):
         return JsonResponse(
             {
                 "ok": False,
-                "message": "Some rows are incomplete or have invalid values.",
+                "message": "Some rows have invalid values.",
                 "errors": errors,
             },
             status=400,
         )
 
     updates_by_key = {}
+    renumber_dates = set()
     with transaction.atomic(using="default"):
         objects = {
             obj.pk: obj
@@ -3791,6 +3864,7 @@ def save_niam_template_changes(request):
                 base_vals2['access_type'] = 'READWRITE'
                 NIAMTicketGenerationTable.objects.using("default").create(**base_vals2)
                 updates_by_key[(_niam_key(sr_key), _niam_key(node_key))] = item["values"]
+                renumber_dates.add(exec_date)
                 continue
             # Check if reverting from split rows back to single
             # Look for other rows with same CR and node
@@ -3803,7 +3877,10 @@ def save_niam_template_changes(request):
                 node_name=node_key,
                 execution_date=exec_date
             ).exclude(pk=obj.pk))
-            if related and access_type_val.upper() in ["ADMIN", "READWRITE"]:
+            # Only a change of access type can complete a split pair. Saving a row
+            # whose access type is unchanged must not merge its sibling away.
+            access_changed = access_type_val.upper() != (obj.access_type or "").strip().upper()
+            if related and access_changed and access_type_val.upper() in ["ADMIN", "READWRITE"]:
                 # Check if related has the other split value
                 related_types = [(getattr(r, 'access_type') or '').strip().upper() for r in related]
                 if set(related_types + [access_type_val.upper()]) == {"ADMIN", "READWRITE"}:
@@ -3828,6 +3905,7 @@ def save_niam_template_changes(request):
                     obj.delete()
                     NIAMTicketGenerationTable.objects.using("default").create(**merged)
                     updates_by_key[(_niam_key(sr_key), _niam_key(node_key))] = item["values"]
+                    renumber_dates.add(exec_date)
                     continue
             # Normal update
             for field, value in item["values"].items():
@@ -3837,14 +3915,38 @@ def save_niam_template_changes(request):
                 (_niam_key(obj.sr_or_change_number), _niam_key(obj.node_name))
             ] = item["values"]
 
+        for renumber_date in renumber_dates:
+            renumber_niam_sno(renumber_date, using="default", compact=True)
+
     workbook_updated = 0
     warning = None
-    if date_str:
+    # The dated RITM workbook is named after the NIGHT (execution date - 1).
+    # Derive the target(s) from the execution dates of the rows that were
+    # saved; the picked date on the page is the CR start / execution date, so
+    # using it directly would target the following night's workbook.
+    workbook_exec_dates = sorted(
+        {
+            obj.execution_date
+            for obj in objects.values()
+            if getattr(obj, "execution_date", None) is not None
+        }
+    )
+    if workbook_exec_dates:
+        from dashboard.task_modules.niam_ticket_generation.tasks import (
+            niam_workbook_path_for,
+        )
+
         try:
-            workbook_path = _niam_workbook_target(date_str)
-            workbook_updated, warning = _write_niam_edits_to_workbook(
-                workbook_path, updates_by_key
-            )
+            for exec_date in workbook_exec_dates:
+                workbook_path = niam_workbook_path_for(
+                    datetime.combine(exec_date - timedelta(days=1), datetime.min.time())
+                )
+                count, warn = _write_niam_edits_to_workbook(
+                    workbook_path, updates_by_key
+                )
+                workbook_updated += count
+                if warn and warning is None:
+                    warning = warn
         except Exception as exc:  # never fail the DB save because of the file
             warning = (
                 "Rows saved to the database, but the workbook could not be "
@@ -3852,7 +3954,7 @@ def save_niam_template_changes(request):
             )
             logger.error("NIAM workbook write-back failed: %s", exc, exc_info=True)
     else:
-        warning = "No date supplied, so the workbook was not updated."
+        warning = "No execution date on the saved rows, so the workbook was not updated."
 
     return JsonResponse({
         "ok": True,

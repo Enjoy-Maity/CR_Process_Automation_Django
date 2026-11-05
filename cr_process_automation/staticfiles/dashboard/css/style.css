@@ -861,6 +861,57 @@ input {
     cursor: not-allowed;
 }
 
+/* "Save Changes" buttons that are not Region CR specific (e.g. the NIAM
+   Template Database). Without this rule the button only has the generic
+   .action-btn styling (white text, no background) and looks greyed out. */
+.save-btn {
+    background-color: #059669;
+    color: #ffffff;
+    border: 2px solid #047857;
+    transition: background-color 0.2s ease;
+}
+
+.save-btn:hover {
+    background-color: #047857;
+}
+
+.save-btn:active {
+    background-color: #065f46;
+}
+
+.save-btn:disabled {
+    background-color: #9ca3af;
+    border-color: #9ca3af;
+    cursor: not-allowed;
+}
+
+/* Editable dropdowns in the NIAM Template Database (Access Type etc.). Give
+   them a clear input look so a rendered <select> is not mistaken for plain
+   text, and keep them usable inside the very wide table. */
+.niam-input {
+    width: 100%;
+    min-width: 150px;
+    min-height: 28px;
+    padding: 3px 6px;
+    border: 1px solid #94a3b8;
+    border-radius: 5px;
+    background-color: #ffffff;
+    color: #111827;
+    font-size: 12px;
+    cursor: pointer;
+}
+
+.niam-input:focus {
+    outline: 2px solid #2563eb;
+    outline-offset: 1px;
+}
+
+.niam-input:disabled {
+    background-color: #f1f5f9;
+    color: #64748b;
+    cursor: not-allowed;
+}
+
 .editable-cell {
     background: #fffaf0;
     transition: background-color 0.2s ease;

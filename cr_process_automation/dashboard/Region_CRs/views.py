@@ -174,6 +174,14 @@ ALLOWED_REGION_CR_EDIT_ROLES = {"Admin", "Validator", "Night-SPOC"}
 PLANNING_STATUS_ALLOWED = {"planned", "unplanned", "discussed"}
 USER_EDITABLE_FIELDS = {"activity_executor", "auditor_name", "kpi_spoc_night", "kpi_spoc_morning", }  # add more if needed
 
+# Friendly column headers for fields whose model auto-label is not descriptive
+# enough for the Region CRs table / exports.
+REGION_CR_COLUMN_LABELS = {
+    "niam_ticket_required": "NIAM Ticket Required (Yes/No)",
+    "niam_node_type": "NIAM Node Type",
+}
+NIAM_TICKET_REQUIRED_ALLOWED = {"yes", "no"}
+
 
 _COW_BOOKKEEPING = {"id", "is_active", "version", "parent_reference", "parent_reference_id"}
 
@@ -316,7 +324,9 @@ def _master_cr_columns():
             continue
         if field.name in MASTER_CR_EXCLUDED_FIELDS:
             continue
-        label = field.verbose_name if field.verbose_name else field.name
+        label = REGION_CR_COLUMN_LABELS.get(field.name)
+        if not label:
+            label = field.verbose_name if field.verbose_name else field.name
         columns.append({"name": field.name, "label": str(label)})
     return columns
 
@@ -379,10 +389,6 @@ def fetch_region_cr_details(request):
     columns_meta = _master_cr_columns()
     columns = [c["name"] for c in columns_meta]
     field_list = columns if columns else MASTER_CR_FIELDS
-    # Remove NIAM Ticket related fields if present
-    field_list = [f for f in field_list if f not in ("niam_ticket_required", "niam_node_type", "NIAM_Ticket")]
-    columns_meta = [c for c in columns_meta if c["name"] not in ("niam_ticket_required", "niam_node_type", "NIAM_Ticket")]
-    columns = [c["name"] for c in columns_meta]
     # The row "id" is required by the frontend to identify rows on save
     # (data-row-id / collectChanges()), but it must NOT render as a column:
     # the JS already hides it via HIDDEN_COLUMNS.
@@ -582,7 +588,10 @@ def fetch_region_cr_details(request):
 
 
 def _user_can_edit_region_crs(user):
-    return user.is_authenticated and user.role in ("Admin", "Validator")
+    return (
+        getattr(user, "is_authenticated", False)
+        and getattr(user, "role", "") in ALLOWED_REGION_CR_EDIT_ROLES
+    )
 
 
 def bootstrap_selected_date_table():
@@ -635,6 +644,40 @@ def bootstrap_selected_date_table():
     return total_created
 
 
+def _remove_niam_rows_for_crs(cr_numbers):
+    """
+    Delete the NIAM template rows of CRs whose NIAM Ticket Required went Yes -> No.
+
+    Removes every NIAMTicketGenerationTable row of each CR (all execution dates),
+    sets the CR's SelectedDateTable snapshot to No so a later NIAM Ticket
+    Generator run cannot bring the CR back, and closes the SL. No gaps on the
+    affected nights. Runs inside the caller's transaction and returns
+    {cr_no: rows_removed}.
+    """
+    from dashboard.models import NIAMTicketGenerationTable
+    from dashboard.task_modules.dependencies.extra_dependencies import renumber_niam_sno
+
+    removed = {}
+    nights = set()
+    for cr_no in sorted(cr_numbers):
+        niam_rows = NIAMTicketGenerationTable.objects.using(DB_MASTER).filter(
+            sr_or_change_number__iexact=cr_no
+        )
+        nights.update(niam_rows.values_list("execution_date", flat=True))
+        count, _ = niam_rows.delete()
+        if count:
+            removed[cr_no] = count
+
+        SelectedDateTable.objects.using(DB_MASTER).filter(
+            cr_no__iexact=cr_no, is_active=True
+        ).update(niam_ticket_required="No")
+
+    for night in nights:
+        if night is not None:
+            renumber_niam_sno(night, using=DB_MASTER, compact=True)
+    return removed
+
+
 @require_POST
 @login_required(login_url="login")
 def save_region_cr_details(request):
@@ -665,6 +708,8 @@ def save_region_cr_details(request):
     updated_rows = []
     did_write = False
     affected_dates = set()  # CHANGED: track dates to rebuild in SelectedDateTable
+    niam_cr_numbers = set()  # CRs whose NIAM Ticket Required went Yes -> No
+    niam_removed = {}
 
     try:
         with transaction.atomic(using=DB_MASTER):
@@ -720,6 +765,18 @@ def save_region_cr_details(request):
                             }
                             break
                         value = normalized  # store canonical form
+
+                    if field_name == "niam_ticket_required" and value not in ("", None):
+                        normalized = str(value).strip().lower()
+                        if normalized not in NIAM_TICKET_REQUIRED_ALLOWED:
+                            field_error = {
+                                "id": row_id,
+                                "message": (
+                                    "niam_ticket_required must be 'Yes' or 'No'."
+                                ),
+                            }
+                            break
+                        value = normalized.capitalize()  # store canonical Yes/No
 
                     if field_name in USER_EDITABLE_FIELDS and value not in ("", None):
                         # User = get_user_model()
@@ -806,10 +863,18 @@ def save_region_cr_details(request):
                 updated_rows.append(new_obj.pk)
                 did_write = True
 
+                was_niam_yes = str(active_obj.niam_ticket_required or "").strip().lower() == "yes"
+                now_niam_no = str(new_obj.niam_ticket_required or "").strip().lower() == "no"
+                if was_niam_yes and now_niam_no and str(active_obj.cr_no or "").strip():
+                    niam_cr_numbers.add(str(active_obj.cr_no).strip())
+
                 # CHANGED: record the execution_date so SelectedDateTable can be
                 # rebuilt for it post-commit ("create from master if not available").
                 if new_obj.execution_date is not None:
                     affected_dates.add(new_obj.execution_date)
+
+            if niam_cr_numbers:
+                niam_removed = _remove_niam_rows_for_crs(niam_cr_numbers)
 
             # Register replica sync exactly once, only if we wrote something.
             if did_write:
@@ -839,6 +904,8 @@ def save_region_cr_details(request):
             "ok": ok,
             "updated_rows": updated_rows,
             "errors": errors,
+            "niam_rows_removed": sum(niam_removed.values()),
+            "niam_removed_crs": niam_removed,
         },
         status=status_code,
     )
@@ -1038,7 +1105,7 @@ def download_cr_history(request):
         "protocol":                     "Protocol",
         "execution_type":               "Execution Type",
         "cli_availability":             "CLI Availability",
-        "niam_ticket_required":         "NIAM Ticket Required",
+        "niam_ticket_required":         "NIAM Ticket Required (Yes/No)",
         "niam_node_type":               "NIAM Node Type",
         "additional_info":              "Additional Info",
         # CoW metadata columns in export

@@ -19,10 +19,15 @@ from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.utils import column_index_from_string, get_column_letter
 from dashboard.views import _timestamp
 from dashboard.exceptions import NotFoundException, ValidationException
-from dashboard.models import SelectedDateTable, MasterCRDatabase
+from dashboard.models import (
+    SelectedDateTable,
+    MasterCRDatabase,
+    NIAMTicketGenerationTable,
+)
 from django.conf import settings
 from django.http import JsonResponse
 from django.db import transaction
+from django.db.models import Q
 from dashboard.utils.file_locks import file_lock
 from dashboard.task_modules.dependencies.excel_modifier import ExcelModifier
 from dashboard.task_modules.dependencies.extra_dependencies import (
@@ -32,8 +37,11 @@ from dashboard.task_modules.dependencies.extra_dependencies import (
     niam_circle_df_maker,
     mail_id_worksheet_df_maker,
     niam_data_updater,
+    renumber_niam_sno,
     NIAM_DROPDOWN_SOURCES,
     NIAM_FIELD_TO_COLUMN,
+    NIAM_COLUMN_TO_FIELD_MAPPING,
+    NIAM_DATETIME_FIELDS,
 )
 
 
@@ -58,6 +66,19 @@ def get_max_row_in_column(worksheet, column_index: int) -> int:
         if worksheet.cell(row=row, column=column_index).value not in (None, ""):
             last_row = row
     return last_row
+
+
+def _cell_text(value) -> str:
+    """Return a cell value as text, mapping None/NaN/NaT to an empty string."""
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    text = str(value)
+    return "" if text.strip().lower() in ("nan", "nat", "none") else text
 
 
 def node_names_checker(node_type_var_list, node_names):
@@ -179,7 +200,17 @@ def niam_input_initiator(
     filtered_df: pd.DataFrame, 
     mail_id_worksheet_df: pd.DataFrame, 
     niam_circle_df: pd.DataFrame, 
-    date_: datetime):
+    date_: datetime,
+    include_all_crs: bool = False):
+    """
+    Build the 24-column RITM input frame from the (already filtered) CR frame.
+
+    ``include_all_crs`` keeps CRs whose NIAM fields are still blank: instead of
+    skipping a CR with no Node Type / Node Details, one placeholder row is
+    emitted with a blank NIAM Node Name so the user can fill the row in on the
+    NIAM Template Database page. Strict ticket generation leaves it False so
+    only fully-specified CRs produce rows.
+    """
     
     if filtered_df.shape[0] > 0:
         unique_crs = filtered_df["CR No"].astype(str).str.strip().unique()
@@ -278,15 +309,24 @@ def niam_input_initiator(
             cr = unique_crs[i]
             selected_cr_df = filtered_df.loc[filtered_df["CR No"] == cr]
             
-            node_type_var = selected_cr_df.iloc[0, niam_node_type_index]
+            node_type_var = _cell_text(selected_cr_df.iloc[0, niam_node_type_index])
             
-            node_type_var_list = [str(element).strip() for element in node_type_var.split(",")]
-            node_names = re.sub(r",", "", selected_cr_df.iloc[0, node_details_index])
+            node_type_var_list = [element.strip() for element in node_type_var.split(",")]
+            node_details_value = _cell_text(
+                selected_cr_df.iloc[0, node_details_index]
+            )
+            node_names = re.sub(r",", "", node_details_value)
             node_names = [str(element).strip() for element in re.split("\n", node_names) if len(str(element).strip())> 0]
             # print(f"{cr = }\n{node_type_var = }\n{node_type_var_list = }\n{node_names = }\n")
             
             bool_result, node_names_list = node_names_checker(node_type_var_list, node_names)
             # print(f"\n{bool_result = }\n{node_names_list = }")
+            
+            if not bool_result and include_all_crs:
+                # Keep the CR in the template even though its NIAM fields are
+                # still blank; the blank node name marks it as a placeholder.
+                node_names_list = [""]
+                bool_result = True
             
             if bool_result:
                 try:
@@ -299,7 +339,7 @@ def niam_input_initiator(
                         
                         # Entry for Total Node Details
                         node_details.append(
-                            selected_cr_df.iloc[0, node_details_index]
+                            node_details_value
                         )
                         
                         # Entry for Request for (email)
@@ -473,10 +513,12 @@ def niam_input_initiator(
 
 # The "Fetch CRs" task (NIAM Template Database "Fetch CR" button). Kept aligned
 # with views.FETCH_CRS_TASK_ID so this module can serve both NIAM flows:
-#   id 7 = full NIAM Ticket Generation (run_task below)
+#   id 7 = full NIAM Ticket Generation (strict eligibility)
 #   id 8 = Fetch CRs — validate/rebuild SelectedDateTable for the selected
-#          night's execution date and then build the NIAM input (generate_niam_input)
-#          so the page can display the Input sheet straight away.
+#          night's execution date and then add NIAM template rows for CRs whose
+#          NIAM Ticket Required = Yes (include_all_crs=True). Existing NIAM rows
+#          are always kept.
+NIAM_GENERATE_TASK_ID = 7
 FETCH_CRS_TASK_ID = 8
 
 
@@ -517,6 +559,9 @@ def fetch_crs_for_date(selected_date, GLOBAL_LOGS, timestamp_fn, runtime=None):
         f"{execution_date.isoformat()} ---- {timestamp_fn()}"
     )
 
+    # If the CR tables have no rows for that execution date but NIAM rows were
+    # already generated, there is nothing to rebuild: the page can still show
+    # the existing NIAM rows.
     in_selected = SelectedDateTable.objects.filter(
         execution_date=execution_date, is_active=True
     ).exists()
@@ -525,6 +570,27 @@ def fetch_crs_for_date(selected_date, GLOBAL_LOGS, timestamp_fn, runtime=None):
     ).exists()
 
     if not (in_selected or in_master):
+        niam_count = NIAMTicketGenerationTable.objects.filter(
+            execution_date=execution_date
+        ).count()
+        if niam_count:
+            message = (
+                f"{niam_count} existing NIAM row(s) found for {picked_date} "
+                f"(execute {execution_date}); reusing them."
+            )
+            GLOBAL_LOGS.append(f"Fetch CRs: {message} ---- {timestamp_fn()}")
+            if runtime is not None:
+                runtime["total_crs"] = niam_count
+            return {
+                "status": "Completed",
+                "download_ready": False,
+                "message": message,
+                "counts": {
+                    "total_crs": niam_count,
+                    "execution_date": execution_date.isoformat(),
+                },
+            }
+
         raise NotFoundException(
             f"No CR found for the selected date {picked_date} (CRs execute on "
             f"{execution_date}).",
@@ -576,7 +642,188 @@ def fetch_crs_for_date(selected_date, GLOBAL_LOGS, timestamp_fn, runtime=None):
     }
 
 
-def generate_niam_input(night_date, GLOBAL_LOGS=None, timestamp_fn=None, runtime=None):
+def _niam_template_df_from_rows(rows):
+    """Convert NIAMTicketGenerationTable rows into the 24-column RITM frame."""
+    df = pd.DataFrame(
+        {
+            column: [row.get(field) for row in rows]
+            for column, field in NIAM_COLUMN_TO_FIELD_MAPPING.items()
+        },
+        columns=list(NIAM_COLUMN_TO_FIELD_MAPPING.keys()),
+    )
+
+    # Excel cannot store timezone-aware datetimes. Render the stored datetimes
+    # in the app's local timezone (Asia/Kolkata) as naive wall-clock values,
+    # matching the strings written by niam_input_initiator().
+    for field in NIAM_DATETIME_FIELDS:
+        column = NIAM_FIELD_TO_COLUMN.get(field)
+        if column not in df.columns:
+            continue
+        series = pd.to_datetime(df[column], errors="coerce")
+        if getattr(series.dt, "tz", None) is not None:
+            series = series.dt.tz_convert("Asia/Kolkata").dt.tz_localize(None)
+        df[column] = series
+
+    return df
+
+
+def _reuse_existing_niam_rows(rows, parsed_date, label, GLOBAL_LOGS, timestamp_fn):
+    """
+    Rebuild the dated workbook from NIAM rows that were generated previously.
+
+    Existing NIAM rows are authoritative: they may contain values a user edited
+    on the NIAM Template Database page, so they are never re-derived from the
+    CR tables (which would overwrite those edits).
+    """
+    execution_date = (parsed_date + timedelta(days=1)).date()
+    GLOBAL_LOGS.append(
+        f"NIAM: {len(rows)} existing row(s) found in NIAMTicketGenerationTable "
+        f"for execution {execution_date}; reusing them ---- {timestamp_fn()}"
+    )
+
+    try:
+        with file_lock(niam_workbook_path_for(parsed_date)):
+            workbook_file = niam_workbook_template_maker(
+                _niam_template_df_from_rows(rows),
+                mail_id_worksheet_df_maker(),
+                parsed_date,
+            )
+    except Exception as exc:  # workbook is optional; the page data is already there
+        GLOBAL_LOGS.append(
+            f"NIAM: could not rewrite the workbook from existing rows: {exc} "
+            f"---- {timestamp_fn()}"
+        )
+        return {
+            "status": "Completed",
+            "download_ready": False,
+            "message": (
+                f"{len(rows)} existing NIAM row(s) found for {label}; "
+                "the workbook could not be rewritten."
+            ),
+        }
+
+    GLOBAL_LOGS.append(
+        f"NIAM ticket workbook rebuilt from existing rows: {workbook_file} "
+        f"---- {timestamp_fn()}"
+    )
+    return {
+        "status": "Completed",
+        "download_ready": True,
+        "download_name": str(workbook_file),
+        "message": f"{len(rows)} existing NIAM row(s) reused for {label}.",
+    }
+
+
+def _niam_cr_source_candidates(execution_date):
+    """Yield ("SelectedDateTable"|"MasterCRDatabase", rows) for the date.
+
+    Reads go to the master DB: this runs in the same pipeline that has just
+    rebuilt SelectedDateTable, so it must not race replication lag.
+    """
+    fields = settings.SELECTED_DATE_TABLE_FIELDS
+
+    selected_rows = list(
+        SelectedDateTable.objects.using("default").filter(
+            execution_date=execution_date, is_active=True
+        ).values(*fields)
+    )
+    if selected_rows:
+        yield "SelectedDateTable", selected_rows
+
+    # Always keep MasterCRDatabase as a fallback: SelectedDateTable may be
+    # missing or stale for a date even when the master rows exist.
+    master_rows = list(
+        MasterCRDatabase.objects.using("default").filter(
+            execution_date=execution_date, is_active=True
+        ).values(*fields)
+    )
+    if master_rows:
+        yield "MasterCRDatabase", master_rows
+
+
+def _filter_niam_eligible(df, cr_whitelist, include_all=False):
+    """Apply the NIAM eligibility rules to a SelectedDate-shaped DataFrame.
+
+    With ``include_all=True`` only CRs flagged ``NIAM Ticket Required = Yes``
+    are kept (used by "Fetch CRs" so the NIAM Template Database page is scoped
+    to CRs that need a ticket, even when their node details are still blank).
+    Strict ticket generation keeps ``include_all=False``.
+    """
+    if df is None or df.empty:
+        return df
+
+    if include_all:
+        column = "NIAM Ticket Required (Yes/No)"
+        if column not in df.columns:
+            return df.iloc[0:0]
+        return df.loc[_norm_series(df[column]).eq("yes")]
+
+    required_columns = {
+        "CR No",
+        "Planning Status",
+        "NIAM Ticket Required (Yes/No)",
+        "NIAM Node Type",
+    }
+    if not required_columns.issubset(df.columns):
+        return df.iloc[0:0]
+
+    planning_status_norm = _norm_series(df["Planning Status"])
+    niam_cr_norm = _norm_series(df["NIAM Ticket Required (Yes/No)"])
+    niam_node_type = _norm_series(df["NIAM Node Type"])
+
+    filtered = df.loc[
+        (planning_status_norm.eq("planned") & niam_cr_norm.eq("yes"))
+        & (niam_node_type.astype(str).str.strip().map(len) > 0)
+        & (
+            ~niam_node_type.astype(str)
+            .str.strip()
+            .str.lower()
+            .isin(["nan", "tempna", "na"])
+        )
+    ]
+
+    if cr_whitelist:
+        filtered = filtered.loc[
+            filtered["CR No"].astype(str).str.strip().isin(cr_whitelist)
+        ]
+
+    return filtered
+
+
+def _placeholder_node_rows(execution_date):
+    """Rows for the date that were created with a blank NIAM node name."""
+    return NIAMTicketGenerationTable.objects.filter(
+        execution_date=execution_date
+    ).filter(
+        Q(node_name__isnull=True)
+        | Q(node_name__exact="")
+        | Q(node_name__iexact="nan")
+        | Q(node_name__iexact="none")
+    )
+
+
+def _remove_placeholder_niam_rows(execution_date, cr_numbers=None):
+    """Delete blank-node placeholder rows for the date (optionally per CR)."""
+    qs = _placeholder_node_rows(execution_date)
+    if cr_numbers is not None:
+        normalized = {str(cr).strip() for cr in cr_numbers if str(cr).strip()}
+        if not normalized:
+            return 0
+        qs = qs.filter(sr_or_change_number__in=normalized)
+    with transaction.atomic(using="default"):
+        count, _ = qs.delete()
+        if count:
+            renumber_niam_sno(execution_date, using="default", compact=True)
+    return count
+
+
+def generate_niam_input(
+    night_date,
+    GLOBAL_LOGS=None,
+    timestamp_fn=None,
+    runtime=None,
+    include_all_crs=False,
+):
     """
     Build the NIAM input template for the night date ``night_date`` and:
 
@@ -584,16 +831,27 @@ def generate_niam_input(night_date, GLOBAL_LOGS=None, timestamp_fn=None, runtime
       * (re)write the dated RITM workbook
         (RITM Input_PS_Core_<night_date>.xlsx).
 
-    The CRs are read from SelectedDateTable for the execution date
-    (``night_date`` + 1), matching the rest of the app. This is the single
-    implementation shared by the "NIAM Ticket Generator" task (id 7) and the
-    NIAM page's "Fetch CR" task (id 8), so both produce an identical Input
-    sheet.
+    Source priority (execution date = ``night_date`` + 1):
+
+      1. NIAMTicketGenerationTable rows already generated for that date: reuse
+         them as-is (including any user edits) and only rebuild the workbook.
+      2. SelectedDateTable rows for that execution date.
+      3. MasterCRDatabase rows for that execution date.
+
+    This is the single implementation shared by the "NIAM Ticket Generator"
+    task (id 7) and the NIAM page's "Fetch CR" task (id 8).
+
+    ``include_all_crs=True`` is the "Fetch CR" flow: only CRs flagged
+    ``NIAM Ticket Required = Yes`` are considered, existing NIAM rows are kept
+    as-is (including rows whose ticket was never raised), and template rows are
+    added only for Yes CRs that do not have a row yet. Strict generation (id 7)
+    keeps the full eligibility gate (planned + Yes + node details).
 
     Returns a dict in the same shape the task runner expects
     (``status`` / ``download_ready`` / ``message`` / optional ``download_name``).
     """
-    GLOBAL_LOGS = GLOBAL_LOGS or []
+    if GLOBAL_LOGS is None:
+        GLOBAL_LOGS = []
     timestamp_fn = timestamp_fn or _timestamp
 
     parsed_date = night_date
@@ -608,62 +866,144 @@ def generate_niam_input(night_date, GLOBAL_LOGS=None, timestamp_fn=None, runtime
     empty_result = {
         "status": "Completed",
         "download_ready": False,
-        "message": f"No NIAM tickets were required for {label}.",
+        "message": (
+            f"No CRs found for {label}."
+            if include_all_crs
+            else f"No NIAM tickets were required for {label}."
+        ),
     }
 
-    selected_date_data = list(
-        SelectedDateTable.objects.filter(
-            execution_date=execution_date, is_active=True
-        ).values(*settings.SELECTED_DATE_TABLE_FIELDS)
+    # Strict generation must not treat template placeholders (blank node name)
+    # as already-raised tickets. They are kept for CRs that stay ineligible and
+    # are removed per CR below once real node rows replace them.
+    placeholder_q = (
+        Q(node_name__isnull=True)
+        | Q(node_name__exact="")
+        | Q(node_name__iexact="nan")
+        | Q(node_name__iexact="none")
     )
 
-    if not selected_date_data:
+    # 1) Existing NIAM rows are authoritative and are always shown on the page,
+    #    whether the ticket was raised or not, because they may contain manual
+    #    edits. Strict generation ignores blank-node placeholders here so it can
+    #    still generate the real node rows for a date that only has a template.
+    existing_qs = NIAMTicketGenerationTable.objects.using("default").filter(
+        execution_date=execution_date
+    )
+    if not include_all_crs:
+        existing_qs = existing_qs.exclude(placeholder_q)
+    existing_niam_rows = list(existing_qs.values())
+    existing_cr_numbers = {
+        str(row.get("sr_or_change_number") or "").strip()
+        for row in existing_niam_rows
+        if str(row.get("sr_or_change_number") or "").strip()
+    }
+    if existing_niam_rows and not include_all_crs:
+        return _reuse_existing_niam_rows(
+            existing_niam_rows, parsed_date, label, GLOBAL_LOGS, timestamp_fn
+        )
+
+    cr_wise_status_df = cr_wise_status_df_maker(parsed_date)
+    if cr_wise_status_df is None or cr_wise_status_df.empty:
         GLOBAL_LOGS.append(
-            f"NIAM: no CRs in SelectedDateTable for execution {execution_date} "
+            f"NIAM: no CRWiseStatus rows for execution {execution_date} "
+            f"---- {timestamp_fn()}"
+        )
+        if not include_all_crs:
+            return empty_result
+        to_be_filter_crs = []
+    else:
+        # NIAM_Ticket column removed; treat all as not success
+        if "NIAM_Ticket" in cr_wise_status_df.columns:
+            cr_wise_status_df["NIAM_Ticket"] = (
+                cr_wise_status_df["NIAM_Ticket"]
+                .fillna("")
+                .astype(str)
+                .str.strip()
+                .str.lower()
+            )
+            cr_wise_status_df = cr_wise_status_df.loc[
+                cr_wise_status_df["NIAM_Ticket"] != "success"
+            ]
+        # else include all CRs from cr_wise_status_df
+
+        to_be_filter_crs = list(
+            cr_wise_status_df["cr_no"].astype(str).str.strip().unique()
+        )
+
+    # 2) SelectedDateTable first, 3) MasterCRDatabase as the fallback.
+    selected_data_df = None
+    used_source = None
+    for source_name, rows in _niam_cr_source_candidates(execution_date):
+        candidate_df = selected_date_df_maker(rows)
+        if candidate_df is None or candidate_df.empty:
+            continue
+
+        filtered_df = _filter_niam_eligible(
+            candidate_df, to_be_filter_crs, include_all=include_all_crs
+        )
+        if include_all_crs:
+            GLOBAL_LOGS.append(
+                f"NIAM: {source_name} has {len(rows)} CR(s) for execution "
+                f"{execution_date}; {len(filtered_df)} have NIAM Ticket "
+                f"Required=Yes ---- {timestamp_fn()}"
+            )
+        else:
+            GLOBAL_LOGS.append(
+                f"NIAM: {source_name} has {len(rows)} CR(s) for execution "
+                f"{execution_date}; {len(filtered_df)} pass the NIAM filters "
+                f"(planned + NIAM Ticket Required=yes + NIAM Node Type set) "
+                f"---- {timestamp_fn()}"
+            )
+        if not filtered_df.empty:
+            selected_data_df = filtered_df
+            used_source = source_name
+            break
+
+    if selected_data_df is None or selected_data_df.empty:
+        if include_all_crs:
+            GLOBAL_LOGS.append(
+                f"NIAM: no CRs with NIAM Ticket Required=Yes in "
+                f"SelectedDateTable or MasterCRDatabase for execution "
+                f"{execution_date} ---- {timestamp_fn()}"
+            )
+            empty_result["message"] = (
+                f"No CRs with NIAM Ticket Required=Yes found for {label}."
+            )
+            if existing_niam_rows:
+                return _reuse_existing_niam_rows(
+                    existing_niam_rows, parsed_date, label, GLOBAL_LOGS, timestamp_fn
+                )
+            return empty_result
+
+        GLOBAL_LOGS.append(
+            f"NIAM: no CRs eligible for the template in SelectedDateTable or "
+            f"MasterCRDatabase for execution {execution_date} "
             f"---- {timestamp_fn()}"
         )
         return empty_result
 
-    selected_data_df = selected_date_df_maker(selected_date_data)
-    if selected_data_df is None or selected_data_df.empty:
-        return empty_result
-
-    cr_wise_status_df = cr_wise_status_df_maker(parsed_date)
-    if cr_wise_status_df is None or cr_wise_status_df.empty:
-        return empty_result
-
-    # NIAM_Ticket column removed; treat all as not success
-    if "NIAM_Ticket" in cr_wise_status_df.columns:
-        cr_wise_status_df["NIAM_Ticket"] = (
-            cr_wise_status_df["NIAM_Ticket"].fillna("").astype(str).str.strip().str.lower()
+    if include_all_crs:
+        # Keep every existing NIAM row untouched; add rows only for Yes CRs
+        # that are not represented in NIAMTicketGenerationTable yet.
+        already_present = (
+            selected_data_df["CR No"].astype(str).str.strip().isin(existing_cr_numbers)
         )
-        cr_wise_status_df = cr_wise_status_df.loc[
-            cr_wise_status_df["NIAM_Ticket"] != "success"
-        ]
-    # else include all CRs from cr_wise_status_df
+        selected_data_df = selected_data_df.loc[~already_present]
+        if selected_data_df.empty:
+            GLOBAL_LOGS.append(
+                f"NIAM: all {len(existing_cr_numbers)} NIAM CR(s) for execution "
+                f"{execution_date} already have template rows; nothing to add "
+                f"---- {timestamp_fn()}"
+            )
+            if existing_niam_rows:
+                return _reuse_existing_niam_rows(
+                    existing_niam_rows, parsed_date, label, GLOBAL_LOGS, timestamp_fn
+                )
+            return empty_result
 
-    planning_status_norm = _norm_series(selected_data_df["Planning Status"])
-    niam_cr_norm = _norm_series(selected_data_df["NIAM Ticket Required (Yes/No)"])
-    niam_node_type = _norm_series(selected_data_df["NIAM Node Type"])
-
-    selected_data_df = selected_data_df.loc[
-        (planning_status_norm.eq("planned") & niam_cr_norm.eq("yes"))
-        & (niam_node_type.astype(str).str.strip().map(len) > 0)
-        & (
-            ~niam_node_type.astype(str)
-            .str.strip()
-            .str.lower()
-            .isin(["nan", "tempna", "na"])
-        )
-    ]
-
-    to_be_filter_crs = list(cr_wise_status_df["cr_no"].astype(str).str.strip().unique())
-    selected_data_df = selected_data_df.loc[
-        selected_data_df["CR No"].astype(str).str.strip().isin(to_be_filter_crs)
-    ]
-
-    if selected_data_df.empty:
-        return empty_result
+    if runtime is not None:
+        runtime["total_crs"] = len(selected_data_df)
 
     # The hidden "Mail_ID_Worksheet" frame supplies the Change Responsible ->
     # Mail ID lookup, the Circle -> NIAM Circle mapping, and the five dropdown
@@ -682,6 +1022,7 @@ def generate_niam_input(night_date, GLOBAL_LOGS=None, timestamp_fn=None, runtime
                 mail_id_df,
                 niam_circle_df,
                 parsed_date,
+                include_all_crs=include_all_crs,
             )
     except TimeoutError as exc:
         return {
@@ -691,14 +1032,59 @@ def generate_niam_input(night_date, GLOBAL_LOGS=None, timestamp_fn=None, runtime
         }
 
     if workbook_file and Path(workbook_file).exists():
+        # Real node rows now exist for these CRs, so drop their blank-node
+        # placeholders (placeholder rows for ineligible CRs are kept).
+        if not include_all_crs and "CR No" in selected_data_df.columns:
+            removed = _remove_placeholder_niam_rows(
+                execution_date,
+                selected_data_df["CR No"].astype(str).str.strip().unique(),
+            )
+            if removed:
+                GLOBAL_LOGS.append(
+                    f"NIAM: removed {removed} placeholder row(s) replaced by "
+                    f"real node rows ---- {timestamp_fn()}"
+                )
+
+        if include_all_crs:
+            # The workbook was just written from the *newly added* rows only.
+            # Rewrite it from every NIAM row for the date so the download keeps
+            # the existing rows (and their manual edits) too.
+            all_rows = list(
+                NIAMTicketGenerationTable.objects.using("default").filter(
+                    execution_date=execution_date
+                ).values()
+            )
+            try:
+                with file_lock(niam_workbook_path_for(parsed_date)):
+                    rebuilt_file = niam_workbook_template_maker(
+                        _niam_template_df_from_rows(all_rows),
+                        mail_id_df,
+                        parsed_date,
+                    )
+                if rebuilt_file:
+                    workbook_file = rebuilt_file
+            except Exception as exc:
+                GLOBAL_LOGS.append(
+                    f"NIAM: could not rebuild the workbook from all rows: {exc} "
+                    f"---- {timestamp_fn()}"
+                )
+
         GLOBAL_LOGS.append(
-            f"NIAM ticket workbook generated: {workbook_file} ---- {timestamp_fn()}"
+            f"NIAM ticket workbook generated from {used_source}: "
+            f"{workbook_file} ---- {timestamp_fn()}"
         )
+        if include_all_crs:
+            message = (
+                f"Added {len(selected_data_df)} NIAM CR(s) with NIAM Ticket "
+                f"Required=Yes for {label} ({used_source})."
+            )
+        else:
+            message = f"NIAM ticket generated for {label} ({used_source})."
         return {
             "status": "Completed",
             "download_ready": True,
             "download_name": str(workbook_file),
-            "message": f"NIAM ticket generated for {label}.",
+            "message": message,
         }
 
     return empty_result
@@ -716,7 +1102,8 @@ def run_task(
     regions=None
 ):
     global glogs
-    GLOBAL_LOGS = GLOBAL_LOGS or []
+    if GLOBAL_LOGS is None:
+        GLOBAL_LOGS = []
     timestamp_fn = timestamp_fn or _timestamp
 
     runtime["status"] = "Running"
@@ -733,8 +1120,8 @@ def run_task(
     runtime["otp_event"] = Event()
 
     # "Fetch CR" (task id 8, NIAM Template Database page): fetch the selected
-    # night's CRs, then immediately build the NIAM input (same work the "NIAM
-    # Ticket Generator" button does) so the Input sheet is ready to display.
+    # night's CRs, then add template rows for the CRs flagged
+    # "NIAM Ticket Required = Yes". Existing NIAM rows are always kept.
     if task.get("id") == FETCH_CRS_TASK_ID:
         fetch_result = fetch_crs_for_date(
             selected_date=selected_date,
@@ -750,11 +1137,28 @@ def run_task(
             GLOBAL_LOGS=GLOBAL_LOGS,
             timestamp_fn=timestamp_fn,
             runtime=runtime,
+            include_all_crs=True,
         )
         gen_result["counts"] = fetch_result.get("counts", {})
         return gen_result
 
-    # Task id 7: NIAM Ticket Generation on its own.
+    # Task id 7: strict NIAM Ticket Generation on its own. Only CRs that are
+    # planned, require a NIAM ticket, and have a node type/node list produce
+    # rows; each CR's blank-node placeholder is replaced by its real node rows.
+    if task.get("id") == NIAM_GENERATE_TASK_ID:
+        return generate_niam_input(
+            selected_date,
+            GLOBAL_LOGS=GLOBAL_LOGS,
+            timestamp_fn=timestamp_fn,
+            runtime=runtime,
+        )
+
+    # Any other id must not silently change NIAM data: run the safe strict path
+    # and make the unexpected dispatch visible in the task log.
+    GLOBAL_LOGS.append(
+        f"NIAM: unexpected task id {task.get('id')!r}; running strict "
+        f"generation ---- {timestamp_fn()}"
+    )
     return generate_niam_input(
         selected_date,
         GLOBAL_LOGS=GLOBAL_LOGS,

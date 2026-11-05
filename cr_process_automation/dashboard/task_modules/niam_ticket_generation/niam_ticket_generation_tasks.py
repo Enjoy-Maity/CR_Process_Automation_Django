@@ -635,9 +635,7 @@ def pre_checks(_date: datetime, logs: List[AnyStr]=[]) -> Tuple[bool, Union[pd.D
             "NIAM Input Excel file not found",
         )
         
-        if manager:
-            manager.show_info_signal.emit(
-                "File Not Found",
+        logs.append(
                 "NIAM File not found",
                 "error"
             )
@@ -697,6 +695,17 @@ def pre_checks(_date: datetime, logs: List[AnyStr]=[]) -> Tuple[bool, Union[pd.D
                     )
                 
                 return False, None
+
+
+def pre_checks(_date: datetime) -> Tuple[bool, Union[pd.DataFrame, None], List[AnyStr]]:
+    result_df = niam_ticket_generation_df_maker(_date)
+
+    if not isinstance(result_df, pd.DataFrame):
+        return False, None
+    
+    return True, result_df
+
+
 
 
 def run_task(

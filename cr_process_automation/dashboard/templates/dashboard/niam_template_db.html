@@ -7,7 +7,7 @@
     </div>
     <div class="region-filter-panel" style="margin-bottom:16px;padding:14px;border:1px solid #d5dde8;border-radius:10px;background:#f7f9fc;">
         <div style="margin-bottom:12px;">
-            <span class="cr-history-filter-label">Note:- Select Date before fetching data.</span>
+            <span class="cr-history-filter-label">Note:- Select Date before fetching data. The table, Download Template and Save apply to the CRs whose CR Start Date-Time falls on the selected date. Fetch CR and NIAM Ticket Generator run for the night starting on the selected date (CRs execute the next day).</span>
         </div>
         <div style="display:flex;gap:20px;align-items:center;flex-wrap:wrap;">
             <div>
@@ -59,7 +59,12 @@ function escapeHtml(text) {
 }
 
 function isEditable(name) {
-    return EDITABLE_COLUMNS.indexOf(name) !== -1;
+    // A column is editable when the server advertises it as editable. As a
+    // safety net, also treat any column that has dropdown options configured
+    // as editable, so a missing entry in ``editable_columns`` cannot turn an
+    // existing dropdown (e.g. Access Type) into a plain text cell.
+    return EDITABLE_COLUMNS.indexOf(name) !== -1 ||
+        Object.prototype.hasOwnProperty.call(NIAM_OPTIONS, name);
 }
 
 function renderNiamSkeleton(columns) {
@@ -160,6 +165,13 @@ function setNiamStatus(message) {
     if (el) el.textContent = message || '';
 }
 
+function setSaveEnabled(enabled) {
+    const btn = document.getElementById('save_niam_template_btn');
+    if (!btn) return;
+    // Never present an editable-looking Save button to read-only users.
+    btn.disabled = !enabled || !CAN_EDIT_NIAM;
+}
+
 function selectedNiamDate() {
     const date = document.getElementById('niam_date').value;
     if (!date) {
@@ -179,6 +191,9 @@ function loadNiam(params) {
                 return;
             }
             renderNiamTable(data);
+            // A previous task may have left the button disabled; re-enable it
+            // now that rows are on screen and editable.
+            setSaveEnabled(true);
             const label = data.period_label ? data.period_label + ' - ' : '';
             setNiamStatus(label + (data.count || 0) + ' row(s) loaded.');
         })
