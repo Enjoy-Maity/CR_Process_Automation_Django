@@ -41,6 +41,8 @@ urlpatterns = [
     
     path('playwright-auth-iframe/', views.playwright_auth_iframe, name='playwright_auth_iframe'),
     path("playwright-password-iframe/", views.playwright_password_iframe, name="playwright_password_iframe"),
+    path("playwright-notice-iframe/", views.playwright_notice_iframe, name="playwright_notice_iframe"),
+    path("playwright-alert-iframe/", views.playwright_alert_iframe, name="playwright_alert_iframe"),
 
     path("api/task/submit-otp/<int:task_id>/", views.submit_otp, name="submit_otp"),
     path("api/task/submit-password/<int:task_id>/", views.submit_password, name="submit_password"),  # NEW

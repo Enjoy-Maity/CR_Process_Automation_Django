@@ -287,6 +287,13 @@ class ExcelModifier:
                     j += 1
             i += 1
         return None
+
+    
+    def get_row_based_on_multi_column_values_and_header(self, header_values_dict: Dict[str, List[str]]) -> int|None:
+        for i in range(self.header_row + 1, self.rows + 1):
+            if all([self.get_data(i, header) in value_list for header, value_list in header_values_dict.items()]):
+                return i
+        return None
     
     
     def get_cell_based_on_value(self, header: str|int, value: str) -> Tuple[int|None, int|None]:

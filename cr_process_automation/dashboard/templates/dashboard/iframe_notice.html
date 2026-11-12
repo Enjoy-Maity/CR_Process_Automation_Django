@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Sign-in Approval Required</title>
+    <style>
+        * { box-sizing: border-box; }
+        html, body {
+            margin: 0;
+            padding: 0;
+            background: #ffffff;
+            color: #1f2937;
+            font-family: Arial, sans-serif;
+        }
+        .notice {
+            padding: 22px 24px 20px;
+            text-align: center;
+        }
+        .notice-title {
+            margin: 0 0 8px;
+            font-size: 16px;
+            font-weight: 700;
+            color: #0a5ea8;
+        }
+        .notice-description {
+            margin: 0 0 16px;
+            color: #6b7280;
+            font-size: 13px;
+            line-height: 1.45;
+        }
+        .notice-code {
+            margin: 0 auto 16px;
+            padding: 18px 12px;
+            max-width: 260px;
+            border: 2px solid #0a5ea8;
+            border-radius: 12px;
+            background: #f2f7fc;
+            color: #08457a;
+            font-size: 52px;
+            font-weight: 800;
+            letter-spacing: 8px;
+            line-height: 1.1;
+            font-family: "Courier New", monospace;
+        }
+        .notice-hint {
+            margin: 0;
+            color: #6b7280;
+            font-size: 12px;
+            line-height: 1.5;
+        }
+        .notice-status {
+            margin-top: 14px;
+            color: #0a5ea8;
+            font-size: 12px;
+            font-weight: 700;
+        }
+    </style>
+</head>
+<body>
+    <div class="notice">
+        <h2 class="notice-title">Approve the sign-in on your phone</h2>
+        <p class="notice-description">
+            Open Microsoft Authenticator and enter this number to approve the sign-in:
+        </p>
+        <div class="notice-code" id="notice-code">{{ notice_text|default:"----" }}</div>
+        <p class="notice-hint">
+            This code disappears automatically once the sign-in prompt closes.
+        </p>
+        <p class="notice-status" id="notice-status">{{ status|default:"Waiting for Sign-in Approval" }}</p>
+    </div>
+
+    <script>
+        (function () {
+            const taskId = {{ task_id|default:"null" }};
+            const codeEl = document.getElementById('notice-code');
+            const statusEl = document.getElementById('notice-status');
+
+            function isNoticeRequired(task) {
+                return task.notice_required === true ||
+                    task.notice_required === 'true' ||
+                    task.notice_required === 1;
+            }
+
+            function closeIframe() {
+                try {
+                    window.parent.postMessage(
+                        { type: 'auth-notice', action: 'close_iframe' },
+                        '*'
+                    );
+                } catch (err) {
+                    // Parent may be gone; nothing else to do.
+                }
+            }
+
+            async function poll() {
+                try {
+                    const response = await fetch('/api/task/dashboard-data/', {
+                        headers: { 'Accept': 'application/json' },
+                        cache: 'no-store',
+                    });
+                    if (response.ok) {
+                        const data = await response.json();
+                        const task = (data.tasks || []).find(
+                            item => Number(item.id) === Number(taskId)
+                        );
+
+                        if (task) {
+                            const text = String(task.notice_text || '').trim();
+                            if (!isNoticeRequired(task) || !text) {
+                                // Prompt has gone away / task finished.
+                                closeIframe();
+                                return;
+                            }
+                            if (codeEl && codeEl.textContent !== text) {
+                                codeEl.textContent = text;
+                            }
+                        } else {
+                            // Task no longer tracked; stop showing the code.
+                            closeIframe();
+                            return;
+                        }
+                    }
+                } catch (err) {
+                    // Ignore transient polling errors and try again.
+                }
+                setTimeout(poll, 1500);
+            }
+
+            setTimeout(poll, 1200);
+        })();
+    </script>
+</body>
+</html>

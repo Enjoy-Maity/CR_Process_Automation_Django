@@ -842,6 +842,7 @@ class NIAMTicketGenerationTable(models.Model):
     domain = models.CharField(("Domain"), max_length=50, blank=True, null=True)
     access_type = models.CharField(("Access Type"), max_length=50, blank=True, null=True)
     niam_ticket_status = models.CharField(("NIAM Ticket Status"), max_length=50, blank=True, null=True)
+    failure_reason = models.TextField(("Failure Reason"), blank=True, null=True)
 
     class Meta:
         db_table = "niam_ticket_generation_table"

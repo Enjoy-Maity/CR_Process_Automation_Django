@@ -7,11 +7,11 @@
     </div>
     <div class="region-filter-panel" style="margin-bottom:16px;padding:14px;border:1px solid #d5dde8;border-radius:10px;background:#f7f9fc;">
         <div style="margin-bottom:12px;">
-            <span class="cr-history-filter-label">Note:- Select Date before fetching data. The table, Download Template and Save apply to the CRs whose CR Start Date-Time falls on the selected date. Fetch CR and NIAM Ticket Generator run for the night starting on the selected date (CRs execute the next day).</span>
+            <span class="cr-history-filter-label">Note:- The selected date is the <strong>night date</strong>. Fetch CR and NIAM Ticket Generator run for the night starting on that date; the CRs execute the next day, so their CR Start Date-Time is the following date. The table, Download Template and Save use the same night date. Example: to work on the night whose CRs execute on 13-11-2026, select 12-11-2026.</span>
         </div>
         <div style="display:flex;gap:20px;align-items:center;flex-wrap:wrap;">
             <div>
-                <label for="niam_date" style="font-weight:700;margin-right:8px;">Date:</label>
+                <label for="niam_date" style="font-weight:700;margin-right:8px;">Night Date:</label>
                 <input type="date" id="niam_date" name="niam_date">
             </div>
             <button type="button" id="fetch_niam_template_btn" class="action-btn compact-btn fetch-cr-black-btn">Fetch CR</button>
@@ -363,7 +363,8 @@ document.getElementById('download_niam_template_btn').addEventListener('click', 
     window.location.href = DOWNLOAD_NIAM_URL + '?' + new URLSearchParams(params).toString();
 });
 
-// ── NIAM Ticket Generator (task 7) ─────────────────────────────────────────
+// ── NIAM Ticket Generator (task 9: raise real NIAM tickets) ────────────────
+const RAISE_NIAM_TICKET_TASK_ID = 9;
 let niamTicketPollTimer = null;
 
 function stopNiamTicketPoll() {
@@ -384,17 +385,17 @@ function pollNiamTicket() {
     fetch('/api/task/dashboard-data/')
         .then(res => res.json())
         .then(data => {
-            const task = (data.tasks || []).find(item => Number(item.id) === 7);
+            const task = (data.tasks || []).find(item => Number(item.id) === RAISE_NIAM_TICKET_TASK_ID);
             if (!task) return;
 
             if (task.status === 'Failed') {
-                setNiamStatus('NIAM ticket generation failed. Check the task log.');
+                setNiamStatus('NIAM ticket raising failed. Check the task log for the reason.');
                 stopNiamTicketPoll();
                 setGenerateEnabled(true);
                 return;
             }
             if (task.download_ready && task.download_url) {
-                setNiamStatus('NIAM ticket is ready to download.');
+                setNiamStatus('NIAM ticket raising finished. Download the RITM Output workbook.');
                 const link = document.getElementById('niam_ticket_download_link');
                 if (link) {
                     link.href = task.download_url;
@@ -404,7 +405,13 @@ function pollNiamTicket() {
                 setGenerateEnabled(true);
                 return;
             }
-            setNiamStatus('Generating NIAM ticket... (' + (task.status || 'Running') + ')');
+            if (task.status === 'Completed') {
+                setNiamStatus('NIAM ticket raising finished, but no output workbook was produced. Check the task log.');
+                stopNiamTicketPoll();
+                setGenerateEnabled(true);
+                return;
+            }
+            setNiamStatus('Raising NIAM tickets... (' + (task.status || 'Running') + ')');
         })
         .catch(function () { /* ignore transient poll errors */ });
 }
@@ -416,7 +423,7 @@ document.getElementById('niam_generate_ticket_btn').addEventListener('click', fu
     const link = document.getElementById('niam_ticket_download_link');
     if (link) link.style.display = 'none';
     setGenerateEnabled(false);
-    setNiamStatus('Starting NIAM ticket generation...');
+    setNiamStatus('Starting NIAM ticket raising...');
 
     const body = new FormData();
     body.append('date', date);
@@ -429,17 +436,17 @@ document.getElementById('niam_generate_ticket_btn').addEventListener('click', fu
         .then(res => res.json())
         .then(data => {
             if (!data.ok) {
-                setNiamStatus(data.message || 'Failed to start NIAM ticket generation.');
+                setNiamStatus(data.message || 'Failed to start NIAM ticket raising.');
                 setGenerateEnabled(true);
                 return;
             }
-            setNiamStatus('NIAM ticket generation started...');
+            setNiamStatus('NIAM ticket raising started...');
             stopNiamTicketPoll();
             niamTicketPollTimer = setInterval(pollNiamTicket, 3000);
             pollNiamTicket();
         })
         .catch(function () {
-            setNiamStatus('Error starting NIAM ticket generation.');
+            setNiamStatus('Error starting NIAM ticket raising.');
             setGenerateEnabled(true);
         });
 });
