@@ -85,7 +85,19 @@ FETCH_CRS_TASK = {
     "download_required": False,
 }
 
-ALL_TASKS = TASKS + [NIAM_TASK, FETCH_CRS_TASK]
+# "Raise NIAM Tickets" is triggered from the NIAM Template Database page's
+# "NIAM Ticket Generator" button. It raises the real NIAM tickets (Playwright)
+# for the rows shown on that page and writes an RITM Output workbook.
+# Kept out of TASKS for the same reason as the two NIAM tasks above.
+RAISE_NIAM_TICKET_TASK_ID = 9
+RAISE_NIAM_TICKET_TASK = {
+    "id": RAISE_NIAM_TICKET_TASK_ID,
+    "sequence_no": RAISE_NIAM_TICKET_TASK_ID,
+    "name": "Raise NIAM Tickets",
+    "download_required": True,
+}
+
+ALL_TASKS = TASKS + [NIAM_TASK, FETCH_CRS_TASK, RAISE_NIAM_TICKET_TASK]
 
 # Region locks are held for this long without a heartbeat, then become free.
 REGION_LOCK_TTL_SECONDS = 120
@@ -115,6 +127,12 @@ TASK_RUNTIME = {
         "password_required": False,
         "password": None,
         "pwd_event": threading.Event(),
+        "notice_required": False,
+        "notice_text": "",
+        "alert_required": False,
+        "alert_title": "",
+        "alert_text": "",
+        "alert_seq": 0,
     }
     for task in ALL_TASKS
 }
@@ -138,6 +156,7 @@ TASK_MODULE_MAP = {
     6: "dashboard.task_modules.final_email_package.tasks",
     7: "dashboard.task_modules.niam_ticket_generation.tasks",
     8: "dashboard.task_modules.niam_ticket_generation.tasks",
+    9: "dashboard.task_modules.niam_ticket_generation.niam_ticket_generation_tasks",
 }
 
 
@@ -278,6 +297,12 @@ def _merge_runtime_for_request(user_id, task_id):
             "download_url": ctx.get("download_url", ""),
             "otp_required": ctx.get("otp_required", False),
             "password_required": ctx.get("password_required", False),
+            "notice_required": bool(ctx.get("notice_required", False)),
+            "notice_text": ctx.get("notice_text", ""),
+            "alert_required": bool(ctx.get("alert_required", False)),
+            "alert_title": ctx.get("alert_title", ""),
+            "alert_text": ctx.get("alert_text", ""),
+            "alert_seq": int(ctx.get("alert_seq", 0) or 0),
             "logs": ctx.get("logs", []),
             "run_key": ctx.get("run_key", ""),
         })
@@ -288,7 +313,7 @@ def _build_tasks_for_ui(user_id=None, include_niam=False):
     """Build task data for UI, scoped to the requesting user when given."""
     task_defs = list(TASKS)
     if include_niam:
-        task_defs += [NIAM_TASK, FETCH_CRS_TASK]
+        task_defs += [NIAM_TASK, FETCH_CRS_TASK, RAISE_NIAM_TICKET_TASK]
     return [
         {**task, **_merge_runtime_for_request(user_id, task["id"])}
         for task in task_defs
@@ -354,7 +379,12 @@ def _common_context(request):
 def _current_running_task_for(user_id):
     """Human-readable label for the task the given user currently runs."""
     for task_id, ctx in RUN_REGISTRY.all_for_user(user_id).items():
-        if ctx.get("status") in ("Running", "Waiting for OTP", "Waiting for Password"):
+        if ctx.get("status") in (
+            "Running",
+            "Waiting for OTP",
+            "Waiting for Password",
+            "Waiting for Sign-in Approval",
+        ):
             task = _task_by_id(task_id)
             return task["name"] if task else f"Task {task_id}"
     return "No task is running currently."
@@ -608,9 +638,30 @@ def _validate_fetch_crs_date(date_str):
     ).exists()
 
     if not (in_selected or in_master):
+        # A common mistake is selecting the execution/CR-start date instead of
+        # the night date. If the picked date itself has CRs, point the user to
+        # the night that owns them instead of only saying "No Data".
+        picked_has_crs = (
+            SelectedDateTable.objects.filter(
+                execution_date=picked_date, is_active=True
+            ).exists()
+            or MasterCRDatabase.objects.filter(
+                execution_date=picked_date, is_active=True
+            ).exists()
+            or NIAMTicketGenerationTable.objects.filter(
+                execution_date=picked_date
+            ).exists()
+        )
+        hint = (
+            f" CRs exist for {picked_date} itself; select "
+            f"{picked_date - timedelta(days=1)} as the night date to work on "
+            f"that night."
+            if picked_has_crs
+            else ""
+        )
         raise NotFoundException(
-            f"No CR found for the selected date {picked_date} (CRs execute on "
-            f"{execution_date}).",
+            f"No CR found for the night of {picked_date} (they execute on "
+            f"{execution_date}).{hint}",
             title="No Data",
         )
 
@@ -646,7 +697,7 @@ def start_task(request, task_id):
     # Parse date input
     selected_date = request.POST.get('date', '').strip()
 
-    if task_id in [1, 2, NIAM_TASK_ID, FETCH_CRS_TASK_ID] and not selected_date:
+    if task_id in [1, 2, NIAM_TASK_ID, FETCH_CRS_TASK_ID, RAISE_NIAM_TICKET_TASK_ID] and not selected_date:
         raise ValidationException(
             "Please select a Date before starting this task.",
             title="Missing Date"
@@ -775,9 +826,11 @@ def start_task(request, task_id):
             logger.error(f"Task {task_id} failed for user {user_id}: {str(exc)}", exc_info=True)
 
         finally:
-            # Safety: clear authentication flags
+            # Safety: clear authentication flags and any read-only notice.
             runtime["otp_required"] = False
             runtime["password_required"] = False
+            runtime["notice_required"] = False
+            runtime["notice_text"] = ""
             # Drop the private module copy from sys.modules so repeated runs do
             # not accumulate unbounded module objects. The shared base module is
             # never removed (its name does not start with the per-run prefix).
@@ -923,6 +976,17 @@ def task_dashboard_data(request):
             "requires_auth": requires_auth,
             "otp_required": bool(task.get("otp_required", False)) if requires_auth else False,
             "password_required": bool(task.get("password_required", False)) if requires_auth else False,
+            # Read-only notice (e.g. Microsoft Authenticator sign-in code).
+            # NIAM tasks do not use TASKS_REQUIRING_AUTH, so these are not gated.
+            "notice_required": bool(task.get("notice_required", False)),
+            "notice_text": task.get("notice_text", "") or "",
+            # Blocking dialog (e.g. missing/wrong NIAM credentials). The
+            # frontend dedupes these by task id + run_key + alert_seq.
+            "alert_required": bool(task.get("alert_required", False)),
+            "alert_title": task.get("alert_title", "") or "",
+            "alert_text": task.get("alert_text", "") or "",
+            "alert_seq": int(task.get("alert_seq", 0) or 0),
+            "run_key": task.get("run_key", "") or "",
         })
 
     return JsonResponse({
@@ -1160,6 +1224,83 @@ def playwright_password_iframe(request):
         form = PasswordAuthForm(initial={'task_id': task_id})
 
     return render(request, 'dashboard/password_form.html', {'form': form})
+
+
+@xframe_options_sameorigin
+def playwright_notice_iframe(request):
+    """Show the Microsoft Authenticator sign-in code while approval is pending.
+
+    This iframe is read-only: the Playwright thread sets ``notice_required`` /
+    ``notice_text`` on the task runtime while the "Approve sign in" prompt is
+    visible and clears them once it disappears. The template polls the task
+    dashboard API and asks the parent window to close the modal when the
+    notice is no longer needed.
+    """
+    logger.debug(f"playwright_notice_iframe called with method={request.method}")
+
+    task_id = request.GET.get('task_id', '') or None
+    try:
+        task_id = int(task_id) if task_id is not None else None
+    except (TypeError, ValueError):
+        task_id = None
+
+    notice_text = ""
+    status = "Waiting for Sign-in Approval"
+
+    if task_id is not None and request.user.is_authenticated:
+        runtime = RUN_REGISTRY.peek(request.user.id, task_id)
+        if runtime:
+            notice_text = runtime.get("notice_text", "") or ""
+            status = runtime.get("status", status) or status
+
+    return render(
+        request,
+        'dashboard/iframe_notice.html',
+        {
+            'task_id': task_id,
+            'notice_text': notice_text,
+            'status': status,
+        },
+    )
+
+
+@xframe_options_sameorigin
+def playwright_alert_iframe(request):
+    """Show a blocking alert dialog (e.g. missing/wrong NIAM credentials).
+
+    The Playwright thread sets ``alert_required`` / ``alert_title`` /
+    ``alert_text`` on the task runtime when the NIAM login fails because the
+    saved user ID / password is missing or rejected. Like the password, OTP and
+    notice iframes, this page is loaded inside the shared auth overlay. It
+    polls the task dashboard API and asks the parent window to close the modal
+    when the alert is no longer set (e.g. a new run started).
+    """
+    logger.debug(f"playwright_alert_iframe called with method={request.method}")
+
+    task_id = request.GET.get('task_id', '') or None
+    try:
+        task_id = int(task_id) if task_id is not None else None
+    except (TypeError, ValueError):
+        task_id = None
+
+    alert_title = "Attention"
+    alert_text = ""
+
+    if task_id is not None and request.user.is_authenticated:
+        runtime = RUN_REGISTRY.peek(request.user.id, task_id)
+        if runtime:
+            alert_title = runtime.get("alert_title", "") or alert_title
+            alert_text = runtime.get("alert_text", "") or ""
+
+    return render(
+        request,
+        'dashboard/iframe_alert.html',
+        {
+            'task_id': task_id,
+            'alert_title': alert_title,
+            'alert_text': alert_text,
+        },
+    )
 
 
 @require_GET
@@ -3359,7 +3500,7 @@ def _niam_period_bounds(date_str=None, range_key=None):
     # timezone-aware values are built or compared anywhere on this page.
     if used_range:
         return from_dt, to_dt, NIAM_RANGE_LABELS[used_range], used_range
-    return from_dt, to_dt, from_dt.strftime("%d-%m-%Y"), ""
+    return from_dt, to_dt, f"Night of {from_dt.strftime('%d-%m-%Y')}", ""
 
 
 def _niam_table_order(obj):
@@ -3391,25 +3532,32 @@ def _niam_naive_local(value):
 
 def _niam_period_query(from_dt, to_dt, limit):
     """
-    NIAM rows whose SR/CR start date-time falls on the selected date(s).
+    NIAM rows for the night(s) starting on the selected date(s).
 
-    The selected date is matched against the CR's start date-time exactly
-    (its calendar day), so every row appears for one date only — never for
-    the neighbouring nights. Rows without a CR start datetime fall back to
-    their execution_date.
+    The page's date picker uses the same convention as "Fetch CR" and the
+    "NIAM Ticket Generator": the selected date is the *night* date, and the
+    CRs execute on the following day. A row generated for night D therefore
+    carries ``execution_date`` and ``sr_cr_start_date_time`` on D + 1.
+
+    Matching D + 1 is what makes the rows that were just fetched appear
+    immediately, while still showing every row for exactly one selected night
+    (no neighbouring-night duplicates). Rows without a CR start datetime fall
+    back to their execution_date.
     """
     from .models import NIAMTicketGenerationTable
 
     from_date = from_dt.date() if hasattr(from_dt, 'date') else from_dt
     to_date = to_dt.date() if hasattr(to_dt, 'date') else to_dt
+    exec_from = from_date + timedelta(days=1)
+    exec_to = to_date + timedelta(days=1)
 
     return (
         NIAMTicketGenerationTable.objects.using("default")
         .filter(
-            Q(sr_cr_start_date_time__date__range=(from_date, to_date))
+            Q(sr_cr_start_date_time__date__range=(exec_from, exec_to))
             | Q(
                 sr_cr_start_date_time__isnull=True,
-                execution_date__range=(from_date, to_date),
+                execution_date__range=(exec_from, exec_to),
             )
         )
         .order_by("-id")[:limit]
@@ -3617,9 +3765,13 @@ def download_niam_template(request):
 @handle_exceptions
 def start_niam_ticket_generation(request):
     """
-    Trigger the NIAM Ticket Generation task (task 7) from the NIAM Template
-    Database page for the selected date. Reuses the generic start_task flow so
-    every user gets an isolated run and their own downloadable workbook.
+    Raise the real NIAM tickets (task 9) from the NIAM Template Database page
+    for the selected *night*.
+
+    The page has already fetched/saved the NIAM rows, so this only needs to
+    raise the tickets for them. Reuses the generic start_task flow so every
+    user gets an isolated run, private logs and their own downloadable RITM
+    Output workbook.
     """
     date_str = (request.POST.get("date") or "").strip()
     if not date_str:
@@ -3628,15 +3780,36 @@ def start_niam_ticket_generation(request):
             title="Missing Date",
         )
     try:
-        datetime.strptime(date_str, "%Y-%m-%d")
+        night_date = datetime.strptime(date_str, "%Y-%m-%d").date()
     except ValueError:
         raise ValidationException(
             "Invalid date format. Use YYYY-MM-DD.",
             title="Invalid Date Format",
         )
 
-    # Delegate to the shared, per-user task starter.
-    return start_task(request, NIAM_TASK_ID)
+    # There must be NIAM rows for this night (executed the next day). Otherwise
+    # the Playwright run would log in and then find nothing to raise.
+    from .models import NIAMTicketGenerationTable
+
+    has_rows = (
+        NIAMTicketGenerationTable.objects.using("default")
+        .filter(
+            Q(niam_access_start_date_time__date=night_date)
+            | Q(execution_date=night_date + timedelta(days=1))
+        )
+        .exists()
+    )
+    if not has_rows:
+        raise NotFoundException(
+            (
+                f"No NIAM rows found for the night of {night_date}. "
+                "Fetch the CRs and complete the template first, then try again."
+            ),
+            title="No Data",
+        )
+
+    # Delegate to the shared, per-user task starter (task 9 -> run_task).
+    return start_task(request, RAISE_NIAM_TICKET_TASK_ID)
 
 
 @require_POST
@@ -3922,8 +4095,8 @@ def save_niam_template_changes(request):
     warning = None
     # The dated RITM workbook is named after the NIGHT (execution date - 1).
     # Derive the target(s) from the execution dates of the rows that were
-    # saved; the picked date on the page is the CR start / execution date, so
-    # using it directly would target the following night's workbook.
+    # saved; the page's selected date may be a range, so it cannot be used
+    # directly to name the workbook.
     workbook_exec_dates = sorted(
         {
             obj.execution_date

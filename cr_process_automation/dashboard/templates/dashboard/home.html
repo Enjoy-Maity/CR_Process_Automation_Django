@@ -232,13 +232,6 @@ document.getElementById("apply_region_filter_btn").addEventListener("click", fun
 // Restore when the page loads
 restoreHomeSessionState();
 </script>
-<!-- Auth / Password / OTP overlay -->
-<div id="auth-overlay" class="auth-overlay" style="display: none;" aria-hidden="true">
-    <div class="auth-modal" role="dialog" aria-modal="true">
-        <button type="button" class="auth-modal-close" onclick="closeAuthIframe()" aria-label="Close">&times;</button>
-        <iframe id="auth-iframe" title="ITSM authentication" src=""></iframe>
-    </div>
-</div>
 <script src="{% static 'dashboard/js/region_locks.js' %}"></script>
 {% endblock %}
 

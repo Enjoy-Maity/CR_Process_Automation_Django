@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Task Alert</title>
+    <style>
+        * { box-sizing: border-box; }
+        html, body {
+            margin: 0;
+            padding: 0;
+            background: #ffffff;
+            color: #1f2937;
+            font-family: Arial, sans-serif;
+        }
+        .alert-box {
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            padding: 20px 24px 16px;
+            text-align: left;
+        }
+        .alert-title {
+            margin: 0 0 10px;
+            font-size: 16px;
+            font-weight: 700;
+            color: #dc2626;
+        }
+        .alert-text {
+            margin: 0;
+            color: #374151;
+            font-size: 13px;
+            line-height: 1.5;
+            white-space: pre-line;
+            overflow-y: auto;
+            flex: 1;
+        }
+        .alert-actions {
+            display: flex;
+            justify-content: flex-end;
+            margin-top: 14px;
+        }
+        .alert-ok {
+            background: #0a5ea8;
+            color: #ffffff;
+            border: none;
+            border-radius: 6px;
+            padding: 8px 24px;
+            font-size: 13px;
+            font-weight: 700;
+            cursor: pointer;
+        }
+        .alert-ok:hover {
+            background: #08457a;
+        }
+    </style>
+</head>
+<body>
+    <div class="alert-box">
+        <h2 class="alert-title" id="alert-title">{{ alert_title|default:"Attention" }}</h2>
+        <p class="alert-text" id="alert-text">{{ alert_text|default:"" }}</p>
+        <div class="alert-actions">
+            <button type="button" class="alert-ok" id="alert-ok">OK</button>
+        </div>
+    </div>
+
+    <script>
+        (function () {
+            const taskId = {{ task_id|default:"null" }};
+            const titleEl = document.getElementById('alert-title');
+            const textEl = document.getElementById('alert-text');
+
+            function closeIframe() {
+                try {
+                    window.parent.postMessage(
+                        { type: 'auth-alert', action: 'close_iframe' },
+                        '*'
+                    );
+                } catch (err) {
+                    // Parent may be gone; nothing else to do.
+                }
+            }
+
+            document.getElementById('alert-ok').addEventListener('click', closeIframe);
+
+            function isAlertRequired(task) {
+                return task.alert_required === true ||
+                    task.alert_required === 'true' ||
+                    task.alert_required === 1;
+            }
+
+            // Keep the dialog in sync with the task runtime: a newer alert
+            // updates the text in place, and a cleared alert closes it.
+            async function poll() {
+                try {
+                    const response = await fetch('/api/task/dashboard-data/', {
+                        headers: { 'Accept': 'application/json' },
+                        cache: 'no-store',
+                    });
+                    if (response.ok) {
+                        const data = await response.json();
+                        const task = (data.tasks || []).find(
+                            item => Number(item.id) === Number(taskId)
+                        );
+
+                        if (task) {
+                            if (!isAlertRequired(task)) {
+                                closeIframe();
+                                return;
+                            }
+                            const title = String(task.alert_title || 'Attention');
+                            const text = String(task.alert_text || '');
+                            if (titleEl && titleEl.textContent !== title) {
+                                titleEl.textContent = title;
+                            }
+                            if (textEl && textEl.textContent !== text) {
+                                textEl.textContent = text;
+                            }
+                        } else {
+                            // Task no longer tracked; stop showing the alert.
+                            closeIframe();
+                            return;
+                        }
+                    }
+                } catch (err) {
+                    // Ignore transient polling errors and try again.
+                }
+                setTimeout(poll, 2000);
+            }
+
+            setTimeout(poll, 1500);
+        })();
+    </script>
+</body>
+</html>

@@ -33,6 +33,53 @@ from typing import Union, Tuple, List, Literal, AnyStr, Dict
 import threading
 import  dateutil.parser as dp
 
+
+class NiamCredentialsError(ValueError):
+    """The user has no NIAM OLM ID / password saved in the dashboard."""
+
+
+class NiamAuthenticationError(RuntimeError):
+    """Microsoft rejected the NIAM user ID or password."""
+
+
+def _visible_niam_login_error(page: Page) -> str:
+    """Return the first visible Microsoft/NIAM sign-in error message."""
+    selectors = (
+        "#usernameError",
+        "#passwordError",
+        "#idDiv_SAOTCS_Error",
+        "#error",
+    )
+    for selector in selectors:
+        try:
+            locator = page.locator(selector).first
+            if locator.is_visible():
+                text = (locator.text_content() or "").strip()
+                if text:
+                    return text
+        except Exception:
+            continue
+
+    known_messages = (
+        "Your account or password is incorrect",
+        "The password you entered is incorrect",
+        "We couldn't find an account with that username",
+        "We couldn't find your account",
+        "This username may be incorrect",
+        "That Microsoft account doesn't exist",
+        "Enter a valid email address, phone number, or Skype name",
+        "Your account has been locked",
+        "Your account is temporarily locked",
+    )
+    for message in known_messages:
+        try:
+            locator = page.get_by_text(message, exact=False).first
+            if locator.is_visible():
+                return (locator.text_content() or message).strip()
+        except Exception:
+            continue
+    return ""
+
 def request_password_from_user(runtime, task, logs, timestamp_fn, timeout=300):
     """
     Pauses the Playwright thread until the user submits a password
@@ -109,6 +156,95 @@ def request_2fa_code_from_user(runtime, task, logs, timestamp_fn, timeout=300):
     print(f"🔐 2FA code received: {code}")
     logs.append(f"{task_name}: 2FA code received ---- {timestamp_fn()}")
     return str(code).strip()
+
+
+def show_user_notice(
+    runtime,
+    task,
+    logs=None,
+    timestamp_fn=None,
+    text: str = "",
+    status: str = "Waiting for Sign-in Approval",
+) -> None:
+    """
+    Show read-only text to the user in the dashboard iframe.
+
+    Used for the Microsoft Authenticator sign-in code: the browser shows a
+    short number that the user has to match with the number on their phone
+    before approving. The number is displayed in the iframe and stays there
+    until the sign-in prompt disappears (see ``clear_user_notice``).
+    """
+    if runtime is None:
+        return
+
+    notice_text = str(text or "").strip()
+    if not notice_text:
+        return
+
+    task_name = task["name"] if task else "Task"
+
+    runtime["notice_text"] = notice_text
+    runtime["notice_required"] = True
+    runtime["status"] = status
+
+    if logs is not None and timestamp_fn is not None:
+        logs.append(f"{task_name}: sign-in code shown to user ---- {timestamp_fn()}")
+
+
+def clear_user_notice(runtime, status: str | None = "Running") -> None:
+    """Hide the notice iframe once the sign-in prompt has gone away."""
+    if runtime is None:
+        return
+
+    runtime["notice_required"] = False
+    runtime["notice_text"] = ""
+    if status:
+        runtime["status"] = status
+
+
+def clear_user_alert(runtime) -> None:
+    """Hide a queued user dialog (e.g. after a retry finally logs in)."""
+    if runtime is None:
+        return
+    runtime["alert_required"] = False
+    runtime["alert_title"] = ""
+    runtime["alert_text"] = ""
+
+
+def show_user_alert(
+    runtime,
+    task,
+    logs=None,
+    timestamp_fn=None,
+    title: str = "NIAM login failed",
+    text: str = "",
+) -> None:
+    """Queue a blocking dialog for the user (shown by dashboard.js).
+
+    Unlike ``show_user_notice`` this is not cleared by the Playwright thread: it
+    stays until the user acknowledges it or a new run replaces the runtime.
+    ``alert_seq`` is bumped so the frontend shows the dialog again for a new
+    alert in the same run without re-opening it after the user dismissed it.
+    """
+    if runtime is None:
+        return
+
+    message = str(text or "").strip()
+    if not message:
+        message = "Could not log in to NIAM. Check your NIAM user ID and password."
+
+    runtime["alert_title"] = str(title or "NIAM login failed").strip()
+    runtime["alert_text"] = message
+    runtime["alert_seq"] = int(runtime.get("alert_seq", 0) or 0) + 1
+    runtime["alert_required"] = True
+
+    if logs is not None:
+        try:
+            task_name = task["name"] if task else "Task"
+            stamp = timestamp_fn() if callable(timestamp_fn) else ""
+            logs.append(f"{task_name}: {runtime['alert_title']} ---- {stamp}")
+        except Exception:
+            pass
 
 
 def get_browser() -> str:
@@ -2565,22 +2701,56 @@ def handle_niam_login(
     page: Page,
     context: BrowserContext,
     password: str,
-    playwright: Playwright
+    playwright: Playwright,
+    runtime=None,
+    task=None,
+    logs=None,
+    timestamp_fn=None,
 ):
+    """
+    Complete the Microsoft NIAM sign-in (password + MFA) for an automation run.
+
+    ``runtime``, ``task``, ``logs`` and ``timestamp_fn`` are optional so the
+    helper can still be used stand-alone, but the dashboard passes them so the
+    sign-in approval code can be shown to the user in the notice iframe and the
+    progress can be logged.
+    """
     # password = ""
+    logs = logs if logs is not None else []
+    timestamp_fn = timestamp_fn or _timestamp
+    task_name = task["name"] if task else "Task"
+
+    # Never inherit a stale notice from an earlier login attempt.
+    clear_user_notice(runtime, status=None)
 
     page.wait_for_load_state("load")
     page.wait_for_timeout(500)
-    while True:
-        page.wait_for_timeout(500)
+
+    # Bounded wait for the password prompt: a wrong user ID can leave the page
+    # on an error message instead of showing the password field.
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        error = _visible_niam_login_error(page)
+        if error:
+            raise NiamAuthenticationError(
+                "NIAM login failed before the password could be entered. "
+                f"Check the NIAM OLM ID saved in NIAM Credentials.\n\n{error}"
+            )
         try:
-            # if page.locator('//div/form/div/div/div/span[text()="Bharti Airtel"]').is_visible():
-            #     break
-            if page.locator('//div[text()="Enter password"]').is_visible():
+            if (
+                page.locator('//input[@id="i0118"]').is_visible()
+                or page.locator('//div[text()="Enter password"]').is_visible()
+            ):
                 break
-        except:
+        except Exception:
             pass
-    
+        page.wait_for_timeout(500)
+    else:
+        raise NiamAuthenticationError(
+            "Timed out waiting for the NIAM password prompt. "
+            "Check the NIAM OLM ID saved in NIAM Credentials."
+        )
+
     # Enter the password
     # page.locator('[id="passwordInput"]').fill(self.password)
     page.locator('//input[@id="i0118"]').fill(password)
@@ -2592,46 +2762,131 @@ def handle_niam_login(
     page.wait_for_load_state("load")
     
     mfa_prompt_locator = page.locator(
-        "//*[text()='Approve sign in request' or text()='Verify your identity' or text()='Face, fingerprint, PIN, or security key']"
+        "//*[text()='Approve sign in request' or text()='Approve sign in' or text()='Verify your identity' or text()='Face, fingerprint, PIN, or security key']"
     )
-    
+
+    # A wrong password usually returns to the same page with "#passwordError".
+    # Detect that before waiting for an MFA prompt that will never appear.
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        error = _visible_niam_login_error(page)
+        if error:
+            raise NiamAuthenticationError(
+                "The NIAM password was rejected by Microsoft. Check the NIAM "
+                f"password saved in NIAM Credentials.\n\n{error}"
+            )
+        try:
+            if mfa_prompt_locator.first.is_visible():
+                break
+        except Exception:
+            pass
+        page.wait_for_timeout(500)
+
     try:
         # Wait for either prompt to appear
         mfa_prompt_locator.first.wait_for(state="visible", timeout=15000)
 
-        prompt_text = mfa_prompt_locator.first.text_content()
+        prompt_text = mfa_prompt_locator.first.text_content() or ""
         
         # Now check which one it is
-        if "Approve sign in request" in prompt_text:
-            # print("Line No. 356 - Waiting for sign in approval.")
+        if "Approve sign in request" in prompt_text or "Approve sign in" in prompt_text:
+            # The "Approve sign in" page shows a short code in the browser that
+            # the user must match with the number on their phone. Capture it
+            # while the prompt is still visible and keep showing it in the
+            # dashboard notice iframe until the prompt goes away (approved).
+            text_code = None
             try:
-                # Wait for the prompt to disappear
-                page.get_by_text("Approve sign in request").wait_for(
-                    state="hidden", timeout=60000
-                )
-                if live_feed:
-                    live_feed.emit("Waiting for sign in approval.")
-                # print("Sign in approved by user.")
-            except Exception as e:
-                # if manager:
-                #     # manager.show_info_signal.emit(
-                #     #     "  Timeout Error!",
-                #     #     "Timed out waiting for sign-in approval. Please try again.",
-                #     #     "error"
-                #     # )
-                #     pass
+                # The code element may render a moment after the prompt itself.
+                display_sign = page.locator('//*[@id="idRichContext_DisplaySign"]')
+                display_sign.wait_for(state="visible", timeout=5000)
+                text_code = display_sign.text_content()
+            except Exception:
+                text_code = None
 
-                # else:
-                #     # from tkinter import messagebox
-                #     # from messages import Messagebox
-                #     # messagebox = Messagebox()
-                #     # messagebox.showerror(
-                #     #     "Timeout",
-                #     #     "Timed out waiting for sign-in approval. Please try again.",
-                #     # )
-                #     pass
-                # raise e
-                pass
+            if text_code and str(text_code).strip():
+                show_user_notice(
+                    runtime,
+                    task,
+                    logs,
+                    timestamp_fn,
+                    str(text_code).strip(),
+                )
+                try:
+                    # Wait for the prompt to disappear (user approved on phone).
+                    approval_prompt = page.locator(
+                        "//*[text()='Approve sign in request' or text()='Approve sign in']"
+                    ).first
+                    approval_prompt.wait_for(state="hidden", timeout=60000)
+                    logs.append(
+                        f"{task_name}: sign-in approved by user ---- {timestamp_fn()}"
+                    )
+                except Exception as e:
+                    logs.append(
+                        f"{task_name}: timed out waiting for sign-in approval: "
+                        f"{e} ---- {timestamp_fn()}"
+                    )
+                finally:
+                    # Prompt is gone, so the code must disappear as well.
+                    clear_user_notice(runtime)
+            else:
+                # The user cannot use the Authenticator app. Fall back to the
+                # "Use a verification code" flow and ask for the code through
+                # the dashboard iframe.
+                try:
+                    if page.get_by_text(
+                        "I can't use my Microsoft Authenticator app right now"
+                    ).is_visible():
+                        page.get_by_text(
+                            "I can't use my Microsoft Authenticator app right now"
+                        ).click()
+
+                    page.wait_for_selector("//*[text() = 'Use a verification code']")
+
+                    print(
+                        "\"Use a verification code\" is visible =>",
+                        page.locator(
+                            '//*[@id="idDiv_SAOTCS_Proofs"]/div[2]/div/div/div[2]/div[text()="Use a verification code"]'
+                        ).is_visible(),
+                    )
+                    if page.locator(
+                        '//*[@id="idDiv_SAOTCS_Proofs"]/div[2]/div/div/div[2]/div[text()="Use a verification code"]'
+                    ).is_visible():
+                        page.locator(
+                            '//*[@id="idDiv_SAOTCS_Proofs"]/div[2]/div/div/div[2]/div[text()="Use a verification code"]'
+                        ).click()
+
+                    # ===== Get the code from the user via iframe form =====
+                    code = request_2fa_code_from_user(
+                        runtime, task, logs, timestamp_fn
+                    )
+
+                    # Fill the code into the MS verification input
+                    otp_input = page.locator("#idTxtBx_SAOTCC_OTC")
+                    otp_input.wait_for(state="visible", timeout=15000)
+                    otp_input.fill(code)
+
+                    # Click "Verify" / "Sign in"
+                    page.locator("#idSubmit_SAOTCC_Continue").click()
+
+                    # Handle the "Stay signed in?" prompt that often appears
+                    try:
+                        stay_signed_in = page.locator("//*[text()='Stay signed in?']")
+                        stay_signed_in.wait_for(state="visible", timeout=15000)
+                        page.locator("#idSIButton9").click()  # "Yes" button
+                    except Exception:
+                        pass
+
+                    page.wait_for_load_state("load", timeout=60000)
+                    logs.append(
+                        f"{task_name}: 2FA code submitted ---- {timestamp_fn()}"
+                    )
+                    # ======================================================
+                except Exception as e:
+                    print(f"OTP handling error: {e}")
+                    logs.append(
+                        f"{task_name}: OTP handling error: {e} ---- {timestamp_fn()}"
+                    )
+                    raise
 
         elif "Verify your identity" in prompt_text:
             # print("Line No. 367 - Verifying identity.")
@@ -2730,52 +2985,120 @@ def handle_niam_login(
         #     #     "MFA prompt not detected within the timeout. Assuming no MFA is required or page is different than expected.",
         #     # )
         #     pass
-        pass
+        # Check whether Microsoft actually rejected the credentials instead of
+        # silently continuing (MFA timeouts are handled inside the branches).
+        error = _visible_niam_login_error(page)
+        clear_user_notice(runtime, status=None)
+        if error:
+            raise NiamAuthenticationError(
+                "NIAM login was rejected by Microsoft. Check the NIAM user ID "
+                f"and password saved in NIAM Credentials.\n\n{error}"
+            )
     
 
 def get_niam_password(user_name: str) -> dict:
     from dashboard.models import UserManagement
-    user = UserManagement.objects.get(user_name=user_name)
-    return {
-        "username": user.user_name,
-        "password": user.password,
-    }
+
+    # The dashboard passes the Django username; older callers passed the
+    # employee name. Accept both so the NIAM credentials are found either way.
+    # Always read the master DB: credentials are saved there from the dashboard
+    # and a lagging replica would otherwise look like missing credentials.
+    user = (
+        UserManagement.objects.using("default").filter(username=user_name).first()
+        or UserManagement.objects.using("default")
+        .filter(employee_name=user_name)
+        .first()
+    )
+    if user is None:
+        raise NiamCredentialsError(
+            f"No dashboard user found for '{user_name}'. "
+            "Save your NIAM OLM ID and password in NIAM Credentials."
+        )
+
+    olm_id = (user.niam_olm_id or user.username or "").strip()
+    password = user.niam_password or ""
+    if not olm_id or not password:
+        raise NiamCredentialsError(
+            f"NIAM OLM ID / password are not saved for user '{user.username}'. "
+            "Save them in NIAM Credentials and run the task again."
+        )
+    return {"username": olm_id, "password": password}
 
 def login_to_niam(
     page: Page,
     user_name: str,
+    niam_credentials: dict | None = None,
 ):
-    __niam_data = get_niam_password(user_name)
+    # Resolve the credentials before entering the Playwright sync context when
+    # possible: the sync API runs an asyncio loop in this thread, which makes
+    # Django's ORM raise SynchronousOnlyOperation.
+    __niam_data = niam_credentials or get_niam_password(user_name)
     username = f"{str(__niam_data['username']).strip().upper()}@airtel.com"
     password = __niam_data['password']
     
-    while True:
+    # Wait for the Microsoft sign-in page, but do not loop forever if the page
+    # failed to load or already shows an error.
+    deadline = time.time() + 60
+    while time.time() < deadline:
         page.wait_for_timeout(500)
+        error = _visible_niam_login_error(page)
+        if error:
+            raise NiamAuthenticationError(
+                "Microsoft sign-in failed before the NIAM user ID could be "
+                f"entered: {error}"
+            )
         try:
-            # print("page.locator('//input[@id=\"username\"]').is_visible() = {}".format(page.locator('//input[@id=\"username\"]').is_visible()))
-            # if page.locator('//input[@id="username"]').is_visible():
-            #     break
             if page.locator('//div[text()="Sign in"]').is_visible():
                 break
-        except:
+        except Exception:
             pass
-    # print(f"{self.olmid = }")
+    else:
+        raise NiamAuthenticationError(
+            "Timed out waiting for the Microsoft sign-in page. "
+            "Check the NIAM website/network and try again."
+        )
+
     page.wait_for_timeout(500)
-    # page.locator('//input[@id="username"]').fill(self.olmid)
     page.locator('//input[@id="i0116"]').fill(username)
 
     # Clicking the Next Button
-    # page.locator('[name="login"]').click()
     page.locator('//input[@id="idSIButton9"]').click()
-    
+
+    # Microsoft either moves on to the password prompt or rejects the user ID.
+    # Wait for the password field instead of assuming the next page loaded.
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        error = _visible_niam_login_error(page)
+        if error:
+            raise NiamAuthenticationError(
+                "The NIAM user ID was rejected by Microsoft. Check the NIAM OLM "
+                f"ID saved in NIAM Credentials.\n\n{error}"
+            )
+        try:
+            if page.locator('//input[@id="i0118"]').is_visible():
+                break
+        except Exception:
+            pass
+        page.wait_for_timeout(500)
+    else:
+        raise NiamAuthenticationError(
+            "The Microsoft password prompt did not appear after submitting the "
+            "NIAM user ID. Check the NIAM OLM ID saved in NIAM Credentials."
+        )
+
     return password
 
 
 def niam_logger(
     playwright: Playwright,
     user_name: str,
-    logs: list = [],
+    logs: list = None,
+    runtime=None,
+    task=None,
+    timestamp_fn=None,
+    niam_credentials: dict | None = None,
 ) -> Tuple[Browser, BrowserContext, Page, list]:
+    logs = logs if logs is not None else []
     selected_path_for_browser = ""
 
     selected_path_for_browser = get_browser()
@@ -2801,7 +3124,7 @@ def niam_logger(
         # page.wait_for_selector("//a[@id='loginBtn']")
         # page.locator(selector="//a[@id='loginBtn']", has_text="Log On").click()
 
-        password = login_to_niam(page, user_name)
+        password = login_to_niam(page, user_name, niam_credentials)
 
         page.wait_for_load_state("load")
 
@@ -2814,12 +3137,24 @@ def niam_logger(
             page.get_by_text("Try again after some time or contact your help desk")
         ).to_be_hidden()
 
-        handle_niam_login(page, context, password, playwright)
+        handle_niam_login(
+            page,
+            context,
+            password,
+            playwright,
+            runtime=runtime,
+            task=task,
+            logs=logs,
+            timestamp_fn=timestamp_fn,
+        )
         
         page.wait_for_timeout(500)
         page.wait_for_load_state("networkidle")
 
-        while True:
+        # Bound the wait for the ServiceNow homepage so a login that silently
+        # failed cannot keep this thread (and the task) hanging forever.
+        deadline = time.monotonic() + 90
+        while time.monotonic() < deadline:
             page.wait_for_timeout(500)
             page.wait_for_load_state("networkidle")
             try:
@@ -2834,23 +3169,73 @@ def niam_logger(
                     has_text="We're Here to Help You.",
                 ).is_visible():
                     break
-            except:
+            except Exception:
                 pass
+        else:
+            error = _visible_niam_login_error(page)
+            if error:
+                raise NiamAuthenticationError(
+                    "NIAM login was rejected by Microsoft. Check the NIAM user ID "
+                    f"and password saved in NIAM Credentials.\n\n{error}"
+                )
+            raise NiamAuthenticationError(
+                "NIAM login did not reach the ServiceNow homepage. "
+                "Check the NIAM user ID / password saved in NIAM Credentials "
+                "and try again."
+            )
 
         page.wait_for_timeout(500)
         page.wait_for_load_state("networkidle")
-        
-    except TimeoutError:
+
+    except NiamAuthenticationError as e:
+        logs.append(
+            f"   Exception Occurred (NiamAuthenticationError)\n"
+            f"{traceback.format_exc()}\n\n{str(e)}"
+        )
+        clear_user_notice(runtime, status=None)
+        show_user_alert(
+            runtime,
+            task,
+            logs,
+            timestamp_fn,
+            title="NIAM login failed",
+            text=(
+                "Microsoft rejected the NIAM user ID or password.\n\n"
+                "Update the NIAM OLM ID / password in NIAM Credentials and run "
+                f"the task again.\n\nDetails: {e}"
+            ),
+        )
         exception_returner(playwright, context, browser, page)
+        return None, None, None, logs
+
+    except TimeoutError as e:
+        logs.append(
+            f"   Exception Occurred (TimeoutError)\n"
+            f"{traceback.format_exc()}\n\n{str(e)}"
+        )
+        clear_user_notice(runtime, status=None)
+        show_user_alert(
+            runtime,
+            task,
+            logs,
+            timestamp_fn,
+            title="NIAM login timed out",
+            text=(
+                "The NIAM sign-in page did not respond in time. "
+                "Check the NIAM website/network and try again.\n\n"
+                f"Details: {e}"
+            ),
+        )
+        exception_returner(playwright, context, browser, page)
+        return None, None, None, logs
 
     except Exception as e:
         # from tkinter import messagebox
 
         if logs:
             logs.append(
-                f"   Exception Occurred ({e.__class__.__name__})",
-                f"{traceback.format_exc()}\n\n{str(e)}",
-                "error",
+                f"   Exception Occurred ({e.__class__.__name__})\n"
+                f"{traceback.format_exc()}\n\n{str(e)}"
             )
         # else:
         #     messagebox = Messagebox()
@@ -2858,7 +3243,21 @@ def niam_logger(
         #         f"   Exception Occurred ({e.__class__.__name__})",
         #         f"{traceback.format_exc()}\n\n{str(e)}",
         #     )
+        clear_user_notice(runtime, status=None)
+        if isinstance(e, NiamCredentialsError):
+            alert_title = "NIAM credentials missing"
+            alert_text = str(e)
+        else:
+            alert_title = "NIAM login failed"
+            alert_text = (
+                "Could not log in to NIAM. Check the NIAM OLM ID / password "
+                f"saved in NIAM Credentials.\n\nDetails: {e}"
+            )
+        show_user_alert(
+            runtime, task, logs, timestamp_fn, title=alert_title, text=alert_text
+        )
         exception_returner(playwright, context, browser, page)
+        return None, None, None, logs
 
     return browser, context, page, logs
 
@@ -2866,15 +3265,67 @@ def niam_logger(
 
 def niam_session_maker(
     user_name: str,
-    logs: list = [],
+    logs: list = None,
+    session_file: str | os.PathLike | None = None,
+    runtime=None,
+    task=None,
+    timestamp_fn=None,
 ) -> Tuple[bool, None | os.PathLike, list]:
+    logs = logs if logs is not None else []
+    session_path = session_file or os.getenv("NIAM_SESSION_FILE")
+    if not session_path:
+        logs.append("NIAM session file path is not configured.")
+        return False, None, logs
+
+    # Resolve the NIAM credentials BEFORE entering the Playwright sync context.
+    # Playwright's sync API runs an asyncio loop in this thread, which makes
+    # Django's ORM raise SynchronousOnlyOperation if it is queried inside.
+    try:
+        niam_credentials = get_niam_password(user_name)
+    except Exception as e:
+        logs.append(
+            f"  Could not load NIAM credentials ({e.__class__.__name__})\n"
+            f"{traceback.format_exc()}\n\n{e}"
+        )
+        clear_user_notice(runtime, status=None)
+        if isinstance(e, NiamCredentialsError):
+            alert_title = "NIAM credentials missing"
+            alert_text = str(e)
+        else:
+            alert_title = "NIAM credentials could not be loaded"
+            alert_text = (
+                "Could not read your NIAM OLM ID / password. "
+                "Open NIAM Credentials, save them again and retry.\n\n"
+                f"Details: {e}"
+            )
+        show_user_alert(
+            runtime, task, logs, timestamp_fn, title=alert_title, text=alert_text
+        )
+        return False, None, logs
+
     try:
         with sync_playwright() as playwright:
             browser, main_context, login_page, logs = niam_logger(
                 playwright,
-                user_name=user_name, logs=logs
+                user_name=user_name,
+                logs=logs,
+                runtime=runtime,
+                task=task,
+                timestamp_fn=timestamp_fn,
+                niam_credentials=niam_credentials,
             )
-            session_file = main_context.storage_state(path=str(os.getenv("NIAM_SESSION_FILE")))
+            if main_context is None:
+                logs.append(
+                    "NIAM login did not create a browser context. "
+                    "See the exception above for the real cause."
+                )
+                clear_user_notice(runtime, status=None)
+                return False, None, logs
+
+            session_file = main_context.storage_state(path=str(session_path))
+            # A retry may have succeeded after an earlier failed attempt: drop
+            # any dialog queued by that attempt so it does not pop up now.
+            clear_user_alert(runtime)
             if main_context:
                 main_context.close()
                 del main_context
@@ -2891,22 +3342,39 @@ def niam_session_maker(
             return True, session_file, logs
     
     except Exception as e:
-        if logs:
-            logs.append(
-                f"  Exception Occurred {str(e.__class__.__name__)}",
-                f"{traceback.format_exc()}\n\n{e}",
-                "error",
+        logs.append(
+            f"  Exception Occurred {e.__class__.__name__}\n"
+            f"{traceback.format_exc()}\n\n{e}"
+        )
+        # A failed login must not leave the sign-in notice iframe open.
+        clear_user_notice(runtime, status=None)
+        if runtime is not None and not runtime.get("alert_required"):
+            show_user_alert(
+                runtime,
+                task,
+                logs,
+                timestamp_fn,
+                title="NIAM login failed",
+                text=(
+                    "Could not log in to NIAM. Check the NIAM OLM ID / password "
+                    f"saved in NIAM Credentials.\n\nDetails: {e}"
+                ),
             )
         return False, None, logs
 
 
 def niam_session_breaker(
+    session_file: str | os.PathLike | None = None,
 ):
+    session_path = session_file or os.getenv("NIAM_SESSION_FILE")
+    if not session_path:
+        return
+
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(
             headless=True, executable_path=get_browser()
         )
-        main_context = browser.new_context(storage_state=str(os.getenv("NIAM_SESSION_FILE")))
+        main_context = browser.new_context(storage_state=str(session_path))
         login_page = main_context.new_page()
         login_page.goto(
             "https://airtel.service-now.com/airtel?id=sc_cat_item&sys_id=01caf3ecdbaac30018af9ea3db9619f0",
@@ -2930,8 +3398,9 @@ def niam_session_breaker(
             # keyboard.press_and_release("ctrl+c")
             del playwright
 
-    if Path(os.getenv("NIAM_SESSION_FILE")).exists():
-        Path(os.getenv("NIAM_SESSION_FILE")).unlink()
+    session_path_obj = Path(str(session_path))
+    if session_path_obj.exists():
+        session_path_obj.unlink()
 
 
 def niam_new_page_opener(
@@ -2950,9 +3419,8 @@ def niam_new_page_opener(
     except Exception as e:
         if logs:
             logs.append(
-                f"  Exception Occurred {str(e.__class__.__name__)}",
-                f"{traceback.format_exc()}\n\n{e}",
-                "error",
+                f"  Exception Occurred {e.__class__.__name__}\n"
+                f"{traceback.format_exc()}\n\n{e}"
             )
 
     return result, logs
@@ -3056,9 +3524,7 @@ def get_dropdown_texts(results_list) -> list[str]:
 def niam_tt_raiser(
     row_dict: Dict[AnyStr, AnyStr],
     page: Page,
-    manager: DialogManager|None = None,
-    live_feed: Signal|None = None
-) -> Tuple[AnyStr, AnyStr, Union[List[AnyStr], None], Dict[AnyStr, AnyStr]]:
+) -> Tuple[AnyStr, Dict[AnyStr, AnyStr]]:
     cr = row_dict['SR OR CHANGE NO']
     node_names = row_dict['NIAM Node Name']
     
@@ -3141,16 +3607,16 @@ def niam_tt_raiser(
         NIAM_Activity_Name,
     ]
     
-    output_dict = {
-        "Activity Title": str(row_dict["Activity Title"]),
-        "Circle": User_Type,
-        "Change Responsible": Requested_For_email,
-        "Request For": Request_For,
-        "Activity Name": NIAM_Activity_Name,
-        "Project Name": NIAM_Project_Name,
-        "Execution Location": Execution_Location,
-        "Execution Date": str(SR_CR_Start_Date_Time)
-    }
+    # output_dict = {
+    #     "Activity Title": str(row_dict["Activity Title"]),
+    #     "Circle": User_Type,
+    #     "Change Responsible": Requested_For_email,
+    #     "Request For": Request_For,
+    #     "Activity Name": NIAM_Activity_Name,
+    #     "Project Name": NIAM_Project_Name,
+    #     "Execution Location": Execution_Location,
+    #     "Execution Date": str(SR_CR_Start_Date_Time)
+    # }
     
     Access_Type_List = [str(element).strip() for element in Access_Type.split('and')]
     
@@ -3411,43 +3877,52 @@ def niam_tt_raiser(
                     Business_Justification
                 )
                 
-                # Submitting the Ticket
+                #########################
+                # Submitting the Ticket #
+                #########################
                 
-                # page.wait_for_timeout(1000)
-                # page.locator('//*[text()="Submit"]').click()
-                # while True:
-                #     page.wait_for_timeout(500)
-                #     page.wait_for_load_state("networkidle")
-                #     try:
-                #         if page.locator('//*[text()="Submitted"]').is_visible():
-                #             # print("NIAM_Playwright Line 466")
-                #             break
-                #     except Exception:
-                #         pass
+                page.wait_for_timeout(1000)
+                page.locator('//*[text()="Submit"]').click()
+                while True:
+                    page.wait_for_timeout(500)
+                    page.wait_for_load_state("networkidle")
+                    try:
+                        if page.locator('//*[text()="Submitted"]').is_visible():
+                            # print("NIAM_Playwright Line 466")
+                            break
+                    except Exception:
+                        pass
                     
-                # page.wait_for_timeout(1000)
+                page.wait_for_timeout(1000)
 
-                # page.goto(
-                #     "https://airtel.service-now.com/airtel?id=requests_lists&table=sc_req_item"
-                # )
-                # page.wait_for_load_state("networkidle")
-                # page.wait_for_timeout(500)
+                #################
+                # Ticket Status #
+                #################
+                page.goto(
+                    "https://airtel.service-now.com/airtel?id=requests_lists&table=sc_req_item"
+                )
+                page.wait_for_load_state("networkidle")
+                page.wait_for_timeout(500)
 
-                # table = page.locator(
-                #     '//section/main/div/div/sp-page-row/div/div/div/sp-page-row/div/div/span/div/div/div/div/div/div[2]/table/tbody/tr/td[@role="text"]'
-                # ).all()
-                # ritm = ""
-                # if len(table) > 0:
-                #     ritm = table[0].text_content().strip()
-                #     result.append(ritm)
-                result[Access_Type_List[i]] = "Success"
+                table = page.locator(
+                    '//section/main/div/div/sp-page-row/div/div/div/sp-page-row/div/div/span/div/div/div/div/div/div[2]/table/tbody/tr/td[@role="text"]'
+                ).all()
+                ritm = ""
+                if len(table) > 0:
+                    ritm = table[0].text_content().strip()
+                    # result.append(ritm)
+                    result[Access_Type_List[i]] = ritm
+                # result[Access_Type_List[i]] = "Success"
             else:
                 result[Access_Type_List[i]] = "Failure"
+                result["Failure Reason"] = f"{str(e).split(':', 1)[-1].strip()} not found"
                 break
         
-        except Exception:
+        except Exception as e:
             result[Access_Type_List[i]] = "Failure"
+            result["Failure Reason"] = f"{str(e).split(':', 1)[-1].strip()} not found"
         i += 1
     
-    return cr,node_names,result, output_dict
+    # return cr,node_names,result, output_dict
+    return cr,  result
 

@@ -107,9 +107,18 @@
         }
     });
 
-    const authCloseBtn = document.getElementById('auth-modal-close');
-    if (authCloseBtn) {
-        authCloseBtn.addEventListener('click', closeAuthIframe);
+    // The shared auth overlay lives in base_main.html and is parsed after this
+    // script, so bind the close button once the DOM is ready.
+    function bindAuthCloseBtn() {
+        const authCloseBtn = document.getElementById('auth-modal-close');
+        if (authCloseBtn) {
+            authCloseBtn.addEventListener('click', closeAuthIframe);
+        }
+    }
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', bindAuthCloseBtn);
+    } else {
+        bindAuthCloseBtn();
     }
 
     function collectCrNumbers() {

@@ -47,13 +47,12 @@ from dashboard.task_modules.dependencies.extra_dependencies import (
 
 # Base location under which generated NIAM workbooks are written
 # (HOST_DOWNLOAD_DIR/NIAM_Excel_files/<date>/RITM Input_...xlsx).
-workbook_path = os.path.join(settings.HOST_DOWNLOAD_DIR, "NIAM_Excel_files", "base.xlsx")
+workbook_path = os.path.join(settings.HOST_DOWNLOAD_DIR, "NIAM_Excel_files")
 
 
 def niam_workbook_path_for(date_: datetime) -> Path:
     """Canonical output path of the RITM workbook for a given date."""
-    return Path(workbook_path).parent.joinpath(
-        "NIAM_Excel_files",
+    return Path(workbook_path).joinpath(
         date_.strftime("%d_%b_%Y"),
         f"RITM Input_PS_Core_{date_.strftime('%d_%b_%Y')}.xlsx",
     )
@@ -186,7 +185,7 @@ def niam_workbook_template_maker(df: pd.DataFrame, mail_id_worksheet_df: pd.Data
     )
     
     column_index_color_dict = {
-        "F4B084": ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S"],
+        "F4B084": ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "Y"],
         "92D050": ["T", "U", "V", "W", "X"]
     }
     excel_modifier_obj.special_styler(column_index_color_dict)
@@ -591,9 +590,30 @@ def fetch_crs_for_date(selected_date, GLOBAL_LOGS, timestamp_fn, runtime=None):
                 },
             }
 
+        # Help the user when they picked the execution date instead of the
+        # night date: the rows exist, just under a different (earlier) picker
+        # value.
+        picked_has_crs = (
+            SelectedDateTable.objects.using("default").filter(
+                execution_date=picked_date, is_active=True
+            ).exists()
+            or MasterCRDatabase.objects.using("default").filter(
+                execution_date=picked_date, is_active=True
+            ).exists()
+            or NIAMTicketGenerationTable.objects.using("default").filter(
+                execution_date=picked_date
+            ).exists()
+        )
+        hint = (
+            f" CRs exist for {picked_date} itself; select "
+            f"{picked_date - timedelta(days=1)} as the night date to work on "
+            f"that night."
+            if picked_has_crs
+            else ""
+        )
         raise NotFoundException(
-            f"No CR found for the selected date {picked_date} (CRs execute on "
-            f"{execution_date}).",
+            f"No CR found for the night of {picked_date} (they execute on "
+            f"{execution_date}).{hint}",
             title="No Data",
         )
 

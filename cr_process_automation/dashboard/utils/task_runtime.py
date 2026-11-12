@@ -61,6 +61,14 @@ def make_runtime(task_id: int) -> Dict[str, Any]:
         "otp_required": False,
         "otp": None,
         "otp_event": threading.Event(),
+        # Read-only notice fields (e.g. Microsoft Authenticator sign-in code)
+        "notice_required": False,
+        "notice_text": "",
+        # Blocking dialog fields (e.g. missing/wrong NIAM credentials)
+        "alert_required": False,
+        "alert_title": "",
+        "alert_text": "",
+        "alert_seq": 0,
         **_empty_counts(),
     }
 

@@ -60,6 +60,15 @@
         </footer>
     </div>
 
+    <!-- Auth / Password / OTP / Notice / Alert overlay (shared by every page,
+         same iframe pattern as the CR Planning task page) -->
+    <div id="auth-overlay" class="auth-overlay" style="display: none;" aria-hidden="true">
+        <div class="auth-modal" role="dialog" aria-modal="true" aria-labelledby="auth-iframe">
+            <button type="button" class="auth-modal-close" id="auth-modal-close" aria-label="Close">&times;</button>
+            <iframe id="auth-iframe" title="Task authentication" src=""></iframe>
+        </div>
+    </div>
+
     <script src="{% static 'dashboard/js/dashboard.js' %}"></script>
 </body>
 </html>
