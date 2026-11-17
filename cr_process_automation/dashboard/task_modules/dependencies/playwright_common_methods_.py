@@ -2368,6 +2368,18 @@ def itsm_logger(
         ).is_visible():
             if time.time() > deadline:
                 raise TimeoutError("ITSM did not reach the application list within 120s")
+            # "Stay signed in?" blocks the redirect into ITSM when the login
+            # needed no MFA. It is only dismissed inside the OTP branch of
+            # handle_authenticator, so handle it here as well.
+            try:
+                if page.locator("//*[text()='Stay signed in?']").is_visible():
+                    page.locator('#idSIButton9').click()   # "Yes"
+                    page.wait_for_load_state("load", timeout=60000)
+                    logs.append(
+                        f"{task_name}: dismissed 'Stay signed in?' prompt ---- {timestamp_fn()}"
+                    )
+            except Exception:
+                pass
             page.wait_for_timeout(1000)
             page.wait_for_load_state("domcontentloaded")
 
@@ -2381,6 +2393,24 @@ def itsm_logger(
         import traceback
         traceback.print_exc()
         logs.append(f"Error in itsm_logger: {type(e).__name__}: {str(e)} ---- {timestamp_fn()}")
+
+        # The automation browser is invisible on the server (Xvfb), so capture
+        # the page state for post-mortem debugging before the objects go away.
+        try:
+            shot_dir = Path(str(settings.MEDIA_ROOT)) / "login_screenshots"
+            shot_dir.mkdir(parents=True, exist_ok=True)
+            shot_path = shot_dir / (
+                "itsm_login_failure_"
+                f"{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+            )
+            page.screenshot(path=str(shot_path), full_page=True)
+            logs.append(
+                f"Login-failure screenshot saved: {shot_path} ---- {timestamp_fn()}"
+            )
+        except Exception as shot_err:
+            logs.append(
+                f"Could not save login-failure screenshot: {shot_err} ---- {timestamp_fn()}"
+            )
 
         # for obj in (page, context, browser):
         #     if obj:
