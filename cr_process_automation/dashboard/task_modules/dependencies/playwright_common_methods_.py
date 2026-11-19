@@ -80,6 +80,26 @@ def _visible_niam_login_error(page: Page) -> str:
             continue
     return ""
 
+def _niam_sign_in_code(page: Page) -> str:
+    """Read the Microsoft Authenticator number-matching code, if present.
+
+    The classic UI renders the number in ``#idRichContext_DisplaySign``; the
+    newer passwordless (NGC) UI uses ``#idRemoteNGC_DisplaySign``. Only a
+    numeric value counts as a code — a fallback link such as "Use my password
+    instead" that happens to be visible is not a sign-in code.
+    """
+    for element_id in ("idRichContext_DisplaySign", "idRemoteNGC_DisplaySign"):
+        try:
+            locator = page.locator(f'//*[@id="{element_id}"]')
+            if locator.is_visible():
+                text = (locator.text_content() or "").strip()
+                if text and text.isdigit():
+                    return text
+        except Exception:
+            continue
+    return ""
+
+
 def request_password_from_user(runtime, task, logs, timestamp_fn, timeout=300):
     """
     Pauses the Playwright thread until the user submits a password
@@ -2387,7 +2407,7 @@ def itsm_logger(
 
         logs.append(f"{task_name}: logged in successfully ---- {timestamp_fn()}")
         context.storage_state(path=get_itsm_session_file_path())
-        logs.append("✓ All steps completed successfully")
+        logs.append("✓ Selected task is in progress please wait...")
 
     except Exception as e:
         import traceback
@@ -2666,7 +2686,7 @@ def session_maker(
                     pass
         if playwright:
             playwright.stop()
-        logs.append("✓ Cleanup complete")
+        # logs.append("✓ Cleanup complete")
 
     return session_made, logs
 
@@ -2770,7 +2790,10 @@ def handle_niam_login(
             if (
                 page.locator('//input[@id="i0118"]').is_visible()
                 or page.locator('//div[text()="Enter password"]').is_visible()
+                or page.locator('//*[@id="idRemoteNGC_DisplaySign"]').is_visible() or page.locator('//*[text()="Use my password"]').is_visible()
             ):
+                if page.locator('//*[text()="Use my password"]').is_visible():
+                    page.locator('//*[text()="Use my password"]').click(button="left")
                 break
         except Exception:
             pass
@@ -2781,16 +2804,28 @@ def handle_niam_login(
             "Check the NIAM OLM ID saved in NIAM Credentials."
         )
 
-    # Enter the password
-    # page.locator('[id="passwordInput"]').fill(self.password)
-    page.locator('//input[@id="i0118"]').fill(password)
+    # The password step is optional in the newer Microsoft (NGC) flow: the
+    # passwordless "Approve sign in request" prompt can appear instead of the
+    # password field. Only fill the password when the field is actually shown;
+    # otherwise fall straight through to the approval handling below.
+    password_field = page.locator('//input[@id="i0118"]')
+    try:
+        password_field.wait_for(state="visible", timeout=5000)
+    except Exception:
+        pass
 
-    # Clicking on Sign in
-    # page.locator('[id="submitButton"]').click()
-    page.locator('//input[@id="idSIButton9"]').click()
-    
-    page.wait_for_load_state("load")
-    
+    if password_field.is_visible():
+        # Enter the password
+        # page.locator('[id="passwordInput"]').fill(self.password)
+        password_field.fill(password)
+
+        # Clicking on Sign in
+        # page.locator('[id="submitButton"]').click()
+        page.locator('//input[@id="idSIButton9"]').click()
+
+        page.wait_for_load_state("load")
+
+    page.wait_for_selector("//*[text()='Approve sign in request' or text()='Approve sign in' or text()='Verify your identity' or text()='Face, fingerprint, PIN, or security key']", timeout=15000)
     mfa_prompt_locator = page.locator(
         "//*[text()='Approve sign in request' or text()='Approve sign in' or text()='Verify your identity' or text()='Face, fingerprint, PIN, or security key']"
     )
@@ -2825,15 +2860,22 @@ def handle_niam_login(
             # while the prompt is still visible and keep showing it in the
             # dashboard notice iframe until the prompt goes away (approved).
             text_code = None
+            # The number may render a moment after the prompt itself. Both the
+            # classic (idRichContext_DisplaySign) and the passwordless/NGC
+            # (idRemoteNGC_DisplaySign) UIs are supported, and only a numeric
+            # code counts — a fallback link is not a sign-in code.
             try:
-                # The code element may render a moment after the prompt itself.
-                display_sign = page.locator('//*[@id="idRichContext_DisplaySign"]')
-                display_sign.wait_for(state="visible", timeout=5000)
-                text_code = display_sign.text_content()
+                print("Waiting for sign-in code to appear...")
+                code_deadline = time.time() + 10
+                while time.time() < code_deadline:
+                    text_code = _niam_sign_in_code(page)
+                    if text_code:
+                        break
+                    page.wait_for_timeout(500)
             except Exception:
                 text_code = None
 
-            if text_code and str(text_code).strip():
+            if text_code:
                 show_user_notice(
                     runtime,
                     task,
@@ -2872,12 +2914,12 @@ def handle_niam_login(
 
                     page.wait_for_selector("//*[text() = 'Use a verification code']")
 
-                    print(
-                        "\"Use a verification code\" is visible =>",
-                        page.locator(
-                            '//*[@id="idDiv_SAOTCS_Proofs"]/div[2]/div/div/div[2]/div[text()="Use a verification code"]'
-                        ).is_visible(),
-                    )
+                    # print(
+                    #     "\"Use a verification code\" is visible =>",
+                    #     page.locator(
+                    #         '//*[@id="idDiv_SAOTCS_Proofs"]/div[2]/div/div/div[2]/div[text()="Use a verification code"]'
+                    #     ).is_visible(),
+                    # )
                     if page.locator(
                         '//*[@id="idDiv_SAOTCS_Proofs"]/div[2]/div/div/div[2]/div[text()="Use a verification code"]'
                     ).is_visible():
@@ -2899,7 +2941,7 @@ def handle_niam_login(
                     page.locator("#idSubmit_SAOTCC_Continue").click()
 
                     # Handle the "Stay signed in?" prompt that often appears
-                    try:
+                    try:    
                         stay_signed_in = page.locator("//*[text()='Stay signed in?']")
                         stay_signed_in.wait_for(state="visible", timeout=15000)
                         page.locator("#idSIButton9").click()  # "Yes" button
@@ -2934,7 +2976,7 @@ def handle_niam_login(
                     if approve_prompt.is_visible():
                         break
                     else:
-                        
+
                         approve_prompt_failed_prompt = page.get_by_text(
                             "Approve a request on my Microsoft Authenticator app"
                         )
@@ -2942,8 +2984,26 @@ def handle_niam_login(
                             approve_prompt_failed_prompt.click(button="left")
                             page.wait_for_timeout(1000)
                         approve_prompt.wait_for(state="visible", timeout=10000)
+                # The number-matching code appears once the method is chosen;
+                # surface it in the notice iframe so the user can approve.
+                try:
+                    text_code = ""
+                    code_deadline = time.time() + 10
+                    while time.time() < code_deadline:
+                        text_code = _niam_sign_in_code(page)
+                        if text_code:
+                            break
+                        page.wait_for_timeout(500)
+                    if text_code:
+                        show_user_notice(
+                            runtime, task, logs, timestamp_fn, text_code
+                        )
+                except Exception:
+                    pass
                 # print("Waiting for sign in approval after verification step.")
                 approve_prompt.wait_for(state="hidden", timeout=60000)
+                # Approved (or prompt gone): hide the code again.
+                clear_user_notice(runtime)
                 # print("Sign in approved by user after verification.")
 
             except Exception as e:
@@ -3216,6 +3276,8 @@ def niam_logger(
 
         page.wait_for_timeout(500)
         page.wait_for_load_state("networkidle")
+
+        context.storage_state(path=os.getenv("NIAM_SESSION_FILE"))
 
     except NiamAuthenticationError as e:
         logs.append(
