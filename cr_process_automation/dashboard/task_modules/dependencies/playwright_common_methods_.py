@@ -85,9 +85,10 @@ def _niam_sign_in_code(page: Page) -> str:
     """Read the Microsoft Authenticator number-matching code, if present.
 
     The classic UI renders the number in ``#idRichContext_DisplaySign``; the
-    newer passwordless (NGC) UI uses ``#idRemoteNGC_DisplaySign``. Only a
-    numeric value counts as a code — a fallback link such as "Use my password
-    instead" that happens to be visible is not a sign-in code.
+    newer passwordless (NGC) UI uses ``#idRemoteNGC_DisplaySign``. Other
+    Authenticator variants render it in elements whose IDs vary, so a visible
+    short element whose entire text is digits is also accepted as the code.
+    A fallback link such as "Use my password instead" never qualifies.
     """
     for element_id in ("idRichContext_DisplaySign", "idRemoteNGC_DisplaySign"):
         try:
@@ -98,6 +99,24 @@ def _niam_sign_in_code(page: Page) -> str:
                     return text
         except Exception:
             continue
+
+    # Generic fallback: a visible element whose entire (trimmed) text is a
+    # short number. On the approve view the number-matching code is the only
+    # such element; only the first few candidates are checked.
+    try:
+        candidates = page.locator(
+            "//*[normalize-space(text()) != '' "
+            "and string-length(normalize-space(text())) <= 3 "
+            "and translate(normalize-space(text()), '0123456789', '') = '']"
+        )
+        for i in range(min(candidates.count(), 10)):
+            element = candidates.nth(i)
+            if element.is_visible():
+                text = (element.text_content() or "").strip()
+                if text and text.isdigit() and len(text) <= 3:
+                    return text
+    except Exception:
+        pass
     return ""
 
 
@@ -2788,13 +2807,27 @@ def handle_niam_login(
                 f"Check the NIAM OLM ID saved in NIAM Credentials.\n\n{error}"
             )
         try:
+            # Microsoft uses two wordings for the password fallback link:
+            # "Use my password" on the "Choose a way to sign in" view and
+            # "use your password instead" on the passwordless approve view.
+            # Match either case-insensitively on the direct text node.
+            password_link_xpath = (
+                "//*[contains(translate(text(),"
+                " 'ABCDEFGHIJKLMNOPQRSTUVWXYZ',"
+                " 'abcdefghijklmnopqrstuvwxyz'), 'use my password')"
+                " or contains(translate(text(),"
+                " 'ABCDEFGHIJKLMNOPQRSTUVWXYZ',"
+                " 'abcdefghijklmnopqrstuvwxyz'), 'password instead')]"
+            )
             if (
                 page.locator('//input[@id="i0118"]').is_visible()
                 or page.locator('//div[text()="Enter password"]').is_visible()
-                or page.locator('//*[@id="idRemoteNGC_DisplaySign"]').is_visible() or page.locator('//*[text()="Use my password"]').is_visible()
+                or page.locator('//*[@id="idRemoteNGC_DisplaySign"]').is_visible()
+                or page.locator(password_link_xpath).is_visible()
             ):
-                if page.locator('//*[text()="Use my password"]').is_visible():
-                    page.locator('//*[text()="Use my password"]').click(button="left")
+                use_password_link = page.locator(password_link_xpath)
+                if use_password_link.first.is_visible():
+                    use_password_link.first.click(timeout=10000)
                 break
         except Exception:
             pass
@@ -2826,38 +2859,59 @@ def handle_niam_login(
 
         page.wait_for_load_state("load")
 
-    # NOTE: do not block on an MFA wait here. A wrong password returns to this
-    # same page with an error, and the loop below checks for that first, so
-    # the user gets a clear "password rejected" message instead of a timeout.
-    mfa_prompt_locator = page.locator(
-        "//*[text()='Approve sign in request' or text()='Approve sign in' or text()='Verify your identity' or text()='Face, fingerprint, PIN, or security key']"
-    )
-
-    # A wrong password usually returns to the same page with "#passwordError".
-    # Detect that before waiting for an MFA prompt that will never appear.
-    deadline = time.time() + 15
-    while time.time() < deadline:
-        error = _visible_niam_login_error(page)
-        if error:
-            raise NiamAuthenticationError(
-                "The NIAM password was rejected by Microsoft. Check the NIAM "
-                f"password saved in NIAM Credentials.\n\n{error}"
-            )
-        try:
-            if mfa_prompt_locator.first.is_visible():
-                break
-        except Exception:
-            pass
-        page.wait_for_timeout(500)
+    # NOTE: do not block on an MFA wait here. The detection loop below checks
+    # for a rejected password first, so the user gets a clear error instead of
+    # a timeout.
 
     try:
-        # Wait for either prompt to appear
-        mfa_prompt_locator.first.wait_for(state="visible", timeout=15000)
+        # Detect which MFA view Microsoft is showing by VISIBILITY of each
+        # prompt, not by the first DOM match of a combined locator - these
+        # pages keep hidden template elements for the other methods, and an
+        # exact-text first match can land on one of those. Substring matching
+        # also tolerates wording variants ("Approve sign in" vs
+        # "Approve sign in request").
+        approve_prompt_locator = page.locator(
+            "//*[contains(text(),'Approve sign in')]"
+        )
+        verify_prompt_locator = page.locator(
+            "//*[contains(text(),'Verify your identity')]"
+        )
+        face_prompt_locator = page.locator(
+            "//*[contains(text(),'Face, fingerprint, PIN, or security key')]"
+        )
 
-        prompt_text = mfa_prompt_locator.first.text_content() or ""
-        
+        deadline = time.time() + 15
+        prompt_kind = ""
+        while time.time() < deadline:
+            # A wrong password returns to the password page with an error
+            # instead of any MFA view - report that instead of timing out.
+            error = _visible_niam_login_error(page)
+            if error:
+                raise NiamAuthenticationError(
+                    "The NIAM password was rejected by Microsoft. Check the NIAM "
+                    f"password saved in NIAM Credentials.\n\n{error}"
+                )
+            try:
+                if approve_prompt_locator.first.is_visible():
+                    prompt_kind = "approve"
+                    break
+                if verify_prompt_locator.first.is_visible():
+                    prompt_kind = "verify"
+                    break
+                if face_prompt_locator.first.is_visible():
+                    prompt_kind = "face"
+                    break
+            except Exception:
+                pass
+            page.wait_for_timeout(500)
+
+        logs.append(
+            f"{task_name}: MFA prompt detected ({prompt_kind or 'none'}) ---- "
+            f"{timestamp_fn()}"
+        )
+
         # Now check which one it is
-        if "Approve sign in request" in prompt_text or "Approve sign in" in prompt_text:
+        if prompt_kind == "approve":
             # The "Approve sign in" page shows a short code in the browser that
             # the user must match with the number on their phone. Capture it
             # while the prompt is still visible and keep showing it in the
@@ -2888,8 +2942,11 @@ def handle_niam_login(
                 )
                 try:
                     # Wait for the prompt to disappear (user approved on phone).
+                    # Substring match: the wording is "Approve sign in
+                    # request" on some variants and "Approve sign in" on the
+                    # newer passwordless view.
                     approval_prompt = page.locator(
-                        "//*[text()='Approve sign in request' or text()='Approve sign in']"
+                        "//*[contains(text(),'Approve sign in')]"
                     ).first
                     approval_prompt.wait_for(state="hidden", timeout=60000)
                     logs.append(
@@ -2963,7 +3020,7 @@ def handle_niam_login(
                     )
                     raise
 
-        elif "Verify your identity" in prompt_text:
+        elif prompt_kind == "verify":
             # print("Line No. 367 - Verifying identity.")
             while page.get_by_text(
                 "Approve a request on my Microsoft Authenticator app"
@@ -3030,7 +3087,7 @@ def handle_niam_login(
                 # context_playwright_deleter(context, playwright)
                 pass
 
-        elif "Face, fingerprint, PIN, or security key" in prompt_text:
+        elif prompt_kind == "face":
             try:
                 approve_prompt = page.get_by_text(
                     "Face, fingerprint, PIN, or security key"
