@@ -2949,19 +2949,47 @@ def handle_niam_login(
                     str(text_code).strip(),
                 )
                 try:
-                    # Wait for the prompt to disappear (user approved on phone).
+                    # Wait for the approval to GENUINELY complete. A plain
+                    # "text hidden" wait is not reliable: a hidden template
+                    # element containing "Approve sign in" satisfied it ~2s
+                    # after the prompt appeared, which cleared the notice
+                    # before the dashboard poll could ever show it. Instead
+                    # wait for a real signal: the page leaves Microsoft's
+                    # login domain (redirect to ServiceNow), or the
+                    # number-matching code has been gone for a sustained
+                    # period (transient re-renders hide it briefly).
                     # Two minutes: the user has to notice the iframe, unlock
-                    # their phone and match the number - 60s proved too tight.
-                    # Substring match: the wording is "Approve sign in request"
-                    # on some variants and "Approve sign in" on the newer
-                    # passwordless view.
-                    approval_prompt = page.locator(
-                        "//*[contains(text(),'Approve sign in')]"
-                    ).first
-                    approval_prompt.wait_for(state="hidden", timeout=120000)
-                    logs.append(
-                        f"{task_name}: sign-in approved by user ---- {timestamp_fn()}"
-                    )
+                    # their phone and match the number.
+                    deadline = time.time() + 120
+                    missing_since = None
+                    completed = False
+                    while time.time() < deadline:
+                        try:
+                            url = page.url or ""
+                        except Exception:
+                            url = ""
+                        if "login.microsoftonline.com" not in url:
+                            completed = True
+                            break
+                        if _niam_sign_in_code(page):
+                            missing_since = None
+                        else:
+                            if missing_since is None:
+                                missing_since = time.time()
+                            elif time.time() - missing_since > 3:
+                                completed = True
+                                break
+                        page.wait_for_timeout(500)
+
+                    if completed:
+                        logs.append(
+                            f"{task_name}: sign-in approved by user ---- {timestamp_fn()}"
+                        )
+                    else:
+                        logs.append(
+                            f"{task_name}: timed out waiting for sign-in approval "
+                            f"---- {timestamp_fn()}"
+                        )
                 except Exception as e:
                     logs.append(
                         f"{task_name}: timed out waiting for sign-in approval: "
