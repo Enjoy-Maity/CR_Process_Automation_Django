@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import re
 import time
@@ -226,6 +227,16 @@ def show_user_notice(
     runtime["notice_text"] = notice_text
     runtime["notice_required"] = True
     runtime["status"] = status
+
+    # Persist to the file log as well: the in-memory task log dies with every
+    # server restart, and notice timing is the key diagnostic for "the iframe
+    # never showed".
+    logging.getLogger("dashboard.notice").info(
+        "%s: sign-in code shown to user (code=%s, run_key=%s)",
+        task_name,
+        notice_text,
+        runtime.get("run_key", ""),
+    )
 
     if logs is not None and timestamp_fn is not None:
         logs.append(f"{task_name}: sign-in code shown to user ---- {timestamp_fn()}")
@@ -2767,6 +2778,155 @@ def exception_returner(
     return None, None, None
 
 
+def niam_approve_sign_in_handle(
+    page: Page,
+    runtime: dict,
+    task: dict,
+    logs: list,
+    timestamp_fn: Callable,
+) -> list:
+    # The "Approve sign in" page shows a short code in the browser that
+    # the user must match with the number on their phone. Capture it
+    # while the prompt is still visible and keep showing it in the
+    # dashboard notice iframe until the prompt goes away (approved).
+    text_code = None
+    # The number may render a moment after the prompt itself. Both the
+    # classic (idRichContext_DisplaySign) and the passwordless/NGC
+    # (idRemoteNGC_DisplaySign) UIs are supported, and only a numeric
+    # code counts — a fallback link is not a sign-in code.
+    task_name = task["name"] if task else "Task"
+    try:
+        print("Waiting for sign-in code to appear...")
+        code_deadline = time.time() + 10
+        while time.time() < code_deadline:
+            text_code = _niam_sign_in_code(page)
+            if text_code:
+                break
+            page.wait_for_timeout(500)
+    except Exception:
+        text_code = None
+
+    if text_code:
+        show_user_notice(
+            runtime,
+            task,
+            logs,
+            timestamp_fn,
+            str(text_code).strip(),
+        )
+        try:
+            # Wait for the approval to GENUINELY complete. A plain
+            # "text hidden" wait is not reliable: a hidden template
+            # element containing "Approve sign in" satisfied it ~2s
+            # after the prompt appeared, which cleared the notice
+            # before the dashboard poll could ever show it. Instead
+            # wait for a real signal: the page leaves Microsoft's
+            # login domain (redirect to ServiceNow), or the
+            # number-matching code has been gone for a sustained
+            # period (transient re-renders hide it briefly).
+            # Two minutes: the user has to notice the iframe, unlock
+            # their phone and match the number.
+            deadline = time.time() + 120
+            missing_since = None
+            completed = False
+            while time.time() < deadline:
+                try:
+                    url = page.url or ""
+                except Exception:
+                    url = ""
+                if "login.microsoftonline.com" not in url:
+                    completed = True
+                    break
+                if _niam_sign_in_code(page):
+                    missing_since = None
+                else:
+                    if missing_since is None:
+                        missing_since = time.time()
+                    elif time.time() - missing_since > 3:
+                        completed = True
+                        break
+                page.wait_for_timeout(500)
+
+            if completed:
+                logs.append(
+                    f"{task_name}: sign-in approved by user ---- {timestamp_fn()}"
+                )
+            else:
+                logs.append(
+                    f"{task_name}: timed out waiting for sign-in approval "
+                    f"---- {timestamp_fn()}"
+                )
+        except Exception as e:
+            logs.append(
+                f"{task_name}: timed out waiting for sign-in approval: "
+                f"{e} ---- {timestamp_fn()}"
+            )
+        finally:
+            # Prompt is gone, so the code must disappear as well.
+            clear_user_notice(runtime)
+    else:
+        # The user cannot use the Authenticator app. Fall back to the
+        # "Use a verification code" flow and ask for the code through
+        # the dashboard iframe.
+        try:
+            if page.get_by_text(
+                "I can't use my Microsoft Authenticator app right now"
+            ).is_visible():
+                page.get_by_text(
+                    "I can't use my Microsoft Authenticator app right now"
+                ).click()
+
+            page.wait_for_selector("//*[text() = 'Use a verification code']")
+
+            # print(
+            #     "\"Use a verification code\" is visible =>",
+            #     page.locator(
+            #         '//*[@id="idDiv_SAOTCS_Proofs"]/div[2]/div/div/div[2]/div[text()="Use a verification code"]'
+            #     ).is_visible(),
+            # )
+            if page.locator(
+                '//*[@id="idDiv_SAOTCS_Proofs"]/div[2]/div/div/div[2]/div[text()="Use a verification code"]'
+            ).is_visible():
+                page.locator(
+                    '//*[@id="idDiv_SAOTCS_Proofs"]/div[2]/div/div/div[2]/div[text()="Use a verification code"]'
+                ).click()
+
+            # ===== Get the code from the user via iframe form =====
+            code = request_2fa_code_from_user(
+                runtime, task, logs, timestamp_fn
+            )
+
+            # Fill the code into the MS verification input
+            otp_input = page.locator("#idTxtBx_SAOTCC_OTC")
+            otp_input.wait_for(state="visible", timeout=15000)
+            otp_input.fill(code)
+
+            # Click "Verify" / "Sign in"
+            page.locator("#idSubmit_SAOTCC_Continue").click()
+
+            # Handle the "Stay signed in?" prompt that often appears
+            try:    
+                stay_signed_in = page.locator("//*[text()='Stay signed in?']")
+                stay_signed_in.wait_for(state="visible", timeout=15000)
+                page.locator("#idSIButton9").click()  # "Yes" button
+            except Exception:
+                pass
+
+            page.wait_for_load_state("load", timeout=60000)
+            logs.append(
+                f"{task_name}: 2FA code submitted ---- {timestamp_fn()}"
+            )
+            # ======================================================
+        except Exception as e:
+            print(f"OTP handling error: {e}")
+            logs.append(
+                f"{task_name}: OTP handling error: {e} ---- {timestamp_fn()}"
+            )
+            raise
+
+    return logs
+
+
 def handle_niam_login(
     page: Page,
     context: BrowserContext,
@@ -2866,6 +3026,10 @@ def handle_niam_login(
                 pass
 
         page.wait_for_load_state("load")
+    
+    if approve_prompt := page.get_by_text("Approve sign in request").first:
+        if approve_prompt.is_visible():
+            logs = niam_approve_sign_in_handle(page, runtime, task, logs, timestamp_fn)
 
     # NOTE: do not block on an MFA wait here. The detection loop below checks
     # for a rejected password first, so the user gets a clear error instead of
@@ -2920,143 +3084,7 @@ def handle_niam_login(
 
         # Now check which one it is
         if prompt_kind == "approve":
-            # The "Approve sign in" page shows a short code in the browser that
-            # the user must match with the number on their phone. Capture it
-            # while the prompt is still visible and keep showing it in the
-            # dashboard notice iframe until the prompt goes away (approved).
-            text_code = None
-            # The number may render a moment after the prompt itself. Both the
-            # classic (idRichContext_DisplaySign) and the passwordless/NGC
-            # (idRemoteNGC_DisplaySign) UIs are supported, and only a numeric
-            # code counts — a fallback link is not a sign-in code.
-            try:
-                print("Waiting for sign-in code to appear...")
-                code_deadline = time.time() + 10
-                while time.time() < code_deadline:
-                    text_code = _niam_sign_in_code(page)
-                    if text_code:
-                        break
-                    page.wait_for_timeout(500)
-            except Exception:
-                text_code = None
-
-            if text_code:
-                show_user_notice(
-                    runtime,
-                    task,
-                    logs,
-                    timestamp_fn,
-                    str(text_code).strip(),
-                )
-                try:
-                    # Wait for the approval to GENUINELY complete. A plain
-                    # "text hidden" wait is not reliable: a hidden template
-                    # element containing "Approve sign in" satisfied it ~2s
-                    # after the prompt appeared, which cleared the notice
-                    # before the dashboard poll could ever show it. Instead
-                    # wait for a real signal: the page leaves Microsoft's
-                    # login domain (redirect to ServiceNow), or the
-                    # number-matching code has been gone for a sustained
-                    # period (transient re-renders hide it briefly).
-                    # Two minutes: the user has to notice the iframe, unlock
-                    # their phone and match the number.
-                    deadline = time.time() + 120
-                    missing_since = None
-                    completed = False
-                    while time.time() < deadline:
-                        try:
-                            url = page.url or ""
-                        except Exception:
-                            url = ""
-                        if "login.microsoftonline.com" not in url:
-                            completed = True
-                            break
-                        if _niam_sign_in_code(page):
-                            missing_since = None
-                        else:
-                            if missing_since is None:
-                                missing_since = time.time()
-                            elif time.time() - missing_since > 3:
-                                completed = True
-                                break
-                        page.wait_for_timeout(500)
-
-                    if completed:
-                        logs.append(
-                            f"{task_name}: sign-in approved by user ---- {timestamp_fn()}"
-                        )
-                    else:
-                        logs.append(
-                            f"{task_name}: timed out waiting for sign-in approval "
-                            f"---- {timestamp_fn()}"
-                        )
-                except Exception as e:
-                    logs.append(
-                        f"{task_name}: timed out waiting for sign-in approval: "
-                        f"{e} ---- {timestamp_fn()}"
-                    )
-                finally:
-                    # Prompt is gone, so the code must disappear as well.
-                    clear_user_notice(runtime)
-            else:
-                # The user cannot use the Authenticator app. Fall back to the
-                # "Use a verification code" flow and ask for the code through
-                # the dashboard iframe.
-                try:
-                    if page.get_by_text(
-                        "I can't use my Microsoft Authenticator app right now"
-                    ).is_visible():
-                        page.get_by_text(
-                            "I can't use my Microsoft Authenticator app right now"
-                        ).click()
-
-                    page.wait_for_selector("//*[text() = 'Use a verification code']")
-
-                    # print(
-                    #     "\"Use a verification code\" is visible =>",
-                    #     page.locator(
-                    #         '//*[@id="idDiv_SAOTCS_Proofs"]/div[2]/div/div/div[2]/div[text()="Use a verification code"]'
-                    #     ).is_visible(),
-                    # )
-                    if page.locator(
-                        '//*[@id="idDiv_SAOTCS_Proofs"]/div[2]/div/div/div[2]/div[text()="Use a verification code"]'
-                    ).is_visible():
-                        page.locator(
-                            '//*[@id="idDiv_SAOTCS_Proofs"]/div[2]/div/div/div[2]/div[text()="Use a verification code"]'
-                        ).click()
-
-                    # ===== Get the code from the user via iframe form =====
-                    code = request_2fa_code_from_user(
-                        runtime, task, logs, timestamp_fn
-                    )
-
-                    # Fill the code into the MS verification input
-                    otp_input = page.locator("#idTxtBx_SAOTCC_OTC")
-                    otp_input.wait_for(state="visible", timeout=15000)
-                    otp_input.fill(code)
-
-                    # Click "Verify" / "Sign in"
-                    page.locator("#idSubmit_SAOTCC_Continue").click()
-
-                    # Handle the "Stay signed in?" prompt that often appears
-                    try:    
-                        stay_signed_in = page.locator("//*[text()='Stay signed in?']")
-                        stay_signed_in.wait_for(state="visible", timeout=15000)
-                        page.locator("#idSIButton9").click()  # "Yes" button
-                    except Exception:
-                        pass
-
-                    page.wait_for_load_state("load", timeout=60000)
-                    logs.append(
-                        f"{task_name}: 2FA code submitted ---- {timestamp_fn()}"
-                    )
-                    # ======================================================
-                except Exception as e:
-                    print(f"OTP handling error: {e}")
-                    logs.append(
-                        f"{task_name}: OTP handling error: {e} ---- {timestamp_fn()}"
-                    )
-                    raise
+            logs = niam_approve_sign_in_handle(page, runtime, task, logs, timestamp_fn)
 
         elif prompt_kind == "verify":
             # print("Line No. 367 - Verifying identity.")
