@@ -63,6 +63,7 @@ def _visible_niam_login_error(page: Page) -> str:
     known_messages = (
         "Your account or password is incorrect",
         "The password you entered is incorrect",
+        "The password is incorrect",
         "We couldn't find an account with that username",
         "We couldn't find your account",
         "This username may be incorrect",
@@ -2825,7 +2826,9 @@ def handle_niam_login(
 
         page.wait_for_load_state("load")
 
-    page.wait_for_selector("//*[text()='Approve sign in request' or text()='Approve sign in' or text()='Verify your identity' or text()='Face, fingerprint, PIN, or security key']", timeout=15000)
+    # NOTE: do not block on an MFA wait here. A wrong password returns to this
+    # same page with an error, and the loop below checks for that first, so
+    # the user gets a clear "password rejected" message instead of a timeout.
     mfa_prompt_locator = page.locator(
         "//*[text()='Approve sign in request' or text()='Approve sign in' or text()='Verify your identity' or text()='Face, fingerprint, PIN, or security key']"
     )
