@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 import os
 import re
 import time
@@ -121,6 +120,110 @@ def _niam_sign_in_code(page: Page) -> str:
     return ""
 
 
+_PASSWORD_FALLBACK_PHRASES = ("use my password", "use your password")
+
+
+def _password_fallback_xpath() -> str:
+    """XPath of the innermost element offering "Use my password" (or "use your password").
+
+    Matching is case-insensitive on the whitespace-normalised full text, and only
+    the innermost element carrying the phrase is returned, so a wrapper or a
+    <script> copy of the phrase is never picked in place of the control.
+    """
+    text = (
+        "translate(normalize-space(.), "
+        "'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')"
+    )
+    phrase = " or ".join(f"contains({text}, '{p}')" for p in _PASSWORD_FALLBACK_PHRASES)
+    return f"//*[({phrase}) and not(*[{phrase}])]"
+
+
+def _password_view_visible(page: Page) -> bool:
+    """True once Microsoft shows the password entry view."""
+    for xpath in (
+        '//input[@id="i0118"]',
+        '//*[normalize-space(.)="Enter password"]',
+    ):
+        try:
+            if page.locator(xpath).first.is_visible():
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _niam_approve_view_visible(page: Page) -> bool:
+    """True once the passwordless approve view (with its number) is shown."""
+    for xpath in (
+        '//*[@id="idRemoteNGC_DisplaySign"]',
+        "//*[contains(text(),'Approve sign in')]",
+    ):
+        try:
+            if page.locator(xpath).first.is_visible():
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _password_fallback_visible(page: Page) -> bool:
+    """True when a visible "Use my password" control is on the page."""
+    option = page.locator(_password_fallback_xpath())
+    try:
+        for index in range(min(option.count(), 15)):
+            if option.nth(index).is_visible():
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _open_password_view(page: Page, logs: list, task_name: str, timestamp_fn) -> bool:
+    """Click "Use my password" on Microsoft's method chooser.
+
+    Visible candidates are tried in turn (hidden copies are skipped, and a click
+    that is intercepted falls back to a DOM click). A click only counts once the
+    password view actually appears.
+    """
+    option = page.locator(_password_fallback_xpath())
+    try:
+        total = option.count()
+    except Exception:
+        total = 0
+    for index in range(min(total, 15)):
+        candidate = option.nth(index)
+        try:
+            if not candidate.is_visible():
+                continue
+        except Exception:
+            continue
+        try:
+            candidate.click(timeout=5000)
+        except Exception:
+            try:
+                candidate.evaluate("element => element.click()")
+            except Exception as exc:
+                logs.append(
+                    f"{task_name}: could not click 'Use my password' ({exc}) "
+                    f"---- {timestamp_fn()}"
+                )
+                continue
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            if _password_view_visible(page):
+                logs.append(
+                    f"{task_name}: opened the password view via 'Use my password' "
+                    f"---- {timestamp_fn()}"
+                )
+                return True
+            page.wait_for_timeout(500)
+    logs.append(
+        f"{task_name}: 'Use my password' did not open the password view "
+        f"({total} match(es) on the page) ---- {timestamp_fn()}"
+    )
+    return False
+
+
 def request_password_from_user(runtime, task, logs, timestamp_fn, timeout=300):
     """
     Pauses the Playwright thread until the user submits a password
@@ -227,16 +330,6 @@ def show_user_notice(
     runtime["notice_text"] = notice_text
     runtime["notice_required"] = True
     runtime["status"] = status
-
-    # Persist to the file log as well: the in-memory task log dies with every
-    # server restart, and notice timing is the key diagnostic for "the iframe
-    # never showed".
-    logging.getLogger("dashboard.notice").info(
-        "%s: sign-in code shown to user (code=%s, run_key=%s)",
-        task_name,
-        notice_text,
-        runtime.get("run_key", ""),
-    )
 
     if logs is not None and timestamp_fn is not None:
         logs.append(f"{task_name}: sign-in code shown to user ---- {timestamp_fn()}")
@@ -2957,8 +3050,12 @@ def handle_niam_login(
     page.wait_for_timeout(500)
 
     # Bounded wait for the password prompt: a wrong user ID can leave the page
-    # on an error message instead of showing the password field.
+    # on an error message instead of showing the password field. After the user
+    # ID Microsoft shows the method chooser ("Choose a way to sign in"); "Use my
+    # password" there opens the password view. The approve view (with its
+    # number) is handled further down, so its link is never clicked here.
     deadline = time.time() + 30
+    fallback_attempts = 0
     while time.time() < deadline:
         error = _visible_niam_login_error(page)
         if error:
@@ -2966,31 +3063,12 @@ def handle_niam_login(
                 "NIAM login failed before the password could be entered. "
                 f"Check the NIAM OLM ID saved in NIAM Credentials.\n\n{error}"
             )
-        try:
-            # Microsoft uses two wordings for the password fallback link:
-            # "Use my password" on the "Choose a way to sign in" view and
-            # "use your password instead" on the passwordless approve view.
-            # Match either case-insensitively on the direct text node.
-            password_link_xpath = (
-                "//*[contains(translate(text(),"
-                " 'ABCDEFGHIJKLMNOPQRSTUVWXYZ',"
-                " 'abcdefghijklmnopqrstuvwxyz'), 'use my password')"
-                " or contains(translate(text(),"
-                " 'ABCDEFGHIJKLMNOPQRSTUVWXYZ',"
-                " 'abcdefghijklmnopqrstuvwxyz'), 'password instead')]"
-            )
-            if (
-                page.locator('//input[@id="i0118"]').is_visible()
-                or page.locator('//div[text()="Enter password"]').is_visible()
-                or page.locator('//*[@id="idRemoteNGC_DisplaySign"]').is_visible()
-                or page.locator(password_link_xpath).is_visible()
-            ):
-                use_password_link = page.locator(password_link_xpath)
-                if use_password_link.first.is_visible():
-                    use_password_link.first.click(timeout=10000)
+        if _password_view_visible(page) or _niam_approve_view_visible(page):
+            break
+        if fallback_attempts < 3 and _password_fallback_visible(page):
+            fallback_attempts += 1
+            if _open_password_view(page, logs, task_name, timestamp_fn):
                 break
-        except Exception:
-            pass
         page.wait_for_timeout(500)
     else:
         raise NiamAuthenticationError(
@@ -3302,16 +3380,12 @@ def login_to_niam(
                 "The NIAM user ID was rejected by Microsoft. Check the NIAM OLM "
                 f"ID saved in NIAM Credentials.\n\n{error}"
             )
-        try:
-            if (
-                page.locator('//input[@id="i0118"]').is_visible()
-                or page.locator('//div[text()="Enter password"]').is_visible()
-                or page.locator('//*[@id="idRemoteNGC_DisplaySign"]').is_visible()
-                or page.locator('//*[text()="Use my password"]').is_visible()
-            ):
-                break
-        except Exception:
-            pass
+        if (
+            _password_view_visible(page)
+            or _niam_approve_view_visible(page)
+            or _password_fallback_visible(page)
+        ):
+            break
         page.wait_for_timeout(500)
     else:
         raise NiamAuthenticationError(
