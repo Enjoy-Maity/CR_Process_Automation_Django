@@ -2851,11 +2851,19 @@ def handle_niam_login(
     if password_field.is_visible():
         # Enter the password
         # page.locator('[id="passwordInput"]').fill(self.password)
-        password_field.fill(password)
+        password_field.fill(password, timeout=10000)
 
-        # Clicking on Sign in
+        # Clicking on Sign in. The button can detach/hide while the page
+        # re-renders after the password lands (same behaviour as the email
+        # step), so fall back to Enter in the password field.
         # page.locator('[id="submitButton"]').click()
-        page.locator('//input[@id="idSIButton9"]').click()
+        try:
+            page.locator('//input[@id="idSIButton9"]').click(timeout=10000)
+        except Exception:
+            try:
+                password_field.press("Enter")
+            except Exception:
+                pass
 
         page.wait_for_load_state("load")
 
@@ -3353,7 +3361,7 @@ def niam_logger(
                 if page.locator(
                     '//div[@class="row text-title" and text()="Stay signed in?"]'
                 ).is_visible(timeout=3000):
-                    page.locator('//input[@id="idBtn_Back"]').click()
+                    page.locator('//input[@id="idBtn_Back"]').click(timeout=5000)
                     continue
 
                 if page.locator(
