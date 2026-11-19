@@ -3151,11 +3151,23 @@ def login_to_niam(
     page.wait_for_timeout(500)
     page.locator('//input[@id="i0116"]').fill(username)
 
-    # Clicking the Next Button
-    page.locator('//input[@id="idSIButton9"]').click()
+    # Submitting the email: Microsoft's page re-renders during its own
+    # transition, which can disable/detach the Next button while the click is
+    # waiting on it. Click briefly, then fall back to Enter in the email field,
+    # which submits the form regardless of the button's state.
+    next_button = page.locator('//input[@id="idSIButton9"]')
+    try:
+        next_button.click(timeout=10000)
+    except Exception:
+        try:
+            page.locator('//input[@id="i0116"]').press("Enter")
+        except Exception:
+            pass
 
-    # Microsoft either moves on to the password prompt or rejects the user ID.
-    # Wait for the password field instead of assuming the next page loaded.
+    # Microsoft either moves on to the password prompt, the passwordless
+    # (NGC) approve prompt, or its "Use my password" fallback - or rejects the
+    # user ID. Accept all of those outcomes here; the MFA handling after the
+    # password step knows how to continue each of them.
     deadline = time.time() + 30
     while time.time() < deadline:
         error = _visible_niam_login_error(page)
@@ -3165,18 +3177,48 @@ def login_to_niam(
                 f"ID saved in NIAM Credentials.\n\n{error}"
             )
         try:
-            if page.locator('//input[@id="i0118"]').is_visible():
+            if (
+                page.locator('//input[@id="i0118"]').is_visible()
+                or page.locator('//div[text()="Enter password"]').is_visible()
+                or page.locator('//*[@id="idRemoteNGC_DisplaySign"]').is_visible()
+                or page.locator('//*[text()="Use my password"]').is_visible()
+            ):
                 break
         except Exception:
             pass
         page.wait_for_timeout(500)
     else:
         raise NiamAuthenticationError(
-            "The Microsoft password prompt did not appear after submitting the "
-            "NIAM user ID. Check the NIAM OLM ID saved in NIAM Credentials."
+            "The Microsoft sign-in did not advance after submitting the NIAM "
+            "user ID. Check the NIAM OLM ID saved in NIAM Credentials."
         )
 
     return password
+
+
+def _save_login_failure_screenshot(page, logs, timestamp_fn, prefix="niam"):
+    """Capture the page state when a login fails.
+
+    The automation browser may be invisible (Xvfb on the server), so the
+    screenshot is often the only way to see which view Microsoft was showing.
+    """
+    try:
+        shot_dir = Path(str(settings.MEDIA_ROOT)) / "login_screenshots"
+        shot_dir.mkdir(parents=True, exist_ok=True)
+        shot_path = shot_dir / (
+            f"{prefix}_login_failure_"
+            f"{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+        )
+        page.screenshot(path=str(shot_path), full_page=True)
+        logs.append(
+            f"Login-failure screenshot saved: {shot_path} ---- "
+            f"{timestamp_fn() if callable(timestamp_fn) else ''}"
+        )
+    except Exception as shot_err:
+        logs.append(
+            f"Could not save login-failure screenshot: {shot_err} ---- "
+            f"{timestamp_fn() if callable(timestamp_fn) else ''}"
+        )
 
 
 def niam_logger(
@@ -3297,6 +3339,7 @@ def niam_logger(
                 f"the task again.\n\nDetails: {e}"
             ),
         )
+        _save_login_failure_screenshot(page, logs, timestamp_fn)
         exception_returner(playwright, context, browser, page)
         return None, None, None, logs
 
@@ -3318,6 +3361,7 @@ def niam_logger(
                 f"Details: {e}"
             ),
         )
+        _save_login_failure_screenshot(page, logs, timestamp_fn)
         exception_returner(playwright, context, browser, page)
         return None, None, None, logs
 
@@ -3348,6 +3392,7 @@ def niam_logger(
         show_user_alert(
             runtime, task, logs, timestamp_fn, title=alert_title, text=alert_text
         )
+        _save_login_failure_screenshot(page, logs, timestamp_fn)
         exception_returner(playwright, context, browser, page)
         return None, None, None, logs
 
