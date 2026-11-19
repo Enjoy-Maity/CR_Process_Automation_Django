@@ -2950,13 +2950,15 @@ def handle_niam_login(
                 )
                 try:
                     # Wait for the prompt to disappear (user approved on phone).
-                    # Substring match: the wording is "Approve sign in
-                    # request" on some variants and "Approve sign in" on the
-                    # newer passwordless view.
+                    # Two minutes: the user has to notice the iframe, unlock
+                    # their phone and match the number - 60s proved too tight.
+                    # Substring match: the wording is "Approve sign in request"
+                    # on some variants and "Approve sign in" on the newer
+                    # passwordless view.
                     approval_prompt = page.locator(
                         "//*[contains(text(),'Approve sign in')]"
                     ).first
-                    approval_prompt.wait_for(state="hidden", timeout=60000)
+                    approval_prompt.wait_for(state="hidden", timeout=120000)
                     logs.append(
                         f"{task_name}: sign-in approved by user ---- {timestamp_fn()}"
                     )
