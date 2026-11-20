@@ -2890,7 +2890,7 @@ def niam_approve_sign_in_handle(
     task_name = task["name"] if task else "Task"
     try:
         print("Waiting for sign-in code to appear...")
-        code_deadline = time.time() + 10
+        code_deadline = time.time() + 3
         while time.time() < code_deadline:
             text_code = _niam_sign_in_code(page)
             if text_code:
@@ -2919,7 +2919,7 @@ def niam_approve_sign_in_handle(
             # period (transient re-renders hide it briefly).
             # Two minutes: the user has to notice the iframe, unlock
             # their phone and match the number.
-            deadline = time.time() + 120
+            deadline = time.time() + 90
             missing_since = None
             completed = False
             while time.time() < deadline:
@@ -2935,7 +2935,7 @@ def niam_approve_sign_in_handle(
                 else:
                     if missing_since is None:
                         missing_since = time.time()
-                    elif time.time() - missing_since > 3:
+                    elif time.time() - missing_since > 2:
                         completed = True
                         break
                 page.wait_for_timeout(500)
@@ -3192,7 +3192,7 @@ def handle_niam_login(
                 # surface it in the notice iframe so the user can approve.
                 try:
                     text_code = ""
-                    code_deadline = time.time() + 10
+                    code_deadline = time.time() + 3
                     while time.time() < code_deadline:
                         text_code = _niam_sign_in_code(page)
                         if text_code:
@@ -3659,7 +3659,11 @@ def niam_session_maker(
                 clear_user_notice(runtime, status=None)
                 return False, None, logs
 
-            session_file = main_context.storage_state(path=str(session_path))
+            # storage_state(path=...) writes the JSON file and returns the state
+            # dictionary. Return the path, not that dictionary: callers pass the
+            # result to browser.new_context(storage_state=...), which expects a
+            # filename.
+            main_context.storage_state(path=str(session_path))
             # A retry may have succeeded after an earlier failed attempt: drop
             # any dialog queued by that attempt so it does not pop up now.
             clear_user_alert(runtime)
@@ -3676,7 +3680,7 @@ def niam_session_maker(
                 # keyboard.press_and_release("ctrl+c")
                 del playwright
 
-            return True, session_file, logs
+            return True, session_path, logs
     
     except Exception as e:
         logs.append(

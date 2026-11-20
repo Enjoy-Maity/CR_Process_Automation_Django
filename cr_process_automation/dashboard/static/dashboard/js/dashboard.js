@@ -378,4 +378,4 @@ async function waitForReplicaSync(syncId) {
     }
 }
 
-setInterval(refreshTaskPanels, 3000);
+setInterval(refreshTaskPanels, 1000);

@@ -523,7 +523,10 @@ def niam_ticket_raise_using_thread(
             timestamp_fn=timestamp_fn,
         )
         if session_created:
-            session_path = str(created_file or session_path)
+            # storage_state(path=...) writes the file at session_path; its return
+            # value is the state dict, not the filename. Always keep the path we
+            # supplied so thread_task can open it with browser.new_context().
+            session_path = str(session_path)
             break
 
         # Keep the first line of the latest exception so the final error tells
