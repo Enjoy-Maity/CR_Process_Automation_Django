@@ -8,6 +8,7 @@ import sys
 import re
 import traceback
 import threading
+import time
 from importlib import import_module
 import pandas as pd
 from django.db import connection, connections, transaction, IntegrityError
@@ -763,6 +764,9 @@ def start_task(request, task_id):
     # Isolated, per-(user, task) runtime context.
     runtime = RUN_REGISTRY.begin(user_id, task_id)
     runtime["status"] = "Running"
+    # Shared zero point for the NIAM timing checkpoints, set as soon as the
+    # request is accepted so module-import/thread-start time is included too.
+    runtime["_timing_start"] = time.monotonic()
     runtime["requires_auth"] = _requires_auth(task_id)
     runtime["run_dir"] = str(task_runtime.run_output_dir(runtime["run_key"]))
     runtime["logs"] = [f"{task['name']}: task started ---- {_timestamp()}"]
@@ -775,6 +779,12 @@ def start_task(request, task_id):
         """Run the task in a background thread with isolated module globals."""
         global CURRENT_RUNNING_TASK
         task_module = None
+        thread_started = time.monotonic()
+        runtime["logs"].append(
+            f"{task['name']}: task thread started "
+            f"(+{thread_started - runtime.get('_timing_start', thread_started):.2f}s) "
+            f"---- {_timestamp()}"
+        )
         try:
             task_module = task_runtime.load_fresh_module(task_module_path)
             if not hasattr(task_module, "run_task"):

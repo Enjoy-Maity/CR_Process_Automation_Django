@@ -153,6 +153,10 @@ LOGGING = {
             'format': '{levelname} {asctime} {module} {process:d} {thread:d} {message}',
             'style': '{',
         },
+        'simple': {
+            'format': '{asctime} {message}',
+            'style': '{',
+        },
     },
     'handlers': {
         'file': {
@@ -166,6 +170,12 @@ LOGGING = {
             'class': 'logging.StreamHandler',
             'formatter': 'verbose',
         },
+        'notice_file': {
+            'level': 'INFO',
+            'class': 'logging.FileHandler',
+            'filename': LOGS_DIR / 'notice_timing.log',
+            'formatter': 'simple',
+        },
     },
     'root': {
         'handlers': ['file', 'console'],
@@ -175,6 +185,11 @@ LOGGING = {
         'dashboard': {
             'handlers': ['file', 'console'],
             'level': 'ERROR',
+            'propagate': False,
+        },
+        'dashboard.notice': {
+            'handlers': ['notice_file'],
+            'level': 'INFO',
             'propagate': False,
         },
     },

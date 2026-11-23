@@ -9,6 +9,7 @@ import traceback
 # import pythoncom
 import rootutils
 import inspect
+import logging
 from bs4 import BeautifulSoup as beautifulsoup
 from dashboard.views import _timestamp
 from django.conf import settings
@@ -40,6 +41,49 @@ class NiamCredentialsError(ValueError):
 
 class NiamAuthenticationError(RuntimeError):
     """Microsoft rejected the NIAM user ID or password."""
+
+
+class NiamNodeNotFoundError(LookupError):
+    """No matching node was found on the NIAM website for this node name."""
+
+    def __init__(self, node_name: str):
+        self.node_name = str(node_name or "").strip()
+        super().__init__(
+            f"Node selection failed for: {self.node_name}"
+        )
+
+
+def _niam_failure_reason(exc: BaseException) -> str:
+    """Build the Failure Reason without losing the node name.
+
+    The old code did ``str(e).split(':', 1)[-1].strip()`` on a plain Exception.
+    When the searched node name was blank, the message ended with a colon and
+    the reason became just ``" not found"``. Carrying the name on a dedicated
+    exception makes the reason explicit and robust.
+    """
+    if isinstance(exc, NiamNodeNotFoundError):
+        return f"{exc.node_name} not found".strip()
+    return f"{str(exc).split(':', 1)[-1].strip()} not found"
+
+
+def _timing_mark(logs, task_name: str, label: str, started, timestamp_fn=None) -> None:
+    """Append an elapsed-time checkpoint to the task log.
+
+    This is diagnostic-only: it does not change the login flow, so one real run
+    shows exactly which wait between the button click and the notice iframe is
+    consuming the time.
+    """
+    if logs is None:
+        return
+    try:
+        elapsed = time.monotonic() - float(started)
+    except Exception:
+        elapsed = 0.0
+    stamp = timestamp_fn() if callable(timestamp_fn) else _timestamp()
+    message = f"{task_name}: {label} (+{elapsed:.2f}s) ---- {stamp}"
+    logs.append(message)
+    # Also persist to errors.log so a shell `tail -f` can watch the timing live.
+    logging.getLogger("dashboard.notice").info("%s", message)
 
 
 def _visible_niam_login_error(page: Page) -> str:
@@ -224,6 +268,68 @@ def _open_password_view(page: Page, logs: list, task_name: str, timestamp_fn) ->
     return False
 
 
+_AUTHENTICATOR_REQUEST_PHRASES = (
+    "approve a request on my microsoft authenticator app",
+    "approve a request",
+)
+
+
+def _authenticator_request_xpath() -> str:
+    """XPath for the innermost visible "Approve a request" control.
+
+    Microsoft can show this either on the "Choose a way to sign in" chooser or
+    again on an intermediate "Verify your identity" page before the number-
+    matching code is rendered. ``contains(text(), ...)`` is not enough on these
+    pages: the label is often split across nested elements or present in a
+    hidden template, so match the full normalised text case-insensitively and
+    keep only the innermost element carrying it.
+    """
+    text = (
+        "translate(normalize-space(.), "
+        "'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')"
+    )
+    phrase = " or ".join(
+        f"contains({text}, '{p}')" for p in _AUTHENTICATOR_REQUEST_PHRASES
+    )
+    return f"//*[({phrase}) and not(*[{phrase}])]"
+
+
+def _click_authenticator_request(
+    page: Page, logs: list, task_name: str, timestamp_fn
+) -> bool:
+    """Click a visible "Approve a request" option, if one is present.
+
+    Returns True only when a click was actually performed. Hidden copies and
+    wrapper elements are skipped; if Playwright cannot click, a DOM click is
+    attempted as a fallback.
+    """
+    option = page.locator(_authenticator_request_xpath())
+    try:
+        total = option.count()
+    except Exception:
+        total = 0
+    for index in range(min(total, 15)):
+        candidate = option.nth(index)
+        try:
+            if not candidate.is_visible():
+                continue
+        except Exception:
+            continue
+        try:
+            candidate.click(timeout=2000)
+        except Exception:
+            try:
+                candidate.evaluate("element => element.click()")
+            except Exception:
+                continue
+        logs.append(
+            f"{task_name}: Approve a request clicked ---- "
+            f"{timestamp_fn() if callable(timestamp_fn) else ''}"
+        )
+        return True
+    return False
+
+
 def request_password_from_user(runtime, task, logs, timestamp_fn, timeout=300):
     """
     Pauses the Playwright thread until the user submits a password
@@ -309,6 +415,7 @@ def show_user_notice(
     timestamp_fn=None,
     text: str = "",
     status: str = "Waiting for Sign-in Approval",
+    timing_start=None,
 ) -> None:
     """
     Show read-only text to the user in the dashboard iframe.
@@ -333,6 +440,12 @@ def show_user_notice(
 
     if logs is not None and timestamp_fn is not None:
         logs.append(f"{task_name}: sign-in code shown to user ---- {timestamp_fn()}")
+    logging.getLogger("dashboard.notice").info(
+        "%s: sign-in code shown to user (code=%s)", task_name, notice_text
+    )
+    _timing_mark(
+        logs, task_name, "notice flag set (iframe can open)", timing_start, timestamp_fn
+    )
 
 
 def clear_user_notice(runtime, status: str | None = "Running") -> None:
@@ -2877,6 +2990,7 @@ def niam_approve_sign_in_handle(
     task: dict,
     logs: list,
     timestamp_fn: Callable,
+    timing_start=None,
 ) -> list:
     # The "Approve sign in" page shows a short code in the browser that
     # the user must match with the number on their phone. Capture it
@@ -2888,24 +3002,39 @@ def niam_approve_sign_in_handle(
     # (idRemoteNGC_DisplaySign) UIs are supported, and only a numeric
     # code counts — a fallback link is not a sign-in code.
     task_name = task["name"] if task else "Task"
+    _timing_mark(
+        logs, task_name, "approval handler entered", timing_start, timestamp_fn
+    )
     try:
         print("Waiting for sign-in code to appear...")
-        code_deadline = time.time() + 3
+        code_deadline = time.time() + 10
         while time.time() < code_deadline:
-            text_code = _niam_sign_in_code(page)
-            if text_code:
-                break
-            page.wait_for_timeout(500)
+            try:
+                text_code = _niam_sign_in_code(page)
+                if text_code:
+                    break
+                # Microsoft can insert another "Verify your identity" /
+                # "Approve a request on my Microsoft Authenticator app" step
+                # after the chooser click. Clicking it here makes the code
+                # appear without requiring a second call to this handler.
+                _click_authenticator_request(page, logs, task_name, timestamp_fn)
+            except Exception:
+                pass
+            page.wait_for_timeout(250)
     except Exception:
         text_code = None
 
     if text_code:
+        _timing_mark(
+            logs, task_name, "sign-in code captured", timing_start, timestamp_fn
+        )
         show_user_notice(
             runtime,
             task,
             logs,
             timestamp_fn,
             str(text_code).strip(),
+            timing_start=timing_start,
         )
         try:
             # Wait for the approval to GENUINELY complete. A plain
@@ -2957,6 +3086,9 @@ def niam_approve_sign_in_handle(
         finally:
             # Prompt is gone, so the code must disappear as well.
             clear_user_notice(runtime)
+            _timing_mark(
+                logs, task_name, "notice cleared after approval", timing_start, timestamp_fn
+            )
     else:
         # The user cannot use the Authenticator app. Fall back to the
         # "Use a verification code" flow and ask for the code through
@@ -2969,7 +3101,18 @@ def niam_approve_sign_in_handle(
                     "I can't use my Microsoft Authenticator app right now"
                 ).click()
 
-            page.wait_for_selector("//*[text() = 'Use a verification code']")
+            # Do not block for Playwright's 30s default here. The chooser can
+            # lead to an intermediate MFA page instead; returning quickly lets
+            # the detection loop click through that page and capture the code.
+            verification_code = page.locator("//*[text() = 'Use a verification code']")
+            try:
+                verification_code.first.wait_for(state="visible", timeout=1500)
+            except Exception:
+                logs.append(
+                    f"{task_name}: sign-in code not shown yet; continuing to "
+                    f"MFA detection ---- {timestamp_fn()}"
+                )
+                return logs
 
             # print(
             #     "\"Use a verification code\" is visible =>",
@@ -3029,6 +3172,7 @@ def handle_niam_login(
     task=None,
     logs=None,
     timestamp_fn=None,
+    timing_start=None,
 ):
     """
     Complete the Microsoft NIAM sign-in (password + MFA) for an automation run.
@@ -3045,9 +3189,17 @@ def handle_niam_login(
 
     # Never inherit a stale notice from an earlier login attempt.
     clear_user_notice(runtime, status=None)
+    _timing_mark(
+        logs, task_name, "handle_niam_login entered", timing_start, timestamp_fn
+    )
 
-    page.wait_for_load_state("load")
-    page.wait_for_timeout(500)
+    # The caller already waited for the post-user-ID page to load. Do not add
+    # another full `load` wait here: Microsoft often keeps background requests
+    # open after the password/approve view is already usable.
+    page.wait_for_timeout(200)
+    _timing_mark(
+        logs, task_name, "post-user-id settling wait complete", timing_start, timestamp_fn
+    )
 
     # Bounded wait for the password prompt: a wrong user ID can leave the page
     # on an error message instead of showing the password field. After the user
@@ -3064,10 +3216,16 @@ def handle_niam_login(
                 f"Check the NIAM OLM ID saved in NIAM Credentials.\n\n{error}"
             )
         if _password_view_visible(page) or _niam_approve_view_visible(page):
+            _timing_mark(
+                logs, task_name, "password/approve view detected", timing_start, timestamp_fn
+            )
             break
         if fallback_attempts < 3 and _password_fallback_visible(page):
             fallback_attempts += 1
             if _open_password_view(page, logs, task_name, timestamp_fn):
+                _timing_mark(
+                    logs, task_name, "password view opened via fallback", timing_start, timestamp_fn
+                )
                 break
         page.wait_for_timeout(500)
     else:
@@ -3081,12 +3239,24 @@ def handle_niam_login(
     # password field. Only fill the password when the field is actually shown;
     # otherwise fall straight through to the approval handling below.
     password_field = page.locator('//input[@id="i0118"]')
+    # `wait_for` used to burn the full 5s timeout on the passwordless flow,
+    # even though the approve view with the code was already visible.
+    approve_view_visible = _niam_approve_view_visible(page)
     try:
-        password_field.wait_for(state="visible", timeout=5000)
+        password_visible = password_field.is_visible()
     except Exception:
-        pass
+        password_visible = False
+    if approve_view_visible:
+        password_visible = False
+    _timing_mark(
+        logs,
+        task_name,
+        f"password field check complete (visible={password_visible})",
+        timing_start,
+        timestamp_fn,
+    )
 
-    if password_field.is_visible():
+    if password_visible:
         # Enter the password
         # page.locator('[id="passwordInput"]').fill(self.password)
         password_field.fill(password, timeout=10000)
@@ -3096,26 +3266,66 @@ def handle_niam_login(
         # step), so fall back to Enter in the password field.
         # page.locator('[id="submitButton"]').click()
         try:
-            page.locator('//input[@id="idSIButton9"]').click(timeout=10000)
+            page.locator('//input[@id="idSIButton9"]').click(timeout=2000)
         except Exception:
             try:
-                password_field.press("Enter")
+                # A bare press() uses Playwright's 30s default timeout when the
+                # field detaches during the post-password re-render, which was
+                # adding ~30s to every run. Bound it to the same short window.
+                password_field.press("Enter", timeout=2000)
             except Exception:
                 pass
 
-        page.wait_for_load_state("load")
+        # Wait only for the next view, not for `load`: the Authenticator number
+        # can be rendered well before all background resources finish loading.
+        transition_deadline = time.time() + 5
+        while time.time() < transition_deadline:
+            try:
+                chooser_visible = page.get_by_text(
+                    "Choose a way to sign in"
+                ).first.is_visible()
+            except Exception:
+                chooser_visible = False
+            if chooser_visible or _niam_approve_view_visible(page):
+                break
+            page.wait_for_timeout(200)
+        _timing_mark(
+            logs, task_name, "password submitted + next view detected", timing_start, timestamp_fn
+        )
 
     if page.get_by_text('Choose a way to sign in').first.is_visible():
-        page.locator(f'//*[contains(text(), "Approve a request")]').first.click()
+        _timing_mark(
+            logs, task_name, "sign-in chooser detected", timing_start, timestamp_fn
+        )
+        # Click the *visible* "Approve a request" option. The previous
+        # contains(text(), ...) + .first could land on a hidden template or a
+        # wrapper element, so the click did nothing useful and the code never
+        # appeared.
+        clicked = _click_authenticator_request(page, logs, task_name, timestamp_fn)
+        if not clicked:
+            logs.append(
+                f"{task_name}: no visible 'Approve a request' option on the "
+                f"sign-in chooser ---- {timestamp_fn()}"
+            )
+        _timing_mark(
+            logs,
+            task_name,
+            f"chooser approve click attempted (clicked={clicked})",
+            timing_start,
+            timestamp_fn,
+        )
+        logs = niam_approve_sign_in_handle(
+            page, runtime, task, logs, timestamp_fn, timing_start=timing_start
+        )
 
-        page.wait_for_timeout(500)
-        page.wait_for_load_state("load")
-        logs.append(f"{task_name}: Approve a request clicked ---- {timestamp_fn()}")
-        logs = niam_approve_sign_in_handle(page, runtime, task, logs, timestamp_fn)
-    
     if approve_prompt := page.get_by_text("Approve sign in request").first:
         if approve_prompt.is_visible():
-            logs = niam_approve_sign_in_handle(page, runtime, task, logs, timestamp_fn)
+            _timing_mark(
+                logs, task_name, "direct approve view detected", timing_start, timestamp_fn
+            )
+            logs = niam_approve_sign_in_handle(
+                page, runtime, task, logs, timestamp_fn, timing_start=timing_start
+            )
 
     # NOTE: do not block on an MFA wait here. The detection loop below checks
     # for a rejected password first, so the user gets a clear error instead of
@@ -3167,10 +3377,19 @@ def handle_niam_login(
             f"{task_name}: MFA prompt detected ({prompt_kind or 'none'}) ---- "
             f"{timestamp_fn()}"
         )
+        _timing_mark(
+            logs,
+            task_name,
+            f"MFA prompt detected ({prompt_kind or 'none'})",
+            timing_start,
+            timestamp_fn,
+        )
 
         # Now check which one it is
         if prompt_kind == "approve":
-            logs = niam_approve_sign_in_handle(page, runtime, task, logs, timestamp_fn)
+            logs = niam_approve_sign_in_handle(
+                page, runtime, task, logs, timestamp_fn, timing_start=timing_start
+            )
 
         elif prompt_kind == "verify":
             # print("Line No. 367 - Verifying identity.")
@@ -3200,15 +3419,16 @@ def handle_niam_login(
                 # surface it in the notice iframe so the user can approve.
                 try:
                     text_code = ""
-                    code_deadline = time.time() + 3
+                    code_deadline = time.time() + 10
                     while time.time() < code_deadline:
                         text_code = _niam_sign_in_code(page)
                         if text_code:
                             break
-                        page.wait_for_timeout(500)
+                        page.wait_for_timeout(250)
                     if text_code:
                         show_user_notice(
-                            runtime, task, logs, timestamp_fn, text_code
+                            runtime, task, logs, timestamp_fn, text_code,
+                            timing_start=timing_start,
                         )
                 except Exception:
                     pass
@@ -3216,6 +3436,9 @@ def handle_niam_login(
                 approve_prompt.wait_for(state="hidden", timeout=60000)
                 # Approved (or prompt gone): hide the code again.
                 clear_user_notice(runtime)
+                _timing_mark(
+                    logs, task_name, "notice cleared after verification", timing_start, timestamp_fn
+                )
                 # print("Sign in approved by user after verification.")
 
             except Exception as e:
@@ -3330,6 +3553,10 @@ def login_to_niam(
     page: Page,
     user_name: str,
     niam_credentials: dict | None = None,
+    logs=None,
+    task=None,
+    timestamp_fn=None,
+    timing_start=None,
 ):
     # Resolve the credentials before entering the Playwright sync context when
     # possible: the sync API runs an asyncio loop in this thread, which makes
@@ -3337,7 +3564,11 @@ def login_to_niam(
     __niam_data = niam_credentials or get_niam_password(user_name)
     username = f"{str(__niam_data['username']).strip().upper()}@airtel.com"
     password = __niam_data['password']
-    
+    task_name = task["name"] if task else "Task"
+    _timing_mark(
+        logs, task_name, "login_to_niam entered", timing_start, timestamp_fn
+    )
+
     # Wait for the Microsoft sign-in page, but do not loop forever if the page
     # failed to load or already shows an error.
     deadline = time.time() + 60
@@ -3361,6 +3592,9 @@ def login_to_niam(
         )
 
     page.wait_for_timeout(500)
+    _timing_mark(
+        logs, task_name, "microsoft sign-in page ready", timing_start, timestamp_fn
+    )
     page.locator('//input[@id="i0116"]').fill(username)
 
     # Submitting the email: Microsoft's page re-renders during its own
@@ -3369,12 +3603,15 @@ def login_to_niam(
     # which submits the form regardless of the button's state.
     next_button = page.locator('//input[@id="idSIButton9"]')
     try:
-        next_button.click(timeout=10000)
+        next_button.click(timeout=2000)
     except Exception:
         try:
-            page.locator('//input[@id="i0116"]').press("Enter")
+            page.locator('//input[@id="i0116"]').press("Enter", timeout=2000)
         except Exception:
             pass
+    _timing_mark(
+        logs, task_name, "user id submitted", timing_start, timestamp_fn
+    )
 
     # Microsoft either moves on to the password prompt, the passwordless
     # (NGC) approve prompt, or its "Use my password" fallback - or rejects the
@@ -3393,6 +3630,13 @@ def login_to_niam(
             or _niam_approve_view_visible(page)
             or _password_fallback_visible(page)
         ):
+            _timing_mark(
+                logs,
+                task_name,
+                "password/approve/fallback view detected after user id",
+                timing_start,
+                timestamp_fn,
+            )
             break
         page.wait_for_timeout(500)
     else:
@@ -3439,6 +3683,14 @@ def niam_logger(
     niam_credentials: dict | None = None,
 ) -> Tuple[Browser, BrowserContext, Page, list]:
     logs = logs if logs is not None else []
+    timestamp_fn = timestamp_fn or _timestamp
+    task_name = task["name"] if task else "Task"
+    timing_start = runtime.get("_timing_start") if runtime else None
+    if timing_start is None:
+        timing_start = time.monotonic()
+    _timing_mark(
+        logs, task_name, "browser launch started", timing_start, timestamp_fn
+    )
     selected_path_for_browser = ""
 
     selected_path_for_browser = get_browser()
@@ -3446,6 +3698,7 @@ def niam_logger(
     browser = playwright.chromium.launch(
         executable_path=selected_path_for_browser, headless=False
     )
+    _timing_mark(logs, task_name, "browser ready", timing_start, timestamp_fn)
 
     # context = browser.new_context(viewport={"width": 1920, "height": 1080})
     context = browser.new_context()
@@ -3455,7 +3708,10 @@ def niam_logger(
         # page.goto("https://nextgentm-in.sdt.ericsson.net/arsys", wait_until="load")
         page.goto(
             "https://airtel.service-now.com/",
-            wait_until="load",
+            wait_until="domcontentloaded",
+        )
+        _timing_mark(
+            logs, task_name, "login page loaded", timing_start, timestamp_fn
         )
 
         # finding the id 'domain' and 'Employee' in the option value
@@ -3464,9 +3720,25 @@ def niam_logger(
         # page.wait_for_selector("//a[@id='loginBtn']")
         # page.locator(selector="//a[@id='loginBtn']", has_text="Log On").click()
 
-        password = login_to_niam(page, user_name, niam_credentials)
+        password = login_to_niam(
+            page,
+            user_name,
+            niam_credentials,
+            logs=logs,
+            task=task,
+            timestamp_fn=timestamp_fn,
+            timing_start=timing_start,
+        )
+        _timing_mark(
+            logs, task_name, "user id step complete", timing_start, timestamp_fn
+        )
 
-        page.wait_for_load_state("load")
+        # login_to_niam already confirmed that the next view is present. A
+        # second full `load` wait here can add 30s+ while Microsoft keeps
+        # background requests open, so skip it.
+        _timing_mark(
+            logs, task_name, "post-user-id load wait skipped", timing_start, timestamp_fn
+        )
 
         # if page.locator("//span[@class='detail-text error' and text()='Try again after some time or contact your help desk']").is_visible():
         #     # from tkinter import messagebox
@@ -3475,7 +3747,10 @@ def niam_logger(
 
         expect(
             page.get_by_text("Try again after some time or contact your help desk")
-        ).to_be_hidden()
+        ).to_be_hidden(timeout=1000)
+        _timing_mark(
+            logs, task_name, "error visibility check complete", timing_start, timestamp_fn
+        )
 
         handle_niam_login(
             page,
@@ -3486,8 +3761,12 @@ def niam_logger(
             task=task,
             logs=logs,
             timestamp_fn=timestamp_fn,
+            timing_start=timing_start,
         )
-        
+        _timing_mark(
+            logs, task_name, "handle_niam_login returned", timing_start, timestamp_fn
+        )
+
         page.wait_for_timeout(500)
         page.wait_for_load_state("networkidle")
 
@@ -3876,7 +4155,17 @@ def niam_tt_raiser(
 ) -> Tuple[AnyStr, Dict[AnyStr, AnyStr]]:
     cr = row_dict['SR OR CHANGE NO']
     node_names = row_dict['NIAM Node Name']
-    
+
+    # Some template rows are created with a blank NIAM Node Name (for example
+    # when the CR had no NIAM Node Type, so Task 7 kept it as a placeholder).
+    # The real identifier is still present in "Total Node Details" - use it so
+    # the NIAM search and the Failure Reason both name the node that failed.
+    if not str(node_names or "").strip() or str(node_names).strip().lower() in (
+        "nan", "none",
+    ):
+        node_details_text = str(row_dict.get("Total Node Details", "") or "")
+        node_names = re.sub(r",", "\n", node_details_text)
+
     result = {}
     
     Requested_For_email = row_dict["Requested For(email)"]
@@ -4056,7 +4345,12 @@ def niam_tt_raiser(
                     page
                 )
                 
-                node_names_list = [str(element).strip() for element in str(node_names).split('\n')]
+                node_names_list = [
+                    str(element).strip()
+                    for element in str(node_names).split('\n')
+                    if str(element).strip()
+                    and str(element).strip().lower() not in ("nan", "none")
+                ]
                 
                 ne_field_opener = page.locator('//div[@id="select2-drop"]/ul')  # ← adjust if needed
                 search_input = page.locator('//input[@id="s2id_autogen34"]')
@@ -4175,7 +4469,7 @@ def niam_tt_raiser(
                         break
 
                 if loop_break:
-                    raise Exception(f"Node selection failed for: {name}")
+                    raise NiamNodeNotFoundError(name)
                 
                 # === END OF NODE SELECTION LOOP ===
 
@@ -4264,12 +4558,12 @@ def niam_tt_raiser(
                 # result[Access_Type_List[i]] = "Success"
             else:
                 result[Access_Type_List[i]] = "Failure"
-                result["Failure Reason"] = f"{str(e).split(':', 1)[-1].strip()} not found"
+                result["Failure Reason"] = _niam_failure_reason(e)
                 break
         
         except Exception as e:
             result[Access_Type_List[i]] = "Failure"
-            result["Failure Reason"] = f"{str(e).split(':', 1)[-1].strip()} not found"
+            result["Failure Reason"] = _niam_failure_reason(e)
         i += 1
     
     # return cr,node_names,result, output_dict
