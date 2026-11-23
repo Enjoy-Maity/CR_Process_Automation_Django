@@ -1,0 +1,4269 @@
+from __future__ import annotations
+
+import os
+import re
+import time
+import pandas as pd
+from io import StringIO
+import traceback
+# import pythoncom
+import rootutils
+import inspect
+from bs4 import BeautifulSoup as beautifulsoup
+from dashboard.views import _timestamp
+from django.conf import settings
+from playwright.sync_api import (
+    Page,
+    expect,
+    sync_playwright,
+    Playwright,
+    BrowserContext,
+    Browser,
+    TimeoutError,
+    Frame,
+    FrameLocator,
+    Locator,
+)
+from collections.abc import Callable
+from django.conf import settings
+from datetime import datetime, timedelta, date
+from dateutil import parser
+from pathlib import Path
+from typing import Union, Tuple, List, Literal, AnyStr, Dict
+import threading
+import  dateutil.parser as dp
+
+
+class NiamCredentialsError(ValueError):
+    """The user has no NIAM OLM ID / password saved in the dashboard."""
+
+
+class NiamAuthenticationError(RuntimeError):
+    """Microsoft rejected the NIAM user ID or password."""
+
+
+def _visible_niam_login_error(page: Page) -> str:
+    """Return the first visible Microsoft/NIAM sign-in error message."""
+    selectors = (
+        "#usernameError",
+        "#passwordError",
+        "#idDiv_SAOTCS_Error",
+        "#error",
+    )
+    for selector in selectors:
+        try:
+            locator = page.locator(selector).first
+            if locator.is_visible():
+                text = (locator.text_content() or "").strip()
+                if text:
+                    return text
+        except Exception:
+            continue
+
+    known_messages = (
+        "Your account or password is incorrect",
+        "The password you entered is incorrect",
+        "The password is incorrect",
+        "We couldn't find an account with that username",
+        "We couldn't find your account",
+        "This username may be incorrect",
+        "That Microsoft account doesn't exist",
+        "Enter a valid email address, phone number, or Skype name",
+        "Your account has been locked",
+        "Your account is temporarily locked",
+    )
+    for message in known_messages:
+        try:
+            locator = page.get_by_text(message, exact=False).first
+            if locator.is_visible():
+                return (locator.text_content() or message).strip()
+        except Exception:
+            continue
+    return ""
+
+def _niam_sign_in_code(page: Page) -> str:
+    """Read the Microsoft Authenticator number-matching code, if present.
+
+    The classic UI renders the number in ``#idRichContext_DisplaySign``; the
+    newer passwordless (NGC) UI uses ``#idRemoteNGC_DisplaySign``. Other
+    Authenticator variants render it in elements whose IDs vary, so a visible
+    short element whose entire text is digits is also accepted as the code.
+    A fallback link such as "Use my password instead" never qualifies.
+    """
+    for element_id in ("idRichContext_DisplaySign", "idRemoteNGC_DisplaySign"):
+        try:
+            locator = page.locator(f'//*[@id="{element_id}"]')
+            if locator.is_visible():
+                text = (locator.text_content() or "").strip()
+                if text and text.isdigit():
+                    return text
+        except Exception:
+            continue
+
+    # Generic fallback: a visible element whose entire (trimmed) text is a
+    # short number. On the approve view the number-matching code is the only
+    # such element; only the first few candidates are checked.
+    try:
+        candidates = page.locator(
+            "//*[normalize-space(text()) != '' "
+            "and string-length(normalize-space(text())) <= 3 "
+            "and translate(normalize-space(text()), '0123456789', '') = '']"
+        )
+        for i in range(min(candidates.count(), 10)):
+            element = candidates.nth(i)
+            if element.is_visible():
+                text = (element.text_content() or "").strip()
+                if text and text.isdigit() and len(text) <= 3:
+                    return text
+    except Exception:
+        pass
+    return ""
+
+
+_PASSWORD_FALLBACK_PHRASES = ("use my password", "use your password")
+
+
+def _password_fallback_xpath() -> str:
+    """XPath of the innermost element offering "Use my password" (or "use your password").
+
+    Matching is case-insensitive on the whitespace-normalised full text, and only
+    the innermost element carrying the phrase is returned, so a wrapper or a
+    <script> copy of the phrase is never picked in place of the control.
+    """
+    text = (
+        "translate(normalize-space(.), "
+        "'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')"
+    )
+    phrase = " or ".join(f"contains({text}, '{p}')" for p in _PASSWORD_FALLBACK_PHRASES)
+    return f"//*[({phrase}) and not(*[{phrase}])]"
+
+
+def _password_view_visible(page: Page) -> bool:
+    """True once Microsoft shows the password entry view."""
+    for xpath in (
+        '//input[@id="i0118"]',
+        '//*[normalize-space(.)="Enter password"]',
+    ):
+        try:
+            if page.locator(xpath).first.is_visible():
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _niam_approve_view_visible(page: Page) -> bool:
+    """True once the passwordless approve view (with its number) is shown."""
+    for xpath in (
+        '//*[@id="idRemoteNGC_DisplaySign"]',
+        "//*[contains(text(),'Approve sign in')]",
+    ):
+        try:
+            if page.locator(xpath).first.is_visible():
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _password_fallback_visible(page: Page) -> bool:
+    """True when a visible "Use my password" control is on the page."""
+    option = page.locator(_password_fallback_xpath())
+    try:
+        for index in range(min(option.count(), 15)):
+            if option.nth(index).is_visible():
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _open_password_view(page: Page, logs: list, task_name: str, timestamp_fn) -> bool:
+    """Click "Use my password" on Microsoft's method chooser.
+
+    Visible candidates are tried in turn (hidden copies are skipped, and a click
+    that is intercepted falls back to a DOM click). A click only counts once the
+    password view actually appears.
+    """
+    option = page.locator(_password_fallback_xpath())
+    try:
+        total = option.count()
+    except Exception:
+        total = 0
+    for index in range(min(total, 15)):
+        candidate = option.nth(index)
+        try:
+            if not candidate.is_visible():
+                continue
+        except Exception:
+            continue
+        try:
+            candidate.click(timeout=5000)
+        except Exception:
+            try:
+                candidate.evaluate("element => element.click()")
+            except Exception as exc:
+                logs.append(
+                    f"{task_name}: could not click 'Use my password' ({exc}) "
+                    f"---- {timestamp_fn()}"
+                )
+                continue
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            if _password_view_visible(page):
+                logs.append(
+                    f"{task_name}: opened the password view via 'Use my password' "
+                    f"---- {timestamp_fn()}"
+                )
+                return True
+            page.wait_for_timeout(500)
+    logs.append(
+        f"{task_name}: 'Use my password' did not open the password view "
+        f"({total} match(es) on the page) ---- {timestamp_fn()}"
+    )
+    return False
+
+
+def request_password_from_user(runtime, task, logs, timestamp_fn, timeout=300):
+    """
+    Pauses the Playwright thread until the user submits a password
+    via the Django iframe form, then returns the password.
+    Uses separate pwd_event / pwd fields so it doesn't clash with OTP.
+    """
+    print("Inside request_password_from_user")
+    if runtime is None:
+        raise Exception("runtime not provided; cannot request password from user")
+
+    task_name = task["name"] if task else "Task"
+
+    # 1. Reset the event and flag so the frontend opens the iframe
+    pwd_event = runtime.get("pwd_event")
+    if pwd_event is None:
+        pwd_event = threading.Event()
+        runtime["pwd_event"] = pwd_event
+
+    pwd_event.clear()                  # ensure not pre-set from a previous run
+    runtime["password"] = None
+    runtime["password_required"] = True   # <-- dashboard.js polling opens the iframe
+    runtime["status"] = "Waiting for Password"
+
+    logs.append(f"{task_name}: waiting for password from user ---- {timestamp_fn()}")
+    print("🔑 Waiting for user to submit password via iframe...")
+    print(f"🔎 [Playwright] Waiting on pwd_event id={id(pwd_event)}, runtime id={id(runtime)}")
+
+    # 2. BLOCK this thread until the view calls pwd_event.set()
+    got_it = pwd_event.wait(timeout=timeout)
+    print("🔑 Password received")
+    # 3. Reset flag so the iframe closes / stops re-opening
+    runtime["password_required"] = False
+    runtime["status"] = "Running"
+
+    password = runtime.get("password")
+    if not got_it or not password:
+        logs.append(f"{task_name}: password not received in time ---- {timestamp_fn()}")
+        raise Exception("Timed out waiting for password from user")
+
+    print("🔑 Password received")
+    logs.append(f"{task_name}: password received ---- {timestamp_fn()}")
+    return str(password).strip()
+
+
+def request_2fa_code_from_user(runtime, task, logs, timestamp_fn, timeout=300):
+    if runtime is None:
+        raise Exception("runtime not provided; cannot request 2FA from user")
+
+    task_name = task["name"] if task else "Task"
+
+    otp_event = runtime.get("otp_event")
+    if otp_event is None:
+        otp_event = threading.Event()
+        runtime["otp_event"] = otp_event
+
+    print(f"🔎 [Playwright] Waiting on event id={id(otp_event)}, runtime id={id(runtime)}")
+
+    otp_event.clear()
+    runtime["otp"] = None
+    runtime["otp_required"] = True
+
+    logs.append(f"{task_name}: waiting for 2FA code from user ---- {timestamp_fn()}")
+    print("🔐 Waiting for user to submit 2FA code via iframe...")
+
+    got_it = otp_event.wait(timeout=timeout)
+
+    runtime["otp_required"] = False
+
+    code = runtime.get("otp")
+    if not got_it or not code:
+        logs.append(f"{task_name}: 2FA code not received in time ---- {timestamp_fn()}")
+        raise Exception("Timed out waiting for 2FA verification code from user")
+
+    print(f"🔐 2FA code received: {code}")
+    logs.append(f"{task_name}: 2FA code received ---- {timestamp_fn()}")
+    return str(code).strip()
+
+
+def show_user_notice(
+    runtime,
+    task,
+    logs=None,
+    timestamp_fn=None,
+    text: str = "",
+    status: str = "Waiting for Sign-in Approval",
+) -> None:
+    """
+    Show read-only text to the user in the dashboard iframe.
+
+    Used for the Microsoft Authenticator sign-in code: the browser shows a
+    short number that the user has to match with the number on their phone
+    before approving. The number is displayed in the iframe and stays there
+    until the sign-in prompt disappears (see ``clear_user_notice``).
+    """
+    if runtime is None:
+        return
+
+    notice_text = str(text or "").strip()
+    if not notice_text:
+        return
+
+    task_name = task["name"] if task else "Task"
+
+    runtime["notice_text"] = notice_text
+    runtime["notice_required"] = True
+    runtime["status"] = status
+
+    if logs is not None and timestamp_fn is not None:
+        logs.append(f"{task_name}: sign-in code shown to user ---- {timestamp_fn()}")
+
+
+def clear_user_notice(runtime, status: str | None = "Running") -> None:
+    """Hide the notice iframe once the sign-in prompt has gone away."""
+    if runtime is None:
+        return
+
+    runtime["notice_required"] = False
+    runtime["notice_text"] = ""
+    if status:
+        runtime["status"] = status
+
+
+def clear_user_alert(runtime) -> None:
+    """Hide a queued user dialog (e.g. after a retry finally logs in)."""
+    if runtime is None:
+        return
+    runtime["alert_required"] = False
+    runtime["alert_title"] = ""
+    runtime["alert_text"] = ""
+
+
+def show_user_alert(
+    runtime,
+    task,
+    logs=None,
+    timestamp_fn=None,
+    title: str = "NIAM login failed",
+    text: str = "",
+) -> None:
+    """Queue a blocking dialog for the user (shown by dashboard.js).
+
+    Unlike ``show_user_notice`` this is not cleared by the Playwright thread: it
+    stays until the user acknowledges it or a new run replaces the runtime.
+    ``alert_seq`` is bumped so the frontend shows the dialog again for a new
+    alert in the same run without re-opening it after the user dismissed it.
+    """
+    if runtime is None:
+        return
+
+    message = str(text or "").strip()
+    if not message:
+        message = "Could not log in to NIAM. Check your NIAM user ID and password."
+
+    runtime["alert_title"] = str(title or "NIAM login failed").strip()
+    runtime["alert_text"] = message
+    runtime["alert_seq"] = int(runtime.get("alert_seq", 0) or 0) + 1
+    runtime["alert_required"] = True
+
+    if logs is not None:
+        try:
+            task_name = task["name"] if task else "Task"
+            stamp = timestamp_fn() if callable(timestamp_fn) else ""
+            logs.append(f"{task_name}: {runtime['alert_title']} ---- {stamp}")
+        except Exception:
+            pass
+
+
+def get_browser() -> str:
+    print("Inside get browser")
+    
+    print("Browser path ", os.path.join(str(os.environ["PROJECT_ROOT"]) , str(os.getenv("BROWSER_PATH"))))
+    return os.path.join(str(os.environ["PROJECT_ROOT"]) , str(os.getenv("BROWSER_PATH")))
+
+def get_itsm_session_file_path() -> str:
+    os.makedirs(
+        os.path.dirname(
+            os.path.join(
+                str(os.environ["PROJECT_ROOT"]), str(os.getenv("ITSM_SESSION_FILE"))
+                )
+            ),  exist_ok=True
+        )
+    
+    return os.path.join(str(os.environ["PROJECT_ROOT"]) , str(os.getenv("ITSM_SESSION_FILE")))
+
+
+def call_with_modal_ack(func, *args, max_retries=3, **kwargs):
+    """
+    Calls a function that may trigger a popup iframe.
+    Detects popup, mutates args, retries, and returns updated args.
+    """
+    # print("inside call_with_modal_ack\n")
+    try:
+        sig = inspect.signature(func)
+        # print(f"{sig =}\n\n")
+        bound = sig.bind(*args, **kwargs)
+        # print(f"{bound =}\n\n")
+        bound.apply_defaults()
+    except TypeError as e:
+        print(f"BINDING FAILED: {e}")
+        raise
+    except Exception as e:
+        print(f"CALLING FAILED: {e}")
+        raise
+    else:
+        # print(f"{bound.arguments=}\n")
+        earlier_value_of_token_for_locking = bound.arguments["token_for_locking"]
+        availability_list = updated_token = updated_logs = None
+        for attempt in range(1, max_retries + 1):
+            result = func(*bound.args, **bound.kwargs)
+            availability_list, updated_token, updated_logs = result
+            # print(f"{result=}\n")
+
+            # allow iframe watcher to act
+            # page.wait_for_timeout(300)
+
+            # popup = read_and_reset_popup_state(page)
+
+            # if not popup["handled"]:
+            #     return result, dict(bound.arguments)["token_for_locking"]
+
+            # print(f"⚠️ Popup handled ({popup['type']}) in {func.__name__}, retry {attempt}")
+
+            # # 🔁 mutate arguments ONLY when required
+            # if popup["type"] == "confirm_save":
+            #     if "token_for_locking" in bound.arguments:
+            #         bound.arguments["token_for_locking"] = False
+            #         print("🔁 token_for_locking → False")
+
+            # retry with mutated args
+            result_value_for_locking = result[1]
+            # print(f"{attempt =}")
+            if result_value_for_locking != earlier_value_of_token_for_locking:
+                # print("increasing the value attempt variable")
+                attempt += 1
+                continue
+                
+        return availability_list, updated_token, updated_logs
+
+
+def cr_approval_func(
+    cr: str,
+    page: Page,
+    username: str
+) -> Literal["Approved", "Not Approved"]:
+    result = "Not Approved"
+    
+    _ = search_for_cr(page, cr, [])
+
+    try:
+        wait_var = True
+        # username = str(os.getlogin()).strip()
+
+        # Waiting for the table to load
+        while wait_var:
+            if (
+                page.locator(
+                    "//div[@class='PageBody pbChrome']/div[@id='WIN_3_301389923']/div[@class='TableHdr']/table[@class='TableHdr']/tbody/tr/td[@class='TableHdrL']"
+                ).text_content()
+                == "Table has Not been Loaded"
+            ):
+                page.wait_for_timeout(1000)
+            else:
+                wait_var = False
+
+        list_of_locators = page.locator(
+            f"//div/fieldset[@class='PageBodyVertical']/div[@class='PageBody pbChrome']/div[@arid='301320700']/div[@class='TableInner']/div[@class='BaseTableOuter']/div/table/tbody/tr/td/nobr/span[text()='{str(username).lower()}']"
+        ).all()
+        # list_of_locators = page.locator(f"//div/fieldset[@class='PageBodyVertical']/div[@class='PageBody pbChrome']/div[@arid='301320700']/div[@class='TableInner']/div[@class='BaseTableOuter']/div/table/tbody/tr/td/nobr/span[text()='emudrup']").all()
+
+        if len(list_of_locators) > 0:
+            i = 0
+            while i < len(list_of_locators):
+                # print(i)
+                if (
+                    page.locator(
+                        f"//div/fieldset[@class='PageBodyVertical']/div[@class='PageBody pbChrome']/div[@arid='301320700']/div[@class='TableInner']/div[@class='BaseTableOuter']/div/table/tbody/tr/td/nobr/span[text()='{str(username).lower()}']"
+                    )
+                    .nth(i)
+                    .is_visible()
+                ):
+                    page.locator(
+                        f"//div/fieldset[@class='PageBodyVertical']/div[@class='PageBody pbChrome']/div[@arid='301320700']/div[@class='TableInner']/div[@class='BaseTableOuter']/div/table/tbody/tr/td/nobr/span[text()='{str(username).lower()}']"
+                    ).nth(i).click()
+
+                    if (
+                        page.locator(
+                            "//div/fieldset[@class='PageBodyVertical']/div[@class='PageBody pbChrome']/div[@arid='304198500']/fieldset[@class=' pnl ']/a[@title='Approve']"
+                        )
+                        .nth(i)
+                        .is_visible()
+                    ):
+                        # print("Approve button found")
+                        page.locator(
+                            "//div/fieldset[@class='PageBodyVertical']/div[@class='PageBody pbChrome']/div[@arid='304198500']/fieldset[@class=' pnl ']/a[@title='Approve']"
+                        ).nth(i).dblclick()
+                        result = "Approved"
+                i += 1
+
+    except Exception as e:
+        # print(f"Error occurred while filling MOP attachment for CR {cr}: {e}")
+        raise e
+
+    return result
+
+
+def mop_attachment_func(
+    cr: str,
+    mop_attachment_string_for_notes: str,
+    page: Page,
+    token_for_locking: bool = True,
+) -> Literal["Success", "Failure"]:
+    result = "Failure"
+    
+    _ = search_for_cr(page, cr, [])
+
+    try:
+        wait_var = True
+
+        # Waiting for the table to load
+        while wait_var:
+            if (
+                page.locator(
+                    "//div[@class='PageBody pbChrome']/div[@id='WIN_3_301389923']/div[@class='TableHdr']/table[@class='TableHdr']/tbody/tr/td[@class='TableHdrL']"
+                ).text_content()
+                == "Table has Not been Loaded"
+            ):
+                page.wait_for_timeout(1000)
+            else:
+                wait_var = False
+
+        # Clicking on More Info
+        page.locator(
+            "//div/fieldset[@class='PageBodyHorizontal']/div[@class='PageBody pbChrome']/div/fieldset/div[@arid='304196500']/div/div/div/div/a[@class='pagebtn ']/span[@class='Twisty Tsize']"
+        ).click()
+
+        # Selecting Info
+        page.locator(
+            "//div/fieldset/div[@class='PageBody pbChrome']/div[@arid='304247210']/div[@class='selection']/a[@class='btn btn3d selectionbtn']"
+        ).click()
+        page.locator(
+            "//div[@class='MenuOuter']/div[@class='MenuTableContainer']/table[@class='MenuTable']/tbody/tr/td",
+            has_text="MOP",
+        ).click()
+
+        if (
+            re.fullmatch(
+                pattern="MOP Links:\n",
+                string=mop_attachment_string_for_notes,
+            )
+            is None
+        ):
+            # Filling the Mop link attachments
+            page.locator(
+                "//div/fieldset[@class='PageBodyVertical']/div[@class='PageBody pbChrome']/div[@arwindowid='3' and @arid='304247080']/textarea[@class='text ']"
+            ).fill(mop_attachment_string_for_notes)
+            
+            # Clicking on 'Add' button
+            page.locator(
+                "//div/fieldset[@class='PageBodyVertical']/div[@class='PageBody pbChrome']/a[@arid='304247110']/div[@class='btntextdiv']"
+            ).click()
+            
+            # Clicking on the MOP links to lock them
+            page.locator(
+               "//div[@id='WIN_3_301389923' and @arid='301389923']/div[@class='TableInner']/div[@class='BaseTableOuter']/div[@class='BaseTableInner']/table[@id='T301389923']/tbody/tr/td/nobr/span[text() = 'MOP']" 
+            ).first.dblclick()
+            
+            if token_for_locking:
+                mop_to_be_locked = False
+                mop_lock_button = page.locator(
+                    "//div[@arid='304247260']/fieldset[@class='fieldSetRadio']/div/span/input[@value='0']"
+                ).all()
+                i = 0
+                while i < len(mop_lock_button):
+                    if (
+                        page.locator(
+                            "//div[@arid='304247260']/fieldset[@class='fieldSetRadio']/div/span/input[@value='0']"
+                        )
+                        .nth(i)
+                        .is_visible()
+                    ):
+                        # CRQ000004668101
+                        # print(
+                        #     "{} page.locator(\"//div[@arid='304247260']/fieldset[@class='fieldSetRadio']/div/span/input[@value='0']\").is_disabled(){}".format(cr, page.locator("//div[@arid='304247260']/fieldset[@class='fieldSetRadio']/div/span/input[@value='0']").is_disabled())
+                        # )
+                        if (
+                            not page.locator(
+                                "//div[@arid='304247260']/fieldset[@class='fieldSetRadio']/div/span/input[@value='0']"
+                            )
+                            .nth(i)
+                            .is_disabled()
+                        ):
+                            mop_to_be_locked = True
+                            page.locator(
+                                "//div[@arid='304247260']/fieldset[@class='fieldSetRadio']/div/span/input[@value='0']"
+                            ).nth(i).click(timeout=60000)
+                            break
+                    i += 1
+            
+                if (
+                    mop_to_be_locked
+                    and page.locator(
+                        "//div[@arid='301389923']/div[@class='TableInner']/div[@class='BaseTableOuter']/div[@class='BaseTableInner']/table[@id='T301389923']/tbody/tr/td/nobr/span[text() = 'MOP']"
+                    ).first.is_visible()
+                ):
+                    # print(f"cr test_plan_to_be_locked : {cr}")
+                    save_button_locators_for_mop = page.locator(
+                        "//div/fieldset/div[@class='PageBody pbChrome']/a[@arid='301402700']/div[@class='btntextdiv']/div[@class='f1' and text()='Save']"
+                    ).all()
+                    i = 0
+                    while i < len(save_button_locators_for_mop):
+                        if (
+                            page.locator(
+                                "//div/fieldset/div[@class='PageBody pbChrome']/a[@arid='301402700']/div[@class='btntextdiv']/div[@class='f1' and text()='Save']"
+                            )
+                            .nth(i)
+                            .is_visible()
+                        ):
+                            page.locator(
+                                "//div/fieldset/div[@class='PageBody pbChrome']/a[@arid='301402700']/div[@class='btntextdiv']/div[@class='f1' and text()='Save']"
+                            ).nth(i).click(timeout=60000)
+                            token_for_locking = iframe_message_handler(
+                                page, token_for_locking,[]
+                            )
+                            break
+                        i += 1 
+        
+            result = "Success"
+
+    except Exception as e:
+        # print(f"Error occurred while filling MOP attachment for CR {cr}: {e}")
+        raise e
+    
+    return result
+
+
+
+def backout_plan_downloader(
+    page: Page,
+    folder_location: str,
+    cr: str,
+    cr_circle: str,
+    token_for_locking: bool,
+    date_: datetime,
+    logs: List[str],
+) -> Tuple[List[str], bool, List[str]]:
+    try:
+        test_plan_download_folder = os.path.join(
+            folder_location,
+            "Install_and_Backout_Plan_Files",
+            f"{cr}_{cr_circle}",
+            "Backout Plans",
+        )
+
+        text_attachment_locators = [
+            "//fieldset[@id='WIN_3_303868700']/div[@id='WIN_3_304196500']/div/div/div[3]/fieldset/div/div[4]/textarea",
+            "//fieldset[@id='WIN_3_303868700']/div[@id='WIN_3_304196500']/div/div/div[4]/fieldset/div/div[1]/textarea",
+            "//fieldset[@id='WIN_3_303868700']/div[@id='WIN_3_304196500']/div/div/div[4]/fieldset/div/div[2]/textarea",
+        ]
+
+        Path.mkdir(Path(test_plan_download_folder), parents=True, exist_ok=True)
+
+        wait_var = True
+        # Waiting for the table to load
+        while wait_var:
+            if (
+                page.locator(
+                    "//div[@class='PageBody pbChrome']/div[@id='WIN_3_301389923']/div[@class='TableHdr']/table[@class='TableHdr']/tbody/tr/td[@class='TableHdrL']"
+                ).text_content()
+                == "Table has Not been Loaded"
+            ):
+                page.wait_for_timeout(1000)
+            else:
+                wait_var = False
+
+        page.wait_for_load_state("load")
+        page.wait_for_load_state("domcontentloaded")
+        # page.wait_for_load_state('networkidle')
+        page.wait_for_timeout(1000)
+        
+        logs.append(
+            f"Downloading and locking the Backout plans for cr: {cr}"
+        )
+
+        cr_wise_test_plan_availability_list = []
+
+        if page.locator(
+            "//div[@arid='301389923']/div[@class='TableInner']/div[@class='BaseTableOuter']/div[@class='BaseTableInner']/table[@id='T301389923']/tbody/tr/td/nobr/span[text() = 'Backout Plan']"
+        ).first.is_visible():
+            try:
+                # Searching for the CR Test Plan details
+                page.locator(
+                    "//div[@arid='301389923']/div[@class='TableInner']/div[@class='BaseTableOuter']/div[@class='BaseTableInner']/table[@id='T301389923']/tbody/tr/td/nobr/span[text() = 'Backout Plan']"
+                ).first.dblclick()
+
+            except Exception as e:
+                page.locator(
+                    "//div[@arid='301389923']/div[@class='TableInner']/div[@class='BaseTableOuter']/div[@class='BaseTableInner']/table[@id='T301389923']/tbody/tr/td/nobr/span[text() = 'Backout Plan']"
+                ).nth(0).dblclick()
+
+            # page.wait_for_timeout(1000)
+            if (
+                page.locator(
+                    "//div[@arid='301389923']/div[@class='TableInner']/div[@class='BaseTableOuter']/div[@class='BaseTableInner']/table[@id='T301389923']/tbody/tr/td/nobr/span[text() = 'Backout Plan']"
+                )
+                .nth(0)
+                .is_visible()
+            ):
+                page.locator(
+                    "//div[@arid='301389923']/div[@class='TableInner']/div[@class='BaseTableOuter']/div[@class='BaseTableInner']/table[@id='T301389923']/tbody/tr/td/nobr/span[text() = 'Backout Plan']"
+                ).nth(0).dblclick()
+            # Checking if Test Plan is attached or not
+            # text_attachment = page.locator(
+            #     "//fieldset/div/div[@class='PageHolderStackViewResizable']/div[@class='PageHolderStackViewFixedCV']/div[@arid='304247060']/fieldset[@class='PageBodyVertical']/div[@class='PageBody pbChrome' ]/div[@arid='304247090']/textarea[@class='text sr ']"
+            # ).input_value()
+            # # print(f"CR: {text_attachment}")
+            # if text_attachment == "<File Name>":
+            #     cr_wise_test_plan_availability_list = [
+            #         "Not Available",
+            #         "Not Available",
+            #     ]
+
+            # else:
+            #     # Downloading the attachment
+            #     with page.expect_download() as neo_neo_popup_info:
+            #         page.locator(
+            #             "//fieldset/div/div[@class='PageHolderStackViewResizable']/div[@class='PageHolderStackViewFixedCV']/div[@arid='304247060']/fieldset[@class='PageBodyVertical']/div[@class='PageBody pbChrome' ]/a/div[@class='btnimgdiv']/img[@id='reg_img_304252650']"
+            #         ).click(timeout=5000)
+
+            #     # page.wait_for_timeout(5000)
+
+            #     download = neo_neo_popup_info.value
+
+            #     if not os.path.exists(test_plan_download_folder):
+            #         os.mkdir(test_plan_download_folder)
+
+            #     cr_wise_test_plan_availability_list = [
+            #         "Available",
+            #         f"{text_attachment}",
+            #     ]
+
+            #     # print(f"downloading {text_attachment}")
+            #     if os.path.exists(
+            #         os.path.join(
+            #             test_plan_download_folder,
+            #             f"{text_attachment}",
+            #         )
+            #     ):
+            #         os.remove(
+            #             os.path.join(
+            #                 test_plan_download_folder,
+            #                 f"{text_attachment}",
+            #             )
+            #         )
+            #     download.save_as(
+            #         os.path.join(
+            #             test_plan_download_folder,
+            #             f"{text_attachment}",
+            #         )
+            #     )
+            j = 0
+            while j < len(text_attachment_locators):
+                # print(f"value of iterator value {j = }")
+                # text_attachment = page.locator(
+                #     "//fieldset/div/div[@class='PageHolderStackViewResizable']/div[@class='PageHolderStackViewFixedCV']/div[@arid='304247060']/fieldset[@class='PageBodyVertical']/div[@class='PageBody pbChrome' ]/div[@arid='304247090']/textarea[@class='text sr ']"
+                # ).input_value()
+                text_attachment = page.locator(text_attachment_locators[j]).input_value()
+                # print(f"got the text attachment value {text_attachment}")
+                if text_attachment == "<File Name>":
+                    j += 1
+                    continue
+
+                else:
+                    # Downloading the attachment
+                    test_plan_found_attached = True
+                    with page.expect_download() as neo_neo_popup_info:
+                        page.locator(
+                            "//fieldset/div/div[@class='PageHolderStackViewResizable']/div[@class='PageHolderStackViewFixedCV']/div[@arid='304247060']/fieldset[@class='PageBodyVertical']/div[@class='PageBody pbChrome' ]/a/div[@class='btnimgdiv']/img[@id='reg_img_304252650']"
+                        ).click()
+
+                    # page.wait_for_timeout(5000)
+
+                    download = neo_neo_popup_info.value
+
+                    if not os.path.exists(test_plan_download_folder):
+                        os.mkdir(test_plan_download_folder)
+
+                    cr_wise_test_plan_availability_list = [
+                        "Available",
+                        f"{text_attachment}",
+                    ]
+
+                    # print(f"downloading {text_attachment}")
+                    if os.path.exists(
+                        os.path.join(
+                            test_plan_download_folder,
+                            f"{text_attachment}",
+                        )
+                    ):
+                        os.remove(
+                            os.path.join(
+                                test_plan_download_folder,
+                                f"{text_attachment}",
+                            )
+                        )
+                    download.save_as(
+                        os.path.join(
+                            test_plan_download_folder,
+                            f"{text_attachment}",
+                        )
+                    )
+                    # print("test_plan downloaded")
+                    # # Locking the test plan
+                # print(f"{j = }")
+                # print(f"{test_plan_found_attached =}")
+                j += 1
+                # # Locking the test plan
+
+        else:
+            cr_wise_test_plan_availability_list = [
+                "Not Available (Backout Plan Entry Not Available)",
+                "KPI Not Required",
+            ]
+
+        if token_for_locking:
+            test_plan_to_be_locked = False
+            test_plan_lock_button = page.locator(
+                "//div[@arid='304247260']/fieldset[@class='fieldSetRadio']/div/span/input[@value='0']"
+            ).all()
+            i = 0
+            while i < len(test_plan_lock_button):
+                if (
+                    page.locator(
+                        "//div[@arid='304247260']/fieldset[@class='fieldSetRadio']/div/span/input[@value='0']"
+                    )
+                    .nth(i)
+                    .is_visible()
+                ):
+                    # CRQ000004668101
+                    # print(
+                    #     "{} page.locator(\"//div[@arid='304247260']/fieldset[@class='fieldSetRadio']/div/span/input[@value='0']\").is_disabled(){}".format(cr, page.locator("//div[@arid='304247260']/fieldset[@class='fieldSetRadio']/div/span/input[@value='0']").is_disabled())
+                    # )
+                    if (
+                        not page.locator(
+                            "//div[@arid='304247260']/fieldset[@class='fieldSetRadio']/div/span/input[@value='0']"
+                        )
+                        .nth(i)
+                        .is_disabled()
+                    ):
+                        test_plan_to_be_locked = True
+                        
+                        # Locking the Backout Plan
+                        # page.locator(
+                        #     "//div[@arid='304247260']/fieldset[@class='fieldSetRadio']/div/span/input[@value='0']"
+                        # ).nth(i).click(timeout=60000)
+                        break
+                i += 1
+
+            # Saving the test plan
+            if (
+                test_plan_to_be_locked
+                and page.locator(
+                    "//div[@arid='301389923']/div[@class='TableInner']/div[@class='BaseTableOuter']/div[@class='BaseTableInner']/table[@id='T301389923']/tbody/tr/td/nobr/span[text() = 'Backout Plan']"
+                ).first.is_visible()
+            ):
+                # print(f"cr test_plan_to_be_locked : {cr}")
+                save_button_locators_for_test_plan = page.locator(
+                    "//div/fieldset/div[@class='PageBody pbChrome']/a[@arid='301402700']/div[@class='btntextdiv']/div[@class='f1' and text()='Save']"
+                ).all()
+                i = 0
+                while i < len(save_button_locators_for_test_plan):
+                    if (
+                        page.locator(
+                            "//div/fieldset/div[@class='PageBody pbChrome']/a[@arid='301402700']/div[@class='btntextdiv']/div[@class='f1' and text()='Save']"
+                        )
+                        .nth(i)
+                        .is_visible()
+                    ):
+                        # Saving the changes
+                        # page.locator(
+                        #     "//div/fieldset/div[@class='PageBody pbChrome']/a[@arid='301402700']/div[@class='btntextdiv']/div[@class='f1' and text()='Save']"
+                        # ).nth(i).click(timeout=60000)
+                        token_for_locking, logs = iframe_message_handler(
+                            page, token_for_locking, logs
+                        )
+                        break
+                    i += 1
+
+    except Exception as e:
+        logs.append(
+            f"{str(e.__class__.__name__)}\n{traceback.format_exc()}\n\n{e}"
+        )
+
+    
+    return cr_wise_test_plan_availability_list, token_for_locking, logs
+
+
+def install_plan_downloader(
+    page: Page,
+    folder_location: str,
+    cr: str,
+    cr_circle: str,
+    need_install_plan: bool,
+    token_for_locking: bool,
+    date_: datetime,
+    logs: List[str],
+) -> Literal["Available", "Not Available"]:
+    try:
+        # print(f"Inside install_plan_downloader for cr {cr}")
+        install_plan_attached_to_cr = "Not Available"
+        page.wait_for_timeout(1000)
+        page.wait_for_load_state("domcontentloaded")
+
+        list_of_downloads_button = [
+            "//fieldset/div/div/fieldset[1]/div[2]/div/div/div[3]/fieldset/div/a[2]/div[@class='btnimgdiv']",
+            "//fieldset/div/div/fieldset[1]/div[2]/div/div/div[4]/fieldset/div/a[2]/div[@class='btnimgdiv']",
+            "//fieldset/div/div/fieldset[1]/div[2]/div/div/div[4]/fieldset/div/a[5]/div[@class='btnimgdiv']",
+        ]
+
+        install_plan_download_folder = os.path.join(
+            folder_location,
+            "Install_and_Backout_Plan_Files",
+            f"{cr}_{cr_circle}",
+            "Install Plans",
+        )
+
+        Path.mkdir(Path(install_plan_download_folder), parents=True, exist_ok=True)
+
+        """
+            Locking the install plans
+        """
+
+        # install_plan_locators = page.locator(
+        #     "//div[@id='WIN_3_301389923' and @arid='301389923']/div[@class='TableInner']/div[@class='BaseTableOuter']/div[@class='BaseTableInner']/table[@id='T301389923']/tbody/tr/td/nobr/span[text() = 'Install Plan']"
+        # ).all()
+        text_attachment_locators = [
+            "//fieldset[@id='WIN_3_303868700']/div[@id='WIN_3_304196500']/div/div/div[3]/fieldset/div/div[4]/textarea",
+            "//fieldset[@id='WIN_3_303868700']/div[@id='WIN_3_304196500']/div/div/div[4]/fieldset/div/div[1]/textarea",
+            "//fieldset[@id='WIN_3_303868700']/div[@id='WIN_3_304196500']/div/div/div[4]/fieldset/div/div[2]/textarea",
+        ]
+
+        install_plan_found = False
+
+        logs.append(
+            f"Downloading and locking the Install plans for cr: {cr}"
+        )
+
+        # print(install_plan_locators)
+
+        # i = 0
+        # while i < len(install_plan_locators):
+        #     page.locator(
+        #         "//div[@id='WIN_3_301389923' and @arid='301389923']/div[@class='TableInner']/div[@class='BaseTableOuter']/div[@class='BaseTableInner']/table[@id='T301389923']/tbody/tr/td/nobr/span[text() = 'Install Plan']"
+        #     ).nth(i).dblclick()
+            # print("Install Plan clicked")
+            # text_attachment_locators = page.locator("//fieldset[@id='WIN_3_303868700']/div[@id='WIN_3_304196500']/div[@class='PageHolderStackViewResizable']/div[@class='PageHolderStackViewFixedCV']/div[@id='WIN_3_304247060' and @arid='304247060']/fieldset[@class='PageBodyVertical']/div[@class='PageBody pbChrome' ]/div[@id='WIN_3_304247090' and @arid='304247090']/textarea[@class='text sr ']").all()
+        
+        page.locator(
+                "//div[@id='WIN_3_301389923' and @arid='301389923']/div[@class='TableInner']/div[@class='BaseTableOuter']/div[@class='BaseTableInner']/table[@id='T301389923']/tbody/tr/td/nobr/span[text() = 'Install Plan']"
+            ).first.dblclick()
+        
+        j = 0
+        while j < len(text_attachment_locators):
+            # if page.locator("//fieldset[@id='WIN_3_303868700']/div[@id='WIN_3_304196500']/div[@class='PageHolderStackViewResizable']/div[@class='PageHolderStackViewFixedCV']/div[@id='WIN_3_304247060' and @arid='304247060']/fieldset[@class='PageBodyVertical']/div[@class='PageBody pbChrome' ]/div[@id='WIN_3_304247090' and @arid='304247090']/textarea[@class='text sr ']").nth(l).is_visible():
+            if page.locator(text_attachment_locators[j]).is_visible(timeout=10000):
+                # text_attachment = page.locator("//fieldset[@id='WIN_3_303868700']/div[@id='WIN_3_304196500']/div[@class='PageHolderStackViewResizable']/div[@class='PageHolderStackViewFixedCV']/div[@id='WIN_3_304247060' and @arid='304247060']/fieldset[@class='PageBodyVertical']/div[@class='PageBody pbChrome' ]/div[@id='WIN_3_304247090' and @arid='304247090']/textarea[@class='text sr ']").nth(l).input_value()
+                text_attachment = page.locator(
+                    text_attachment_locators[j]
+                ).input_value()
+                if text_attachment != "<File Name>":
+                    install_plan_found = True
+
+                    if need_install_plan:
+                        with page.expect_download(timeout=60000) as download_info:
+                            page.bring_to_front()
+                            page.locator(list_of_downloads_button[j]).click()
+
+                        download = download_info.value
+
+                        if not os.path.exists(install_plan_download_folder):
+                            os.mkdir(install_plan_download_folder)
+
+                        if os.path.exists(
+                            os.path.join(
+                                install_plan_download_folder,
+                                f"{text_attachment}",
+                            )
+                        ):
+                            os.remove(
+                                os.path.join(
+                                    install_plan_download_folder,
+                                    f"{text_attachment}",
+                                )
+                            )
+
+                        download.save_as(
+                            os.path.join(
+                                install_plan_download_folder,
+                                f"{text_attachment}",
+                            )
+                        )
+                    install_plan_attached_to_cr = "Available"
+            j += 1
+
+        if install_plan_found and token_for_locking:
+            install_plan_lock_locators = page.locator(
+                "//div[@arid='304247260']/fieldset[@class='fieldSetRadio']/div/span/input[@value='0']"
+            ).all()
+
+            j = 0
+            while j < len(install_plan_lock_locators):
+                if (
+                    page.locator(
+                        "//div[@arid='304247260']/fieldset[@class='fieldSetRadio']/div/span/input[@value='0']"
+                    )
+                    .nth(j)
+                    .is_visible()
+                ):
+                    if (
+                        not page.locator(
+                            "//div[@arid='304247260']/fieldset[@class='fieldSetRadio']/div/span/input[@value='0']"
+                        )
+                        .nth(j)
+                        .is_disabled()
+                    ):
+                        # locking the files
+                        # page.locator(
+                        #     "//div[@arid='304247260']/fieldset[@class='fieldSetRadio']/div/span/input[@value='0']"
+                        # ).nth(j).click(timeout=60000)
+                        break
+                j += 1
+
+            save_button_locators = page.locator(
+                "//div/fieldset/div[@class='PageBody pbChrome']/a[@arid='301402700']/div[@class='btntextdiv']/div[@class='f1' and text()='Save']"
+            ).all()
+
+            j = 0
+            while j < len(save_button_locators):
+                if (
+                    page.locator(
+                        "//div/fieldset/div[@class='PageBody pbChrome']/a[@arid='301402700']/div[@class='btntextdiv']/div[@class='f1' and text()='Save']"
+                    )
+                    .nth(j)
+                    .is_visible()
+                ):
+                    # Saving the changes
+                    # page.locator(
+                    #     "//div/fieldset/div[@class='PageBody pbChrome']/a[@arid='301402700']/div[@class='btntextdiv']/div[@class='f1' and text()='Save']"
+                    # ).nth(j).click(timeout=60000)
+                    token_for_locking, logs = iframe_message_handler(
+                        page, token_for_locking, logs 
+                    )
+                    break
+                j += 1
+            # i += 1
+
+    except Exception as e:
+        logs.append(
+            f"{str(e.__class__.__name__)}\n{traceback.format_exc()}\n\n{e}"
+        )
+
+    return install_plan_attached_to_cr, token_for_locking, logs
+
+
+
+def test_plan_downloader(
+    page: Page,
+    folder_location: str,
+    cr: str,
+    cr_circle: str,
+    token_for_locking: bool,
+    date_: datetime,
+    logs:list
+) -> Tuple[List[AnyStr], bool, list]:
+    try:
+        test_plan_download_folder = os.path.join(
+            folder_location,
+            "Install_and_Backout_Plan_Files",
+            f"{cr}_{cr_circle}",
+            "Test Plans",
+        )
+
+        text_attachment_locators = [
+            "//fieldset[@id='WIN_3_303868700']/div[@id='WIN_3_304196500']/div/div/div[3]/fieldset/div/div[4]/textarea",
+            "//fieldset[@id='WIN_3_303868700']/div[@id='WIN_3_304196500']/div/div/div[4]/fieldset/div/div[1]/textarea",
+            "//fieldset[@id='WIN_3_303868700']/div[@id='WIN_3_304196500']/div/div/div[4]/fieldset/div/div[2]/textarea",
+        ]
+
+        Path.mkdir(Path(test_plan_download_folder), parents=True, exist_ok=True)
+
+        wait_var = True
+        # Waiting for the table to load
+        while wait_var:
+            if (
+                page.locator(
+                    "//div[@class='PageBody pbChrome']/div[@id='WIN_3_301389923']/div[@class='TableHdr']/table[@class='TableHdr']/tbody/tr/td[@class='TableHdrL']"
+                ).text_content()
+                == "Table has Not been Loaded"
+            ):
+                page.wait_for_timeout(1000)
+            else:
+                wait_var = False
+
+        page.wait_for_load_state("load")
+        page.wait_for_load_state("domcontentloaded")
+        # page.wait_for_load_state('networkidle')
+        page.wait_for_timeout(1000)
+        
+        logs.append(
+            f"Downloading and locking the Test plans for cr: {cr}"
+        )
+
+        cr_wise_test_plan_availability_list = []
+
+        if page.locator(
+            "//div[@arid='301389923']/div[@class='TableInner']/div[@class='BaseTableOuter']/div[@class='BaseTableInner']/table[@id='T301389923']/tbody/tr/td/nobr/span[text() = 'Test Plan']"
+        ).first.is_visible():
+            try:
+                # Searching for the CR Test Plan details
+                page.locator(
+                    "//div[@arid='301389923']/div[@class='TableInner']/div[@class='BaseTableOuter']/div[@class='BaseTableInner']/table[@id='T301389923']/tbody/tr/td/nobr/span[text() = 'Test Plan']"
+                ).first.dblclick()
+
+            except Exception as e:
+                page.locator(
+                    "//div[@arid='301389923']/div[@class='TableInner']/div[@class='BaseTableOuter']/div[@class='BaseTableInner']/table[@id='T301389923']/tbody/tr/td/nobr/span[text() = 'Test Plan']"
+                ).nth(0).dblclick()
+
+            page.wait_for_timeout(1000)
+            if (
+                page.locator(
+                    "//div[@arid='301389923']/div[@class='TableInner']/div[@class='BaseTableOuter']/div[@class='BaseTableInner']/table[@id='T301389923']/tbody/tr/td/nobr/span[text() = 'Test Plan']"
+                )
+                .nth(0)
+                .is_visible()
+            ):
+                page.locator(
+                    "//div[@arid='301389923']/div[@class='TableInner']/div[@class='BaseTableOuter']/div[@class='BaseTableInner']/table[@id='T301389923']/tbody/tr/td/nobr/span[text() = 'Test Plan']"
+                ).nth(0).dblclick()
+            
+            # print("Line 2170")
+            # Checking if Test Plan is attached or not
+            test_plan_found_attached = False
+            j = 0
+            while j < len(text_attachment_locators):
+                # print(f"value of iterator value {j = }")
+                # text_attachment = page.locator(
+                #     "//fieldset/div/div[@class='PageHolderStackViewResizable']/div[@class='PageHolderStackViewFixedCV']/div[@arid='304247060']/fieldset[@class='PageBodyVertical']/div[@class='PageBody pbChrome' ]/div[@arid='304247090']/textarea[@class='text sr ']"
+                # ).input_value()
+                text_attachment = page.locator(text_attachment_locators[j]).input_value()
+                # print(f"got the text attachment value {text_attachment}")
+                if text_attachment == "<File Name>":
+                    j += 1
+                    continue
+
+                else:
+                    # Downloading the attachment
+                    test_plan_found_attached = True
+                    with page.expect_download() as neo_neo_popup_info:
+                        page.locator(
+                            "//fieldset/div/div[@class='PageHolderStackViewResizable']/div[@class='PageHolderStackViewFixedCV']/div[@arid='304247060']/fieldset[@class='PageBodyVertical']/div[@class='PageBody pbChrome' ]/a/div[@class='btnimgdiv']/img[@id='reg_img_304252650']"
+                        ).click()
+
+                    # page.wait_for_timeout(5000)
+
+                    download = neo_neo_popup_info.value
+
+                    if not os.path.exists(test_plan_download_folder):
+                        os.mkdir(test_plan_download_folder)
+
+                    cr_wise_test_plan_availability_list = [
+                        "Available",
+                        f"{text_attachment}",
+                    ]
+
+                    # print(f"downloading {text_attachment}")
+                    if os.path.exists(
+                        os.path.join(
+                            test_plan_download_folder,
+                            f"{text_attachment}",
+                        )
+                    ):
+                        os.remove(
+                            os.path.join(
+                                test_plan_download_folder,
+                                f"{text_attachment}",
+                            )
+                        )
+                    download.save_as(
+                        os.path.join(
+                            test_plan_download_folder,
+                            f"{text_attachment}",
+                        )
+                    )
+                    # print("test_plan downloaded")
+                    # # Locking the test plan
+                # print(f"{j = }")
+                # print(f"{test_plan_found_attached =}")
+                j += 1
+                # print(f"incrememnted value of {j = }")
+
+            if not test_plan_found_attached:
+                cr_wise_test_plan_availability_list = [
+                        "Not Available",
+                        "Not Available",
+                    ]
+            # print("broke the loop")
+        else:
+            cr_wise_test_plan_availability_list = [
+                "Not Available (Test Plan Entry Not Available)",
+                "KPI Not Required",
+            ]
+
+        if token_for_locking:
+            test_plan_to_be_locked = False
+            test_plan_lock_button = page.locator(
+                "//div[@arid='304247260']/fieldset[@class='fieldSetRadio']/div/span/input[@value='0']"
+            ).all()
+            i = 0
+            while i < len(test_plan_lock_button):
+                if (
+                    page.locator(
+                        "//div[@arid='304247260']/fieldset[@class='fieldSetRadio']/div/span/input[@value='0']"
+                    )
+                    .nth(i)
+                    .is_visible()
+                ):
+                    # CRQ000004668101
+                    # print(
+                    #     "{} page.locator(\"//div[@arid='304247260']/fieldset[@class='fieldSetRadio']/div/span/input[@value='0']\").is_disabled(){}".format(cr, page.locator("//div[@arid='304247260']/fieldset[@class='fieldSetRadio']/div/span/input[@value='0']").is_disabled())
+                    # )
+                    if (
+                        not page.locator(
+                            "//div[@arid='304247260']/fieldset[@class='fieldSetRadio']/div/span/input[@value='0']"
+                        )
+                        .nth(i)
+                        .is_disabled()
+                    ):
+                        test_plan_to_be_locked = True
+                        # page.locator(
+                        #     "//div[@arid='304247260']/fieldset[@class='fieldSetRadio']/div/span/input[@value='0']"
+                        # ).nth(i).click(timeout=60000)
+                        break
+                i += 1
+
+            # Saving the test plan
+            if (
+                test_plan_to_be_locked
+                and page.locator(
+                    "//div[@arid='301389923']/div[@class='TableInner']/div[@class='BaseTableOuter']/div[@class='BaseTableInner']/table[@id='T301389923']/tbody/tr/td/nobr/span[text() = 'Test Plan']"
+                ).first.is_visible()
+            ):
+                # print(f"cr test_plan_to_be_locked : {cr}")
+                save_button_locators_for_test_plan = page.locator(
+                    "//div/fieldset/div[@class='PageBody pbChrome']/a[@arid='301402700']/div[@class='btntextdiv']/div[@class='f1' and text()='Save']"
+                ).all()
+                i = 0
+                while i < len(save_button_locators_for_test_plan):
+                    if (
+                        page.locator(
+                            "//div/fieldset/div[@class='PageBody pbChrome']/a[@arid='301402700']/div[@class='btntextdiv']/div[@class='f1' and text()='Save']"
+                        )
+                        .nth(i)
+                        .is_visible()
+                    ):
+                        # page.locator(
+                        #     "//div/fieldset/div[@class='PageBody pbChrome']/a[@arid='301402700']/div[@class='btntextdiv']/div[@class='f1' and text()='Save']"
+                        # ).nth(i).click(timeout=60000)
+                        token_for_locking, logs = iframe_message_handler(
+                            page, token_for_locking, logs
+                        )
+                        break
+                    i += 1
+
+    except Exception as e:
+        logs.append(
+            f"{str(e.__class__.__name__)}\n{traceback.format_exc()}\n\n{e}"
+        )
+
+    
+    # print(f"returning values =>{cr_wise_test_plan_availability_list = }, {token_for_locking = }")
+    return cr_wise_test_plan_availability_list, token_for_locking, logs
+
+def bpms_tasks_tab_getter(
+    cr: str, 
+    page: Page, 
+) -> Tuple[AnyStr, pd.DataFrame]:
+    page.wait_for_timeout(1000)
+    page.wait_for_load_state("domcontentloaded")
+    
+    first_table_df = pd.DataFrame()
+    
+    page.locator(
+        "//div[@class='TabsViewPort']/div/dl[@class='OuterOuterTab']/dd[@class='OuterTab']/span[@class='Tab']/a[text()='Tasks']"
+    ).click(modifiers=["Control"], button="left", delay=1000)
+    
+    page.wait_for_load_state(state="domcontentloaded")
+    page.wait_for_load_state(state="load")
+    
+    # first_table_xpath = "//fieldset[@arwindowid='3']/div[@arwindowid='3']/div/div/div[@arwindowid='3']/fieldset/div/div[@arid='301389923']/div[@class='TableInner']/div[@class='BaseTableOuter']"
+    # first_table_xpath = "//fieldset/div/div/div/div/fieldset/div/div/div[@class='TableInner']/div[@class='BaseTableOuter']"
+    # first_table_xpath = "//fieldset/div/div/div/div/div[3]/fieldset/div/div/fieldset[1]/div[2]/div/div/div[2]/fieldset/div/div/div[2]/div"
+    lld_locator = "//fieldset/div/div/div/div/fieldset/div/div/div[@class='TableInner']/div[@class='BaseTableOuter']/div[@class='BaseTableInner']/table/tbody/tr/td/nobr/span[contains(.,'LLD')]"
+    # logs.append(
+    #     f"Getting the bpms technical design attachment name for cr: {cr}"
+    # )
+    
+    page.wait_for_load_state(state="domcontentloaded")
+    page.wait_for_load_state(state="load")
+    
+    count = 0
+    while count < 3:
+        # if page.locator(first_table_xpath).is_visible():
+        if page.locator(lld_locator).is_visible():
+            break
+        else:
+            page.wait_for_timeout(1000)
+        count += 1
+    
+    # print(f"{page.locator(first_table_xpath).first.is_visible() = }")
+    # if page.locator(first_table_xpath).is_visible():
+    if page.locator(lld_locator).is_visible():
+        elements_locator = page.locator(
+            lld_locator
+        ).locator("xpath=../..").locator("xpath=../..").locator("xpath=../..").locator("xpath=..").inner_html()
+        
+        df_list = pd.read_html(StringIO(elements_locator))
+        # pprint(df_list)
+        first_table_df = df_list[0]
+        
+        if len(df_list) == 0:
+            _, first_table_df = bpms_tasks_tab_getter(cr, page)
+            
+        elif len(df_list) > 0:
+            first_table_df = df_list[0]
+        
+    return cr, first_table_df
+
+
+def bpms_auto_crs_tasks_lld_automation_handler(
+    cr: str,
+    page: Page,
+    folder_location: str,
+    cr_circle: str,
+    date_: datetime,
+    logs: list
+) -> Tuple[AnyStr, AnyStr, list]:
+    
+    page.wait_for_timeout(1000)
+    page.wait_for_load_state("domcontentloaded")
+    
+    page.locator(
+        "//div[@class='TabsViewPort']/div/dl[@class='OuterOuterTab']/dd[@class='OuterTab']/span[@class='Tab']/a[text()='Tasks']"
+    ).click(modifiers=["Control"], button="left", delay=1000)
+    
+    page.wait_for_load_state(state="domcontentloaded")
+    page.wait_for_load_state(state="load")
+    
+    page.wait_for_load_state('domcontentloaded')
+    page.wait_for_load_state('load')
+    page.wait_for_timeout(1000)
+    attachment_ = ""
+    lld_locator = "//fieldset/div/div/div/div/fieldset/div/div/div[@class='TableInner']/div[@class='BaseTableOuter']/div[@class='BaseTableInner']/table/tbody/tr/td/nobr/span[contains(.,'LLD Automation')]"
+
+    lld_design_download_path = os.path.join(
+        folder_location,
+        "Install_and_Backout_Plan_Files",
+        f"{cr}_{cr_circle}",
+        "Auto_Technical_Design"
+    )
+
+    Path(lld_design_download_path).mkdir(parents=True, exist_ok=True)
+    
+    if page.locator(lld_locator).first.is_visible():
+        # print("locator_found")
+        page.locator(lld_locator).first.hover()
+        page.locator(lld_locator).first.click()
+        # page.locator(lld_locator).first.click(modifiers=['Control'], button='left', delay=1000)
+        # page.wait_for_timeout(1000)
+        # general_information_entries_locator = "//fieldset[3]/div/div/div/div[4]/fieldset[@class='PageBodyVertical']/div[@class='PageBody pbChrome']/div/div[@class='TableInner']/div[@class='BaseTableOuter']/div[@class='BaseTableInner']/table/tbody/tr/td[@title='General Information']/nobr/span[normalize-space()='General Information']"
+        general_information_entries_locator = "//fieldset[3]/div[2]/div/div/div[4]/fieldset/div/div/div[2]/div/div[2]/table/tbody/tr/td[1]/nobr/span[text()='General Information']"
+        
+        # page.wait_for_load_state('load')
+        # page.wait_for_load_state('domcontentloaded')
+        # page.wait_for_timeout(1000)
+        # all_general_insurance_entries = page.locator(general_information_entries_locator).all()
+        # print("Line 806")
+        # print(page.locator(general_information_entries_locator).count())
+        
+        target_entries = page.locator(general_information_entries_locator)
+    
+        # 2. THE FIX: Wait specifically for the first element to attach to the DOM.
+        # It will poll the DOM dynamically and proceed the millisecond it appears.
+        # try:
+        #     target_entries.first.wait_for(state="attached", timeout=10000) # Waits up to 10 seconds
+        # except Exception as e:
+        #     print(f"Failed to find elements within 10 seconds. Error: {e}")
+        
+        # print(page.locator(general_information_entries_locator).count())
+        # page.locator(general_information_entries_locator).last.hover()
+        
+        if page.locator(general_information_entries_locator).last.is_visible():
+            # print("Line Number 821")
+            page.locator(general_information_entries_locator).last.dblclick()
+            
+            # iframe_element = page.wait_for_selector("//iframe[@src='/arsys/forms/helixitsm-01/TMS%3AWorkInfo/Default+User+View/?cacheid=43b69c09&format=html']")
+            page.wait_for_selector("//table[@id='DivTable']//iframe")
+            frame = page.frame_locator("//table[@id='DivTable']//iframe")
+            
+            
+            # frame = iframe_element.content_frame()
+            locator_for_attachment = "//div[1]/div[5]/div[11]/div[2]/div/div[2]/table/tbody/tr[2]/td[1]/nobr/span"
+            
+            count = 0
+            while count < 3:
+                if frame.locator(locator_for_attachment).is_visible():
+                    break
+                else:
+                    try:
+                        page.wait_for_timeout(1000)
+                    except:
+                        count+= 1
+                        continue
+                count += 1
+            
+            if frame.locator(locator_for_attachment).is_visible():
+                # print("Line Number 833")
+                attachment_ = frame.locator(locator_for_attachment).inner_text()
+                
+                if len(str(attachment_).strip()) > 0:
+                    # print("Line Number 837")
+                    frame.locator(locator_for_attachment).click()
+                    
+                    save_to_disk_button_locator = "//div/div/div/div/table/tbody/tr/td/a[text()='Save to Disk']"
+                    
+                    if not os.path.exists(lld_design_download_path):
+                        os.makedirs(lld_design_download_path, exist_ok=True)
+                    
+                    if frame.locator(save_to_disk_button_locator).is_visible():
+                        with page.expect_download(timeout=60000) as download_info:
+                            # frame.bring_to_front()
+                            frame.locator(save_to_disk_button_locator).click()
+                        download = download_info.value
+                        
+                        if os.path.exists(
+                            os.path.join(
+                                lld_design_download_path,
+                                f"{attachment_}"
+                            )
+                        ):
+                            os.remove(
+                                os.path.join(
+                                    lld_design_download_path,
+                                    f"{attachment_}"
+                                )
+                            )
+                        download.save_as(
+                            os.path.join(
+                                lld_design_download_path,
+                                f"{attachment_}"
+                            )
+                        )
+                            
+            if frame is not None:
+                frame.locator("//div/div/a/div/div[normalize-space()='Close']").click()
+                            
+    return cr, attachment_, logs
+
+
+def bpms_crs_attachment_name_getter(
+    cr: str,
+    page: Page,
+    logs:list
+) -> Tuple[AnyStr, AnyStr, list]:
+    attachment_name = ""
+    try:
+        page.wait_for_load_state('domcontentloaded')
+        page.wait_for_load_state('load')
+        
+        list_of_downloads_button = [
+                "//fieldset/div/div/fieldset[1]/div[2]/div/div/div[3]/fieldset/div/a[2]/div[@class='btnimgdiv']",
+                # "//fieldset/div/div/fieldset[1]/div[2]/div/div/div[4]/fieldset/div/a[2]/div[@class='btnimgdiv']",
+                # "//fieldset/div/div/fieldset[1]/div[2]/div/div/div[4]/fieldset/div/a[5]/div[@class='btnimgdiv']",
+            ]
+        
+        text_attachment_locators = [
+            "//fieldset[@id='WIN_3_303868700']/div[@id='WIN_3_304196500']/div/div/div[3]/fieldset/div/div[4]/textarea",
+            # "//fieldset[@id='WIN_3_303868700']/div[@id='WIN_3_304196500']/div/div/div[4]/fieldset/div/div[1]/textarea",
+            # "//fieldset[@id='WIN_3_303868700']/div[@id='WIN_3_304196500']/div/div/div[4]/fieldset/div/div[2]/textarea",
+        ]
+        
+        logs.append(
+            f"Getting the bpms technical design attachment name for cr: {cr}"
+        )
+        
+        page.locator(
+                "//div[@id='WIN_3_301389923' and @arid='301389923']/div[@class='TableInner']/div[@class='BaseTableOuter']/div[@class='BaseTableInner']/table[@id='T301389923']/tbody/tr/td/nobr/span[text() = 'Technical Design']"
+            ).first.dblclick()
+        
+        j = 0
+        while j < len(text_attachment_locators):
+            if page.locator(text_attachment_locators[j]).is_visible():
+                text_attachment = page.locator(
+                    text_attachment_locators[j]
+                ).input_value()
+                if text_attachment != "<File Name>":
+                    attachment_name = text_attachment
+            j += 1
+    
+    except Exception as e:
+        logs.append(
+            f"{str(e.__class__.__name__)}\n{traceback.format_exc()}\n\n{e}"
+        )
+    
+    return cr, attachment_name, logs
+            
+
+def bpms_manual_crs_attachment_downloader(
+    cr: str,
+    folder_location: str,
+    cr_circle: str,
+    page: Page,
+    date_:datetime, 
+    logs:list
+) -> Tuple[AnyStr, AnyStr, list]:
+    attachment_name = ""
+    try:
+        page.wait_for_load_state('domcontentloaded')
+        page.wait_for_load_state('load')
+        
+        lld_design_download_path = os.path.join(
+            folder_location,
+            "Install_and_Backout_Plan_Files",
+            f"{cr}_{cr_circle}",
+            "Manual_Technical_Design"
+        )
+
+        Path(lld_design_download_path).mkdir(parents=True, exist_ok=True)
+        
+        list_of_downloads_button = [
+                "//fieldset/div/div/fieldset[1]/div[2]/div/div/div[3]/fieldset/div/a[2]/div[@class='btnimgdiv']",
+                # "//fieldset/div/div/fieldset[1]/div[2]/div/div/div[4]/fieldset/div/a[2]/div[@class='btnimgdiv']",
+                # "//fieldset/div/div/fieldset[1]/div[2]/div/div/div[4]/fieldset/div/a[5]/div[@class='btnimgdiv']",
+            ]
+        
+        text_attachment_locators = [
+            "//fieldset[@id='WIN_3_303868700']/div[@id='WIN_3_304196500']/div/div/div[3]/fieldset/div/div[4]/textarea",
+            # "//fieldset[@id='WIN_3_303868700']/div[@id='WIN_3_304196500']/div/div/div[4]/fieldset/div/div[1]/textarea",
+            # "//fieldset[@id='WIN_3_303868700']/div[@id='WIN_3_304196500']/div/div/div[4]/fieldset/div/div[2]/textarea",
+        ]
+        
+        logs.append(
+            f"Getting the bpms technical design attachment name for cr: {cr}"
+        )
+        
+        page.locator(
+                "//div[@id='WIN_3_301389923' and @arid='301389923']/div[@class='TableInner']/div[@class='BaseTableOuter']/div[@class='BaseTableInner']/table[@id='T301389923']/tbody/tr/td/nobr/span[text() = 'Technical Design']"
+            ).first.dblclick()
+        
+        j = 0
+        while j < len(text_attachment_locators):
+            # if page.locator("//fieldset[@id='WIN_3_303868700']/div[@id='WIN_3_304196500']/div[@class='PageHolderStackViewResizable']/div[@class='PageHolderStackViewFixedCV']/div[@id='WIN_3_304247060' and @arid='304247060']/fieldset[@class='PageBodyVertical']/div[@class='PageBody pbChrome' ]/div[@id='WIN_3_304247090' and @arid='304247090']/textarea[@class='text sr ']").nth(l).is_visible():
+            if page.locator(text_attachment_locators[j]).is_visible(timeout=10000):
+                # text_attachment = page.locator("//fieldset[@id='WIN_3_303868700']/div[@id='WIN_3_304196500']/div[@class='PageHolderStackViewResizable']/div[@class='PageHolderStackViewFixedCV']/div[@id='WIN_3_304247060' and @arid='304247060']/fieldset[@class='PageBodyVertical']/div[@class='PageBody pbChrome' ]/div[@id='WIN_3_304247090' and @arid='304247090']/textarea[@class='text sr ']").nth(l).input_value()
+                text_attachment = page.locator(
+                    text_attachment_locators[j]
+                ).input_value()
+                
+                if text_attachment != "<File Name>":
+                    attachment_name = text_attachment
+                    with page.expect_download(timeout=60000) as download_info:
+                        page.bring_to_front()
+                        page.locator(list_of_downloads_button[j]).click()
+                        
+                    download = download_info.value
+                    
+                    if not os.path.exists(lld_design_download_path):
+                        os.makedirs(lld_design_download_path, exist_ok=True)
+                    
+                    # print(f"{os.path.exists(lld_design_download_path) =}")
+                    
+                    if os.path.exists(
+                        os.path.join(
+                            lld_design_download_path,
+                            f"{text_attachment}",
+                        )
+                    ):
+                        os.remove(
+                            os.path.join(
+                                lld_design_download_path,
+                                f"{text_attachment}",
+                            )
+                        )
+
+                    download.save_as(
+                        os.path.join(
+                            lld_design_download_path,
+                            f"{text_attachment}",
+                        )
+                    )
+            j += 1
+
+        
+    except Exception as e:
+        logs.append(
+            f"{str(e.__class__.__name__)}\n{traceback.format_exc()}\n\n{e}"
+        )
+    
+    return cr, attachment_name, logs
+
+
+def bpms_file_correction_file_upload(
+    cr: str, 
+    corrected_file_path: str,
+    page: Page,
+    runtime: dict,
+    logs: list
+) -> Tuple[AnyStr, AnyStr, list]:
+    result = "Failure"
+    page.wait_for_timeout(1000)
+    page.wait_for_load_state("domcontentloaded")
+    
+    runtime["status"] = "Starting to upload the corrected file"
+    logs.append(
+        f"Starting to upload the corrected file for cr: {cr}"
+    )
+    logs = search_for_cr(cr, page, logs)
+
+    try:
+        wait_var = True
+
+        # Waiting for the table to load
+        while wait_var:
+            if (
+                page.locator(
+                    "//div[@class='PageBody pbChrome']/div[@id='WIN_3_301389923']/div[@class='TableHdr']/table[@class='TableHdr']/tbody/tr/td[@class='TableHdrL']"
+                ).text_content()
+                == "Table has Not been Loaded"
+            ):
+                page.wait_for_timeout(1000)
+            else:
+                wait_var = False
+
+        # Clicking on More Info
+        page.wait_for_selector('//textarea[@id="arid_WIN_3_304247080"]')
+        
+        page.locator(
+            '//textarea[@id="arid_WIN_3_304247080"]'
+        ).fill('Updated Manual DLD/Design')
+        
+        # page.wait_for_selector(
+        #     '//div/a[@id="WIN_3_304247100"]/div'
+        # )
+        
+        page.wait_for_selector(
+            '//img[@id="reg_img_304247100"]'
+        )
+        
+        page.locator(
+            '//img[@id="reg_img_304247100"]'
+        ).click()
+        
+        page.wait_for_selector("//table[@id='DivTable']//iframe")
+        frame = page.frame_locator("//table[@id='DivTable']//iframe")
+        locator_for_choosing_the_file = '//table/tbody/tr/td/form/table/tbody/tr/td[2]/input[@id="PopupAttInput"]'
+        
+        ok_button_locator = '//div[@id="PopupAttFooter"]/a[text()="OK"]'
+        
+        count = 0
+        while count < 3:
+            if frame.locator(locator_for_choosing_the_file).is_visible():
+                break
+            else:
+                try:
+                    page.wait_for_timeout(1000)
+                except:
+                    count+= 1
+                    continue
+            count += 1
+        # print(f"\n{frame.locator(locator_for_choosing_the_file).is_visible() = }\n")
+        if frame.locator(locator_for_choosing_the_file).is_visible():
+            # print(f"\n{frame.locator(locator_for_choosing_the_file) = }")
+            # with page.expect_file_chooser(timeout=60000) as fc_info:
+            #     frame.locator(locator_for_choosing_the_file).hover()
+            #     frame.locator(locator_for_choosing_the_file).click(button='left', click_count=2, force=True)
+            # print("Line 1153")
+            # file_chooser = fc_info.value
+            # file_chooser.set_files(corrected_file_path)
+            frame.locator(locator_for_choosing_the_file).set_input_files(corrected_file_path)
+        
+        if frame is not None:
+            frame.locator(ok_button_locator).click()
+        
+        result = "Success"
+
+        # Clicking on More Info
+        page.locator(
+            "//div/fieldset[@class='PageBodyHorizontal']/div[@class='PageBody pbChrome']/div/fieldset/div[@arid='304196500']/div/div/div/div/a[@class='pagebtn ']/span[@class='Twisty Tsize']"
+        ).click()
+
+        # Selecting Info
+        page.locator(
+            "//div/fieldset/div[@class='PageBody pbChrome']/div[@arid='304247210']/div[@class='selection']/a[@class='btn btn3d selectionbtn']"
+        ).click()
+        
+        page.wait_for_selector(
+            "//div[@class='MenuOuter']/div[@class='MenuTableContainer']/table[@class='MenuTable']/tbody/tr/td"
+        )
+        page.locator(
+            "//div[@class='MenuOuter']/div[@class='MenuTableContainer']/table[@class='MenuTable']/tbody/tr/td",
+            has_text="Technical Design",
+        ).click()
+        
+        # Locking the Design
+        # page.locator(
+        #     "//div[@arid='304247260']/fieldset[@class='fieldSetRadio']/div/span/input[@value='0']"
+        # ).click()
+        
+        # Setting View Access Public
+        page.locator(
+            '//fieldset/div/div/fieldset/div[@class="radio "]/span[2]/input[@value="1" and @id="WIN_3_rc1id1000000761"]'
+        ).click()
+        
+        # Clicking on 'Add' button
+        page.locator(
+            "//div/fieldset[@class='PageBodyVertical']/div[@class='PageBody pbChrome']/a[@arid='304247110']/div[@class='btntextdiv']"
+        ).click()
+    
+    except Exception as e:
+        result = "Failure"
+        # print(f"Error occurred while filling MOP attachment for CR {cr}: {e}")
+        logs.append(
+            f"{str(e.__class__.__name__)}\n{traceback.format_exc()}\n\n{e}"
+        )
+        raise
+    return cr, result, logs
+
+
+def raw_report_downloader(
+    context: BrowserContext,
+    page: Page,
+    logs: list,
+    task:dict|None=None,
+    runtime:dict|None=None,
+    timestamp_fn:Callable=_timestamp,
+    date_: datetime|date|str|None = None,
+) -> list:
+    # date_1 = ""
+    # date_2 = ""
+    runtime["status"] = "Running"
+    task_name = task["name"] if task else "Task"
+    
+    if date_ is None:
+        # print(datetime.now())
+        date_1 = f"{((datetime.now()).replace(hour=20, minute=0, second=0)).strftime('%m/%d/%Y %H:%M:%S')}"
+        date_2 = f"{((datetime.now() + timedelta(days=1)).replace(hour=8, minute=0, second=0)).strftime('%m/%d/%Y %H:%M:%S')}"
+
+    else:
+        if isinstance(date_, datetime):
+            pass
+        elif isinstance(date_, date):
+            date_ = datetime(date_.year, date_.month, date_.day)
+        elif isinstance(date_, str):
+            date_ = parser.parse(date_)
+
+        date_1 = f"{date_.replace(hour=20, minute=0, second=0).strftime('%m/%d/%Y %H:%M:%S')}"
+        date_2 = f"{(date_ + timedelta(days=1)).replace(hour=8, minute=0, second=0).strftime('%m/%d/%Y %H:%M:%S')}"
+
+
+    folder_date = (dp.parse(date_1)).strftime("%d-%b-%y")
+
+    folder = str(os.getenv("RAW_REPORT_DOWNLOAD_FOLDER")).format(folder_date)
+    
+    page.wait_for_load_state("domcontentloaded")
+    page.wait_for_timeout(1000)
+    
+    advanced_search_query = f"""('Scheduled Start Date+' >= "{date_1}" AND 'Scheduled End Date+' <= "{date_2}") AND ('Coordinator Group*+' = "SRF-Packet Core CM Delhi" OR 'Coordinator Group*+' = "SRF-VAS CM Delhi")"""
+    # print("\n\n", advanced_search_query, end="\n\n")
+    counter = 0
+    # clicking the advanced search button
+    while not page.locator(
+        "//fieldset/div/div/div/div/table/tbody/tr/td/a[@class='advancedsearch btn btn3d tbbtn' and @arwindowid='3']/div[@id='TBadvancedsearch']"
+    ).is_visible() and counter < 10:
+        page.wait_for_timeout(1000)
+        counter += 1
+    
+    page.locator(
+        "//fieldset/div/div/div/div/table/tbody/tr/td/a[@class='advancedsearch btn btn3d tbbtn' and @arwindowid='3']/div[@id='TBadvancedsearch']"
+    ).click()
+
+    page.wait_for_selector(
+        '//fieldset/div/div/div/div[@id="QueryBar" and @arwindowid="3"]/table/tbody/tr/td/textarea[@id="arid1005"]'
+    )
+    page.locator(
+        '//fieldset/div/div/div/div[@id="QueryBar" and @arwindowid="3"]/table/tbody/tr/td/textarea[@id="arid1005"]'
+    ).fill(advanced_search_query)
+
+    page.locator(
+        "//table/tbody/tr/td[@class='TBGroup TBGroup0']/a[@arwindowid = '3']/div[@id='TBsearchsavechanges']",
+        has_text="Search",
+    ).click()
+    page.locator(
+        "//div[@class='TableFtr']/table[@class='TableFtr']/tbody/tr/td[@class='TableFtrL']/a[@class='SelAll btn btn3d TableBtn' and text()='Select All']"
+    ).click()
+
+    with context.expect_page() as popup_info:
+        page.locator(
+            "//div[@class='TableFtr']/table[@class='TableFtr']/tbody/tr/td[@class='TableFtrL']/a[@class= 'Rep btn btn3d TableBtn']",
+            has_text="Report",
+        ).click()
+
+    popup = popup_info.value
+    popup.wait_for_load_state()
+
+    popup.locator(
+        "//table[@id='T93250']/tbody/tr/td/nobr[@class='dp ']/span[text()='SRF-PS_Core']",
+        has_text="SRF-PS_Core",
+    ).click()
+
+    popup.locator(
+        "//div[@arid='2000053' and @id='WIN_0_2000053']/div[@class='selection']/input[@id = 'arid_WIN_0_2000053']"
+    ).click()
+    popup.locator(
+        "//div[@class='MenuOuter']/div[@class='MenuTableContainer']/table[@class='MenuTable']/tbody[@class='MenuTableBody']/tr[@class='MenuTableRow']/td[@class='MenuEntryName' or @class='MenuEntryNameHover']",
+        has_text="File",
+    ).hover()
+    popup.locator(
+        "//div[@class='MenuOuter']/div[@class='MenuTableContainer']/table[@class='MenuTable']/tbody[@class='MenuTableBody']/tr[@class='MenuTableRow']/td[@class='MenuEntryName' or @class='MenuEntryNameHover']",
+        has_text="File",
+    ).click()
+
+    popup.locator(
+        "//div[@arid='2000056' and @id='WIN_0_2000056']/div[@class='selection']/input[@id = 'arid_WIN_0_2000056']"
+    ).click()
+    popup.locator(
+        "//div[@class='MenuOuter']/div[@class='MenuTableContainer']/table[@class='MenuTable']/tbody[@class='MenuTableBody']/tr[@class='MenuTableRow']/td[@class='MenuEntryName' or @class='MenuEntryNameHover']",
+        has_text="CSV",
+    ).hover()
+    popup.locator(
+        "//div[@class='MenuOuter']/div[@class='MenuTableContainer']/table[@class='MenuTable']/tbody[@class='MenuTableBody']/tr[@class='MenuTableRow']/td[@class='MenuEntryName' or @class='MenuEntryNameHover']",
+        has_text="CSV",
+    ).click()
+
+    popup.locator(
+        '//fieldset/div/div/fieldset/div[@id="WIN_0_2000054"]/a[@class="btn btn3d menu"]'
+    ).click()
+    popup.locator(
+        '//div/div[@class="MenuTableContainer"]/table[@class="MenuTable"]/tbody/tr/td[text()="Unicode (UTF-8)"]'
+    ).click()
+
+    with popup.expect_download() as neo_popup_info:
+        popup.locator(
+            "//a[@artype='Control']/div[@class='btnimgdiv']/img[@id='reg_img_93272']"
+        ).click()
+
+    download = neo_popup_info.value
+    
+    runtime["status"]="Dowloading the Raw Report"
+
+    logs.append(f"{task_name}: [{timestamp_fn}] :: Downloading the Raw Report")
+
+    report_file_date = (dp.parse(date_1))
+
+    if os.path.exists(
+        os.path.join(folder, f"PS_Core_Raw_Report_{report_file_date.strftime('%Y-%m-%d')}.csv")
+    ):
+        os.remove(
+            os.path.join(folder, f"PS_Core_Raw_Report_{report_file_date.strftime('%Y-%m-%d')}.csv")
+        )
+    download.save_as(
+        os.path.join(folder, f"PS_Core_Raw_Report_{report_file_date.strftime('%Y-%m-%d')}.csv")
+    )
+
+    # time.sleep(2)
+    logs.append(f"{task_name}: [{timestamp_fn}] :: Downloaded the Raw Report")
+    runtime["status"]="Dowloaded the Raw Report"
+
+    popup.close(run_before_unload=True)
+
+    return logs
+
+
+def login_to_itsm(
+    page: Page, logs: list, runtime: dict, task: dict, timestamp_fn: Callable, user_email: str = None
+):
+    # if folder is None:
+    #     folder = str(Path(__file__).parent.parent)
+    # username = os.getlogin().upper().strip()
+    # __itsm_data = ITSM_Password_Fetcher().fetch
+    # username = __itsm_data["username"]
+    # password = __itsm_data["password"]
+    # page.locator("//input[@id='login']").fill(username)
+    # password = str(os.getenv("PASSWORD")) if str(os.getenv("PASSWORD")) else ""
+    # if password is None and folder is not None:
+    #     with open(os.path.join(folder, "planning.txt"), "r") as f:
+    #         password = f.readline().strip()
+    # page.locator("//input[@id='passwd']").fill(str(password).strip())
+
+    # clicking the logon button
+    # page.locator("//a[@id='loginBtn']", has_text="Log On").click()
+
+    # Never let a missing email fall back to the literal string "None":
+    # os.getenv() returns None when the variable is unset, and str(None) is
+    # "None" - which used to get typed into the ITSM login email field.
+    resolved_user_email = user_email or (os.getenv("EMAIL_USERNAME") or "")
+
+    if not user_email:
+        logs.append(f"Warning: no user email provided, falling back to EMAIL_USERNAME env var ---- {timestamp_fn()}")
+    if not resolved_user_email:
+        logs.append(f"Warning: no user email available for ITSM login; leaving the email field blank ---- {timestamp_fn()}")
+
+    # Filling the user name
+    page.locator('//div/input[@id="i0116"]').fill(resolved_user_email)
+    page.locator('//div/input[@id="idSIButton9"]').click()
+    
+    page.wait_for_load_state("load", timeout=60000)
+    page.wait_for_selector('//div/input[@id="i0118"]', state="visible", timeout=10000)
+    # if page.locator('//div/input[@id="i0118"]').is_visible():
+    #     page.locator('//div/input[@id="i0118"]').fill(str(password).strip())
+    #     page.locator('//div/input[@id="idSIButton9"]').click()
+    #     page.wait_for_load_state("load", timeout=60000)
+    return request_password_from_user(runtime, task, logs, timestamp_fn)
+
+
+def iframe_message_handler(
+    page: Page,
+    token_for_locking: bool,
+    logs: list,
+) -> Tuple[bool, list]:
+    result = token_for_locking
+    try:
+        page.wait_for_load_state("domcontentloaded")
+        page.wait_for_load_state("load")
+
+        # print("\n\n Inside Iframe Handler")
+        page_iframe = page.frame_locator(
+            "iframe[src='https://ticketing-in.managed-services.prod.sdt.ericsson.net/arsys/resources/html/MessagePopup.html']"
+        )
+        if page_iframe is not None:
+            if page_iframe.locator(
+                "//a[contains(@class,'PopupBtn') and normalize-space()='No']|//a[contains(@class,'PopupBtn') and normalize-space()='OK']|//a[contains(@class,'PopupBtn') and normalize-space()='Ok']"
+            ).is_visible():
+                if page_iframe.locator(
+                    "//a[@class='btn btn3d PopupBtn' and normalize-space()='No']"
+                ).is_visible():
+                    # print("Found No Button in Popup")
+                    page_iframe.locator(
+                        "//a[@class='btn btn3d PopupBtn' and text()='No']"
+                    ).click(timeout=15000)
+                elif page_iframe.locator(
+                    "//a[@class='btn btn3d PopupBtn' and normalize-space()='Ok']"
+                ).is_visible():
+                    page_iframe.locator(
+                        "//a[@class='btn btn3d PopupBtn' and normalize-space()='Ok']"
+                    ).click(timeout=15000)
+                    logs.append("Can't Lock the plan")
+
+                elif page_iframe.locator(
+                    "//a[contains(@class,'PopupBtn') and normalize-space()='Ok']"
+                ).is_visible():
+                    result = False
+
+    except TimeoutError:
+        result = False
+
+    return result, logs
+
+def handle_authenticator(
+    page: Page,
+    password: str,
+    context: BrowserContext,
+    playwright: Playwright,
+    logs: list,
+    runtime:dict,
+    task:dict,
+    timestamp_fn:Callable|None
+):
+    # pythoncom.PumpWaitingMessages()
+    
+    """Handle MFA / 2FA authentication flow."""
+    logs = logs if logs is not None else []
+    timestamp_fn = timestamp_fn or (lambda: "")
+    task_name = task["name"] if task else "Task"
+
+    try:
+        page.bring_to_front()
+        # Wait for either the password field or the security key prompt to be visible
+        page.wait_for_selector(
+            "//*[text()='Enter password']",
+            state="visible",
+            timeout=20000,
+        )
+
+    except Exception as e:
+        print(f"Password prompt not found (may already be past it): {e}")
+        # Optional: alternative sign-in path
+        # try:
+        #     page.wait_for_selector(
+        #         "//*[text()='We couldn't sign you in']",
+        #         state="visible",
+        #         timeout=10000,
+        #     )
+
+        #     page.locator("//*[text()='Sign in another way']").click(button="left")
+
+        #     page.wait_for_load_state("load")
+        #     page.wait_for_load_state("domcontentloaded")
+
+        #     page.wait_for_selector(
+        #         "//*[text()='Use my password']", state="visible", timeout=10000
+        #     )
+
+        #     page.locator("//*[text()='Use my password']").click(button="left")
+
+        # except Exception as e:
+        #     page.wait_for_timeout(30000)
+
+        try:
+            if page.get_by_text("We couldn't sign you in").is_visible():
+                page.locator("//*[text()='Sign in another way']").click(button="left")
+                page.wait_for_load_state("load")
+                page.wait_for_selector(
+                    "//*[text()='Use my password']", state="visible", timeout=10000
+                )
+                page.locator("//*[text()='Use my password']").click(button="left")
+        except Exception as inner:
+            print(f"Alternative auth flow skipped: {inner}")
+    
+    try:
+        password_string_locator = page.locator("//*[text()='Enter password']")
+        password_input_locator = page.locator('//div/input[@id="i0118"]')
+
+        if password_string_locator.is_visible():
+            password_input_locator.fill(str(password).strip())
+            page.wait_for_selector(
+                '//div/input[@id="i0118"]', state="visible", timeout=15000
+            )
+            page.locator('//div/input[@id="i0118"]').fill(str(password).strip())
+            page.locator('//div/input[@id="idSIButton9"]').click()
+
+        page.wait_for_load_state("load", timeout=2000)
+
+        neo_mfa_prompt_locator = page.locator("//*[text()='Approve sign in request']")
+        
+        if neo_mfa_prompt_locator.is_visible():
+            page.get_by_text("Approve sign in request").wait_for(
+                    state="hidden", timeout=60000
+                )
+    
+    except Exception:
+        pass
+
+
+    mfa_prompt_locator = page.locator(
+            "//*[text()='Approve sign in request' or text()='Verify your identity' or text()='Face, fingerprint, PIN, or security key']"
+        )
+    
+    
+    try:
+        # Wait for either prompt to appear
+        mfa_prompt_locator.first.wait_for(state="visible", timeout=15000)
+
+        prompt_text = mfa_prompt_locator.first.text_content()
+
+        # Now check which one it is
+        if "Approve sign in request" in prompt_text:
+            try:
+                # Wait for the prompt to disappear
+                # page.get_by_text("Approve sign in request").wait_for(
+                #     state="hidden", timeout=60000
+                # )
+                if page.get_by_text("I can't use my Microsoft Authenticator app right now").is_visible():
+                    page.get_by_text("I can't use my Microsoft Authenticator app right now").click()
+
+                page.wait_for_selector("//*[text() = 'Use a verification code']")
+
+                # if page.get_by_text("Use a verification code").is_visible():
+                #     page.get_by_text("Use a verification code").click()
+
+                print("\"Use a verification code\" is visible =>", page.locator('//*[@id="idDiv_SAOTCS_Proofs"]/div[2]/div/div/div[2]/div[text()="Use a verification code"]').is_visible())
+                if page.locator('//*[@id="idDiv_SAOTCS_Proofs"]/div[2]/div/div/div[2]/div[text()="Use a verification code"]').is_visible():
+                    page.locator('//*[@id="idDiv_SAOTCS_Proofs"]/div[2]/div/div/div[2]/div[text()="Use a verification code"]').click()
+                
+                 # ===== Get the code from the user via iframe form =====
+                code = request_2fa_code_from_user(runtime, task, logs, timestamp_fn)
+
+                # Fill the code into the MS verification input (adjust selector if needed)
+                otp_input = page.locator('#idTxtBx_SAOTCC_OTC')
+                otp_input.wait_for(state="visible", timeout=15000)
+                otp_input.fill(code)
+
+                # Click "Verify" / "Sign in"
+                # After clicking Verify/Continue on OTP
+                page.locator('#idSubmit_SAOTCC_Continue').click()
+
+                # Handle the "Stay signed in?" prompt that often appears after MFA
+                try:
+                    stay_signed_in = page.locator("//*[text()='Stay signed in?']")
+                    stay_signed_in.wait_for(state="visible", timeout=15000)
+                    # Click "Yes" to persist the session (important for storage_state!)
+                    page.locator('#idSIButton9').click()   # "Yes" button
+                except Exception:
+                    pass
+
+                page.wait_for_load_state("load", timeout=60000)   # not 2000
+                logs.append(f"{task_name}: 2FA code submitted ---- {timestamp_fn()}")
+                # ======================================================
+
+            except Exception as e:
+                print(f"OTP handling error: {e}")
+                logs.append(f"{task_name}: OTP handling error: {e} ---- {timestamp_fn()}")
+                raise
+
+        elif "Verify your identity" in prompt_text:
+            while page.get_by_text(
+                "Approve a request on my Microsoft Authenticator app"
+            ).is_visible():
+                page.get_by_text(
+                    "Approve a request on my Microsoft Authenticator app"
+                ).click(button="left")
+                page.wait_for_timeout(1000)
+
+            try:
+                approve_prompt = page.get_by_text("Approve sign in request")
+                while True:
+                    if approve_prompt.is_visible():
+                        break
+                    else:
+                        
+                        approve_prompt_failed_prompt = page.get_by_text(
+                            "Approve a request on my Microsoft Authenticator app"
+                        )
+                        while not approve_prompt_failed_prompt.is_visible():
+                            approve_prompt_failed_prompt.click(button="left")
+                            page.wait_for_timeout(1000)
+                        approve_prompt.wait_for(state="visible", timeout=10000)
+                # print("Waiting for sign in approval after verification step.")
+                approve_prompt.wait_for(state="hidden", timeout=60000)
+                # print("Sign in approved by user after verification.")
+
+            except Exception as e:
+                pass
+        
+        elif "Face, fingerprint, PIN, or security key" in prompt_text:
+            try:
+                approve_prompt = page.get_by_text(
+                    "Face, fingerprint, PIN, or security key"
+                )
+                while True:
+                    if not approve_prompt.is_visible():
+                        break
+                    else:
+                        approve_prompt.wait_for(state="hidden", timeout=10000)
+            except Exception as e:
+                pass
+    
+    except Exception:
+        pass
+
+
+def search_for_cr(page: Page, cr: str, logs: list):
+    logs.append(f"{_timestamp()} -- Starting the Search for the CR: '{cr}'")
+    page.locator(
+        "//div[@arid='304255502']/div/div/table[@class='Toolbar']/tbody/tr/td[@class='TBGroup TBGroup1']/a[@class='newsearch btn btn3d tbbtn']/span"
+    ).click()
+
+    # Adding the CR to the search field
+    page.locator(
+        "//div[@class='PageBody pbChrome']/div[@id='WIN_3_303683700']/fieldset[@class=' pnl ']/div[@arwindowid='3']/textarea[@class='text sr ' and @id= 'arid_WIN_3_1000000182']"
+    ).fill(cr)
+
+    page.locator(
+        "//div[@id='WIN_0_304255502' and @arid='304255502']/div[@id='FormApp']/div[@id='Toolbar' and @arwindowid='3']/table[@class='Toolbar']/tbody/tr/td[@class='TBGroup TBGroup0']/a[@arwindowid='3']/div[@id = 'TBsearchsavechanges' and text()='Search']"
+    ).click()
+
+    return logs
+
+
+def work_detail_table_reader(page: Page, 
+    cr: str,
+) -> Tuple[AnyStr, pd.DataFrame|None]:
+    result = None
+    
+    page.wait_for_load_state('domcontentloaded')
+    page.wait_for_load_state('load')
+    
+    wait_var = True
+    # Waiting for the table to load
+    while wait_var:
+        if (
+            page.locator(
+                "//div[@class='PageBody pbChrome']/div[@id='WIN_3_301389923']/div[@class='TableHdr']/table[@class='TableHdr']/tbody/tr/td[@class='TableHdrL']"
+            ).text_content()
+            == "Table has Not been Loaded"
+        ):
+            page.wait_for_timeout(1000)
+        else:
+            wait_var = False
+    
+    page.wait_for_load_state('domcontentloaded')
+    page.wait_for_load_state('load')
+    
+    # print(f"\n\n{cr=}")
+    # print(f"{page.locator(
+    #     '//fieldset/div/div[@id="WIN_3_301389923"]/div[2]/div'
+    # ).is_visible() = }\n\n")
+
+    if page.locator(
+        '//fieldset/div/div[@id="WIN_3_301389923"]/div[2]/div'
+    ).is_visible():
+        table = page.locator(
+            '//fieldset/div/div[@id="WIN_3_301389923"]/div[2]/div'
+        ).inner_html()
+        # print(f"{table = }\n\n")
+        df_list = pd.read_html(StringIO(table))
+        df = df_list[0]
+        print(f"df =\n{df}\n\n")
+        result = df
+        # writer = pd.ExcelWriter(f"C:/Users/emaienj/Downloads/Work_Details/Work Detail Table_{cr}.xlsx", engine="openpyxl")
+        # result.to_excel(writer, sheet_name="Work Detail Table")
+        # # writer.save()
+        # writer.close()
+        # del writer
+    
+    return cr, result
+
+
+def get_service_plus_list(
+    page: Page,
+) -> Tuple[str]:
+    result = []
+    non_services_plus_entry = (
+        "(2G /3G )",
+    )
+    
+    page.wait_for_load_state("domcontentloaded")
+    page.wait_for_load_state("load")
+    page.wait_for_timeout(1000)
+
+    page.locator(
+        "//fieldset/div/div/div/div/div[3]/fieldset/div/div/div/div[4]/div[16]/div/div/div[3]/fieldset/div/div/div/div/div[2]/fieldset/div/div[2]/fieldset/div[1]/a"
+    ).click()
+
+    page.wait_for_load_state("domcontentloaded")
+    page.wait_for_load_state("load")
+    
+    while len(result) == 0 or result == ('Loading...',):
+        table = page.locator(
+            "//div[@class='MenuOuter']/div[@class='MenuTableContainer']"
+        ).inner_html()
+        # print(table, "\n\n")
+        parsed_table = beautifulsoup(table, "html.parser")
+        # from pprint import pprint
+        # pprint(parsed_table)
+        # print("\n\n\n")
+
+        result = tuple(
+            [
+                str(cell.get_text())
+                for cell in parsed_table.find_all("td")
+                if len(str(cell.get_text())) > 0
+            ]
+        )
+    result = result + non_services_plus_entry
+    # print("Service Plus List")
+    # print(f"{result = }\n")
+    
+    return result
+
+
+def relationship_nodes_handler(
+    page: Page,
+    cr: str,
+    text_contents: List[str]|None = None
+) -> Tuple[AnyStr,List[AnyStr]]:
+    relationship_nodes = []
+    
+    page.wait_for_timeout(1000)
+    page.wait_for_load_state("domcontentloaded")
+    # print(f"{cr = }\n{text_contents = }\n\n")
+    
+    if text_contents is None:
+        text_contents = [
+            "2G",
+            "3G",
+            "4G",
+            "5G",
+            "IMS",
+            "(2G /3G )",
+        ]
+    
+    page.wait_for_load_state(state="domcontentloaded")
+    page.wait_for_load_state(state="load")
+    
+    page.locator(
+        "//div[@class='TabsViewPort']/div/dl[@class='OuterOuterTab']/dd[@class='OuterTab']/span[@class='Tab']/a[text()='Relationships']"
+    ).click(modifiers=["Control"], button="left", delay=1000)
+
+    page.wait_for_load_state(state="domcontentloaded")
+    page.wait_for_load_state(state="load")
+    # page.wait_for_timeout(1500)
+    
+    var = True
+    while var:
+        if page.locator(
+            "//fieldset/div/div/div/div/div[3]/fieldset/div/div/div/div[4]/div[16]/div/div/div[3]/fieldset/div/div/div/div/div[3]/fieldset/div/div/fieldset[4]/div[2]/div/div/div[2]/fieldset/div/div/div[2]/div/div[2]"
+        ).is_visible():
+            break
+        else:
+            page.wait_for_timeout(1000)
+    
+    if page.locator(
+        "//fieldset/div/div/div/div/div[3]/fieldset/div/div/div/div[4]/div[16]/div/div/div[3]/fieldset/div/div/div/div/div[3]/fieldset/div/div/fieldset[4]/div[2]/div/div/div[2]/fieldset/div/div/div[2]/div/div[2]"
+    ).is_visible():
+        elements_locator = page.locator(
+            "//fieldset/div/div/div/div/div[3]/fieldset/div/div/div/div[4]/div[16]/div/div/div[3]/fieldset/div/div/div/div/div[3]/fieldset/div/div/fieldset[4]/div[2]/div/div/div[2]/fieldset/div/div/div[2]/div/div[2]"
+        ).inner_html()
+
+        # texts = elements_locator.evaluate_all("elements => elements.map(el => el.textContent.trim())")
+        # data = elements_locator.all_inner_texts()
+        # df = pd.DataFrame(data)
+        # print(StringIO(elements_locator))
+        # print("\n\n")
+        df_list = pd.read_html(StringIO(elements_locator))
+
+        # df = pd.DataFrame(texts, columns=["Text"])
+        df = pd.DataFrame()
+
+        # print(f"{cr = },")
+        # print(f"{search_field_value = },\n")
+
+        if len(df_list) == 0:
+            _, relationship_nodes = relationship_nodes_handler(page, cr)
+        
+        elif len(df_list) > 0:
+            df = df_list[0]
+
+            if not df.empty:
+                if {"Relationship Type", "Request Type", "Request Summary"}.issubset(
+                    set(df.columns)
+                ):
+                    df = df.loc[
+                        (
+                            (
+                                df["Relationship Type"].astype(str).str.strip()
+                                == "Related to"
+                            )
+                            & (
+                                df["Request Type"].astype(str).str.strip()
+                                == "Configuration Item"
+                            )
+                        )
+                    ]
+                    
+                    df = df.loc[
+                            ~df["Request Summary"]
+                            .astype(str)
+                            .str.strip()
+                            .str.startswith(tuple(text_contents))
+                    ]
+
+                    # print(df)
+                    # print("\n\n")
+                    if df.shape[0] > 0:
+                        relationship_nodes = df["Request Summary"].astype(str).str.strip().tolist()
+    
+    return cr, relationship_nodes
+
+
+def navigate_to_change_management(page:Page):
+    page.wait_for_load_state("load")
+
+    page.locator(
+        '//div/img[@id="reg_img_304316340" and @artxt="Show Application List"]'
+    ).click()
+
+    while True:
+        if page.locator(
+            "//div[@class='root root_menu' and @arid='app1600']",
+            has_text="Change Management",
+        ).is_visible():
+            break
+        else:
+            page.wait_for_timeout(1000)
+
+    page.locator(
+        "//div[@class='root root_menu' and @arid='app1600']",
+        has_text="Change Management",
+    ).hover()
+
+    page.locator("//a[@class='btn']", has_text="Search Change").click()
+
+
+def itsm_logout(
+    page: Page, task:dict, runtime:dict, logs:list, timestamp_fn:Callable|None=_timestamp
+) -> list:
+
+    task_name=task["name"] if task else "Task"
+    page.wait_for_timeout(1000)
+    page.wait_for_load_state("domcontentloaded")
+
+    logout_locator_path = "//div[@class='f9' and text() = 'Logout']"
+    logout_locator = page.locator(logout_locator_path)
+
+    if logout_locator.is_visible():
+        logout_locator.click()
+        page.wait_for_timeout(2000)
+
+    logs.append(
+        f"{task_name}: [{timestamp_fn}]:: Logged out of ITSM"
+    )
+    runtime["status"] = "ITSM Logout"
+
+    return logs
+
+
+def itsm_logger(
+    logs: list, 
+    playwright: Playwright, 
+    headless_arg: bool, 
+    task: dict, 
+    runtime:dict|None=None, 
+    timestamp_fn:Callable|None=None,
+    user_email: str = None
+) -> Tuple[Browser|None, BrowserContext | None, Page | None, list]:
+    
+    # print("inside itsm logger")
+
+    logs.append(f"🔬 [itsm_logger] runtime is None? {runtime is None}")
+    if runtime is not None:
+        logs.append(f"🔬 [itsm_logger] runtime id = {id(runtime)}")
+
+    task_name = task["name"] if task else "Task"
+    try:
+        browser_path = get_browser()
+        browser = playwright.chromium.launch(
+            headless=headless_arg,
+            executable_path=browser_path,
+            args=[
+                    "--disable-blink-features=AutomationControlled",
+                ]
+            )
+        # methods = [m for m in dir(browser) if not m.startswith('_')]
+        # print("\n\n", methods, "\n\n")
+        logs.append("✓ Browser launched successfully")
+        # ✅ Check connection
+        logs.append(f"Browser is connected: {browser.is_connected()}")
+        
+        logs.append("Step 2: Creating context...")
+        context = browser.new_context()
+        logs.append("✓ Context created")
+        
+        logs.append("Step 3: Creating page...")
+        page = context.new_page()
+        logs.append("✓ Page created")
+        # Add close listeners to detect crashes
+        def on_close():
+            logs.append("⚠️ BROWSER CLOSED UNEXPECTEDLY!")
+        
+        browser.on("disconnected", on_close)
+
+        logs.append(f"{task['name']}: opening {str(os.getenv('ITSM_URL'))} ---- {_timestamp()}")
+        page.goto( str(os.getenv("ITSM_URL")), wait_until="load")
+
+        password = login_to_itsm(page, logs, runtime, task, timestamp_fn, user_email)
+        # password = str(os.getenv("PASSWORD"))
+
+        # Ask the user for their password instead of hardcoding it
+        # password = request_password_from_user(runtime, task, logs, timestamp_fn)
+
+        page.wait_for_load_state("load")
+
+        expect(
+            page.get_by_text("Try again after some time or contact your help desk")
+        ).to_be_hidden()
+
+        handle_authenticator(page, password, context, playwright, logs, runtime, task, timestamp_fn)
+
+        # while not page.locator(
+        # '//div/img[@id="reg_img_304316340" and @artxt="Show Application List"]').is_visible():
+        #     page.wait_for_timeout(1000)
+        #     page.wait_for_load_state("domcontentloaded")
+
+        deadline = time.time() + 120  # 2 minutes max
+        while not page.locator(
+            '//div/img[@id="reg_img_304316340" and @artxt="Show Application List"]'
+        ).is_visible():
+            if time.time() > deadline:
+                raise TimeoutError("ITSM did not reach the application list within 120s")
+            # "Stay signed in?" blocks the redirect into ITSM when the login
+            # needed no MFA. It is only dismissed inside the OTP branch of
+            # handle_authenticator, so handle it here as well.
+            try:
+                if page.locator("//*[text()='Stay signed in?']").is_visible():
+                    page.locator('#idSIButton9').click()   # "Yes"
+                    page.wait_for_load_state("load", timeout=60000)
+                    logs.append(
+                        f"{task_name}: dismissed 'Stay signed in?' prompt ---- {timestamp_fn()}"
+                    )
+            except Exception:
+                pass
+            page.wait_for_timeout(1000)
+            page.wait_for_load_state("domcontentloaded")
+
+        navigate_to_change_management(page)
+
+        logs.append(f"{task_name}: logged in successfully ---- {timestamp_fn()}")
+        context.storage_state(path=get_itsm_session_file_path())
+        logs.append("✓ Selected task is in progress please wait...")
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        logs.append(f"Error in itsm_logger: {type(e).__name__}: {str(e)} ---- {timestamp_fn()}")
+
+        # The automation browser is invisible on the server (Xvfb), so capture
+        # the page state for post-mortem debugging before the objects go away.
+        try:
+            shot_dir = Path(str(settings.MEDIA_ROOT)) / "login_screenshots"
+            shot_dir.mkdir(parents=True, exist_ok=True)
+            shot_path = shot_dir / (
+                "itsm_login_failure_"
+                f"{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+            )
+            page.screenshot(path=str(shot_path), full_page=True)
+            logs.append(
+                f"Login-failure screenshot saved: {shot_path} ---- {timestamp_fn()}"
+            )
+        except Exception as shot_err:
+            logs.append(
+                f"Could not save login-failure screenshot: {shot_err} ---- {timestamp_fn()}"
+            )
+
+        # for obj in (page, context, browser):
+        #     if obj:
+        #         try:
+        #             obj.close()
+        #         except Exception:
+        #             pass
+        raise
+
+    return browser, context, page, logs
+
+
+def safe_evaluate(page, script, timeout=5000):
+    try:
+        page.wait_for_load_state("domcontentloaded", timeout=timeout)
+        page.evaluate(script)
+    except TimeoutError:
+        # Page never stabilized
+        pass
+    except Exception:
+        # Execution context was destroyed or page closed
+        pass
+
+
+def new_page_opener(context: BrowserContext, logs: list) -> Tuple[Page|None, List[AnyStr]]:
+    result = None
+    try:
+        page = context.new_page()
+        page.goto(
+            str(os.getenv("LOGGED_ITSM_URL")),
+            wait_until="load",
+        )
+
+        page.wait_for_load_state("domcontentloaded")
+        page.wait_for_load_state("load")
+        page.on("dialog", lambda dialog: dialog.dismiss())
+        # attach_iframe_popup_watcher(page)
+        # page.on(
+        #     "frameattached",
+        #     on_frame_attached,
+        # )
+        # page = context.new_page()
+
+        safe_evaluate(page, settings.BMC_REMEDY_IFRAME_MODAL_WATCHER_JS)
+
+        navigate_to_change_management(page)
+
+        result = page
+    
+    except Exception as e:
+        print(f"✗ Exception in new_page_opener: {type(e).__name__}: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        logs.append(f"{_timestamp()} --- Exception in new_page_opener: {type(e).__name__}: {traceback.format_exc()}\n{str(e)}")
+    
+    return result, logs
+
+
+def fetch_status_for_one_cr(cr: str, page:Page, logs: List[str]) -> Tuple[str, str, List[str]]:
+    """
+    Runs on ONE CR using its OWN page inside the shared authenticated context.
+    Returns (cr, status).
+
+    WARNING: Playwright's sync API is not guaranteed thread-safe. If you hit
+    greenlet / event-loop errors when running this under ThreadPoolExecutor,
+    switch to the sequential loop (set STATUS_BATCH_SIZE = 1) or migrate to the
+    async Playwright API with an asyncio.Semaphore(3).
+    """
+
+    try:
+        page.goto(str(os.getenv("LOGGED_ITSM_URL")), wait_until="load")
+        safe_evaluate(page, settings.BMC_REMEDY_IFRAME_MODAL_WATCHER_JS)
+        navigate_to_change_management(page)
+
+        search_for_cr(page, cr, logs)
+        status, logs = fetch_cr_status(page, cr, logs)
+        return cr, status, logs
+    
+    except Exception as e:
+        logs.append(
+            f"{_timestamp()} -- Error processing CR '{cr}': "
+            f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+        )
+        return cr, "Error", logs
+    
+
+
+
+def fetch_cr_status(page: Page, cr: str, logs: list) -> Tuple[str, List[str]]:
+    """
+    Reads the CR status from an already-open ITSM CR page.
+    Assumes the CR has already been searched/opened (call search_for_cr first).
+    NOTE: Replace STATUS_TEXTAREA_XPATH with the real read-only textarea/field
+    XPath that holds the CR status on the ITSM CR page.
+    """
+    # ── PLACEHOLDER: replace with the actual read-only status field XPath ──
+    STATUS_TEXTAREA_XPATH_1 = "//textarea[@id='arid_WIN_4_303502600']"
+    STATUS_TEXTAREA_XPATH_2 = "//textarea[@id='arid_WIN_3_303502600']"
+    # ──────────────────────────────────────────────────────────────────────
+    status = None
+    try:
+        page.wait_for_load_state("domcontentloaded")
+        page.wait_for_load_state("load")
+
+        wait_var = True
+        while wait_var:
+            if (
+                page.locator(
+                    "//div[@class='PageBody pbChrome']/div[@id='WIN_3_301389923']/div[@class='TableHdr']/table[@class='TableHdr']/tbody/tr/td[@class='TableHdrL']"
+                ).text_content()
+                == "Table has Not been Loaded"
+            ):
+                page.wait_for_timeout(1000)
+            else:
+                wait_var = False
+        
+        # Define a function to wait for an element to become visible
+        # def wait_for_visible_element(xpath):
+        #     locator = page.locator(xpath)
+        #     expect(locator).to_be_visible(timeout=30000)
+        #     return locator
+        
+        # Try both XPath expressions and wait for visibility
+        # try:
+        #     status_locator = wait_for_visible_element(STATUS_TEXTAREA_XPATH_1)
+        # except Exception:
+        #     try:
+        #         status_locator = wait_for_visible_element(STATUS_TEXTAREA_XPATH_2)
+        #     except Exception as e:
+        #         logs.append(f"{_timestamp()} -- Failed to fetch status: {type(e).__name__}: {e}")
+        #         status = "Unknown"
+        #         return status, logs
+        
+        # Scroll down by 200 pixels
+        page.mouse.wheel(0, 2000)   
+
+        status_locator = page.locator(STATUS_TEXTAREA_XPATH_1).or_(page.locator(STATUS_TEXTAREA_XPATH_2))
+        page.wait_for_selector(f"{STATUS_TEXTAREA_XPATH_1} | {STATUS_TEXTAREA_XPATH_2}")
+        while not status_locator.is_visible():
+            page.wait_for_timeout(2000)
+        
+        page.keyboard.press("PageDown")
+        page.keyboard.press("End")
+        
+        # Debugging: Check if the locator is found
+        if status_locator.count() == 0:
+            logs.append(f"{_timestamp()} -- Locator not found for XPath: {STATUS_TEXTAREA_XPATH_1} or {STATUS_TEXTAREA_XPATH_2}")
+            return "Unknown", logs
+        
+        # Debugging: Check the title attribute
+        status_locator.hover()
+        title = None
+        while title is None:
+            page.wait_for_timeout(1000)
+            title = status_locator.get_attribute('title')
+        logs.append(f"{_timestamp()} -- Title attribute: {title}")
+        
+        if title == "Closed":
+            status = "Closed"
+        else:
+            try:
+                # Try to get the text using different methods
+                status = status_locator.first.get_attribute("title").strip()
+                logs.append(f"{_timestamp()} -- Attribute 'title': {status}")
+                
+                if not status:
+                    status = status_locator.first.input_value().strip()
+                    logs.append(f"{_timestamp()} -- Input value: {status}")
+                
+                if not status:
+                    status = status_locator.first.inner_text().strip()
+                    logs.append(f"{_timestamp()} -- Inner text: {status}")
+                
+                if not status:
+                    status = status_locator.first.text_content().strip()
+                    logs.append(f"{_timestamp()} -- Text content: {status}")
+                
+                if not status:
+                    status = "Unknown"
+                
+            except Exception as e:
+                logs.append(f"{_timestamp()} -- Failed to fetch status: {type(e).__name__}: {e}")
+                status = "Unknown"
+        
+        if not status:
+            status = "Unknown"
+        
+        logs.append(f"{_timestamp()} -- Fetched status for CR '{cr}': {status}")
+    except Exception as e:
+        logs.append(
+            f"{_timestamp()} -- Failed to fetch status for CR '{cr}': "
+            f"{type(e).__name__}: {e}"
+        )
+        status = "Error"
+    
+    return status, logs
+
+
+def session_maker(
+    logs: list, 
+    task:dict, 
+    headless_arg: bool=False, 
+    runtime: dict=None, 
+    timestamp_fn:Callable=None, 
+    user_email: str=""
+) -> Tuple[bool, list]:
+    assert runtime is not None, "runtime must be passed through unchanged"
+    print(f"🔎 [session_maker] runtime id = {id(runtime)}")
+    print(f"🔬 [session_maker] runtime is None? {runtime is None}")
+    if runtime is not None:
+        print(f"🔬 [session_maker] runtime id = {id(runtime)}")
+    
+    browser = None
+    main_context = None
+    login_page = None
+    playwright = None
+    session_made = False
+    try:
+        with sync_playwright() as playwright:
+            # print("inside try block session maker")
+            browser, main_context, login_page, logs = itsm_logger(
+                logs, playwright, headless_arg, task, runtime, timestamp_fn, user_email
+            )
+            main_context.storage_state(path=get_itsm_session_file_path())
+            session_made = True
+            # if main_context:
+            #     main_context.close()
+            #     del main_context
+
+            # if browser:
+            #     browser.close()
+            #     del browser
+
+            # if playwright:
+            #     playwright.stop()
+            #     # keyboard.press_and_release("ctrl+c")
+            #     del playwright
+
+    except Exception as e:
+        print(f"✗ Exception in session_maker: {type(e).__name__}: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        logs.append(f"Exception in session_maker: {type(e).__name__}: {str(e)}")
+        session_made = False
+        raise
+
+    finally:
+        for obj in (login_page, main_context, browser):
+            if obj:
+                try:
+                    obj.close()
+                except Exception:
+                    pass
+        if playwright:
+            playwright.stop()
+        # logs.append("✓ Cleanup complete")
+
+    return session_made, logs
+
+
+
+def session_breaker():
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(
+                headless=True, executable_path=get_browser()
+            )
+
+            main_context = browser.new_context(storage_state=get_itsm_session_file_path())
+            login_page = main_context.new_page()
+            login_page.goto(
+                str(os.getenv("LOGGED_ITSM_URL"))
+            )
+
+            if login_page.locator("//div[@class='f9' and text() = 'Logout']").is_visible():
+                login_page.locator("//div[@class='f9' and text() = 'Logout']").click()
+                login_page.wait_for_timeout(2000)
+
+                login_page.close()
+
+            if main_context:
+                main_context.close()
+
+            if playwright:
+                playwright.stop()
+                del playwright
+        
+        if Path(get_itsm_session_file_path()).exists():
+            Path(get_itsm_session_file_path()).unlink()
+    
+    except Exception:
+        pass
+
+
+def exception_returner(
+    playwright: Playwright,
+    context: BrowserContext,
+    browser: Browser,
+    page: Page,
+):
+    if page:
+        page.wait_for_timeout(1000)
+        if page.locator("//div[@class='f9' and text() = 'Logout']").is_visible():
+            page.locator("//div[@class='f9' and text() = 'Logout']").click()
+            page.wait_for_timeout(2000)
+        page.close()
+    
+    if context:
+        context.close()
+    
+    if browser:
+        browser.close()
+
+    return None, None, None
+
+
+def niam_approve_sign_in_handle(
+    page: Page,
+    runtime: dict,
+    task: dict,
+    logs: list,
+    timestamp_fn: Callable,
+) -> list:
+    # The "Approve sign in" page shows a short code in the browser that
+    # the user must match with the number on their phone. Capture it
+    # while the prompt is still visible and keep showing it in the
+    # dashboard notice iframe until the prompt goes away (approved).
+    text_code = None
+    # The number may render a moment after the prompt itself. Both the
+    # classic (idRichContext_DisplaySign) and the passwordless/NGC
+    # (idRemoteNGC_DisplaySign) UIs are supported, and only a numeric
+    # code counts — a fallback link is not a sign-in code.
+    task_name = task["name"] if task else "Task"
+    try:
+        print("Waiting for sign-in code to appear...")
+        code_deadline = time.time() + 10
+        while time.time() < code_deadline:
+            text_code = _niam_sign_in_code(page)
+            if text_code:
+                break
+            page.wait_for_timeout(500)
+    except Exception:
+        text_code = None
+
+    if text_code:
+        show_user_notice(
+            runtime,
+            task,
+            logs,
+            timestamp_fn,
+            str(text_code).strip(),
+        )
+        try:
+            # Wait for the approval to GENUINELY complete. A plain
+            # "text hidden" wait is not reliable: a hidden template
+            # element containing "Approve sign in" satisfied it ~2s
+            # after the prompt appeared, which cleared the notice
+            # before the dashboard poll could ever show it. Instead
+            # wait for a real signal: the page leaves Microsoft's
+            # login domain (redirect to ServiceNow), or the
+            # number-matching code has been gone for a sustained
+            # period (transient re-renders hide it briefly).
+            # Two minutes: the user has to notice the iframe, unlock
+            # their phone and match the number.
+            deadline = time.time() + 120
+            missing_since = None
+            completed = False
+            while time.time() < deadline:
+                try:
+                    url = page.url or ""
+                except Exception:
+                    url = ""
+                if "login.microsoftonline.com" not in url:
+                    completed = True
+                    break
+                if _niam_sign_in_code(page):
+                    missing_since = None
+                else:
+                    if missing_since is None:
+                        missing_since = time.time()
+                    elif time.time() - missing_since > 3:
+                        completed = True
+                        break
+                page.wait_for_timeout(500)
+
+            if completed:
+                logs.append(
+                    f"{task_name}: sign-in approved by user ---- {timestamp_fn()}"
+                )
+            else:
+                logs.append(
+                    f"{task_name}: timed out waiting for sign-in approval "
+                    f"---- {timestamp_fn()}"
+                )
+        except Exception as e:
+            logs.append(
+                f"{task_name}: timed out waiting for sign-in approval: "
+                f"{e} ---- {timestamp_fn()}"
+            )
+        finally:
+            # Prompt is gone, so the code must disappear as well.
+            clear_user_notice(runtime)
+    else:
+        # The user cannot use the Authenticator app. Fall back to the
+        # "Use a verification code" flow and ask for the code through
+        # the dashboard iframe.
+        try:
+            if page.get_by_text(
+                "I can't use my Microsoft Authenticator app right now"
+            ).is_visible():
+                page.get_by_text(
+                    "I can't use my Microsoft Authenticator app right now"
+                ).click()
+
+            page.wait_for_selector("//*[text() = 'Use a verification code']")
+
+            # print(
+            #     "\"Use a verification code\" is visible =>",
+            #     page.locator(
+            #         '//*[@id="idDiv_SAOTCS_Proofs"]/div[2]/div/div/div[2]/div[text()="Use a verification code"]'
+            #     ).is_visible(),
+            # )
+            if page.locator(
+                '//*[@id="idDiv_SAOTCS_Proofs"]/div[2]/div/div/div[2]/div[text()="Use a verification code"]'
+            ).is_visible():
+                page.locator(
+                    '//*[@id="idDiv_SAOTCS_Proofs"]/div[2]/div/div/div[2]/div[text()="Use a verification code"]'
+                ).click()
+
+            # ===== Get the code from the user via iframe form =====
+            code = request_2fa_code_from_user(
+                runtime, task, logs, timestamp_fn
+            )
+
+            # Fill the code into the MS verification input
+            otp_input = page.locator("#idTxtBx_SAOTCC_OTC")
+            otp_input.wait_for(state="visible", timeout=15000)
+            otp_input.fill(code)
+
+            # Click "Verify" / "Sign in"
+            page.locator("#idSubmit_SAOTCC_Continue").click()
+
+            # Handle the "Stay signed in?" prompt that often appears
+            try:    
+                stay_signed_in = page.locator("//*[text()='Stay signed in?']")
+                stay_signed_in.wait_for(state="visible", timeout=15000)
+                page.locator("#idSIButton9").click()  # "Yes" button
+            except Exception:
+                pass
+
+            page.wait_for_load_state("load", timeout=60000)
+            logs.append(
+                f"{task_name}: 2FA code submitted ---- {timestamp_fn()}"
+            )
+            # ======================================================
+        except Exception as e:
+            print(f"OTP handling error: {e}")
+            logs.append(
+                f"{task_name}: OTP handling error: {e} ---- {timestamp_fn()}"
+            )
+            raise
+
+    return logs
+
+
+def handle_niam_login(
+    page: Page,
+    context: BrowserContext,
+    password: str,
+    playwright: Playwright,
+    runtime=None,
+    task=None,
+    logs=None,
+    timestamp_fn=None,
+):
+    """
+    Complete the Microsoft NIAM sign-in (password + MFA) for an automation run.
+
+    ``runtime``, ``task``, ``logs`` and ``timestamp_fn`` are optional so the
+    helper can still be used stand-alone, but the dashboard passes them so the
+    sign-in approval code can be shown to the user in the notice iframe and the
+    progress can be logged.
+    """
+    # password = ""
+    logs = logs if logs is not None else []
+    timestamp_fn = timestamp_fn or _timestamp
+    task_name = task["name"] if task else "Task"
+
+    # Never inherit a stale notice from an earlier login attempt.
+    clear_user_notice(runtime, status=None)
+
+    page.wait_for_load_state("load")
+    page.wait_for_timeout(500)
+
+    # Bounded wait for the password prompt: a wrong user ID can leave the page
+    # on an error message instead of showing the password field. After the user
+    # ID Microsoft shows the method chooser ("Choose a way to sign in"); "Use my
+    # password" there opens the password view. The approve view (with its
+    # number) is handled further down, so its link is never clicked here.
+    deadline = time.time() + 10
+    fallback_attempts = 0
+    while time.time() < deadline:
+        error = _visible_niam_login_error(page)
+        if error:
+            raise NiamAuthenticationError(
+                "NIAM login failed before the password could be entered. "
+                f"Check the NIAM OLM ID saved in NIAM Credentials.\n\n{error}"
+            )
+        if _password_view_visible(page) or _niam_approve_view_visible(page):
+            break
+        if fallback_attempts < 3 and _password_fallback_visible(page):
+            fallback_attempts += 1
+            if _open_password_view(page, logs, task_name, timestamp_fn):
+                break
+        page.wait_for_timeout(500)
+    else:
+        raise NiamAuthenticationError(
+            "Timed out waiting for the NIAM password prompt. "
+            "Check the NIAM OLM ID saved in NIAM Credentials."
+        )
+
+    # The password step is optional in the newer Microsoft (NGC) flow: the
+    # passwordless "Approve sign in request" prompt can appear instead of the
+    # password field. Only fill the password when the field is actually shown;
+    # otherwise fall straight through to the approval handling below.
+    password_field = page.locator('//input[@id="i0118"]')
+    try:
+        password_field.wait_for(state="visible", timeout=5000)
+    except Exception:
+        pass
+
+    if password_field.is_visible():
+        # Enter the password
+        # page.locator('[id="passwordInput"]').fill(self.password)
+        password_field.fill(password, timeout=10000)
+
+        # Clicking on Sign in. The button can detach/hide while the page
+        # re-renders after the password lands (same behaviour as the email
+        # step), so fall back to Enter in the password field.
+        # page.locator('[id="submitButton"]').click()
+        try:
+            page.locator('//input[@id="idSIButton9"]').click(timeout=10000)
+        except Exception:
+            try:
+                password_field.press("Enter")
+            except Exception:
+                pass
+
+        page.wait_for_load_state("load")
+    
+    if approve_prompt := page.get_by_text("Approve sign in request").first:
+        if approve_prompt.is_visible():
+            logs = niam_approve_sign_in_handle(page, runtime, task, logs, timestamp_fn)
+
+    # NOTE: do not block on an MFA wait here. The detection loop below checks
+    # for a rejected password first, so the user gets a clear error instead of
+    # a timeout.
+
+    try:
+        # Detect which MFA view Microsoft is showing by VISIBILITY of each
+        # prompt, not by the first DOM match of a combined locator - these
+        # pages keep hidden template elements for the other methods, and an
+        # exact-text first match can land on one of those. Substring matching
+        # also tolerates wording variants ("Approve sign in" vs
+        # "Approve sign in request").
+        approve_prompt_locator = page.locator(
+            "//*[contains(text(),'Approve sign in')]"
+        )
+        verify_prompt_locator = page.locator(
+            "//*[contains(text(),'Verify your identity')]"
+        )
+        face_prompt_locator = page.locator(
+            "//*[contains(text(),'Face, fingerprint, PIN, or security key')]"
+        )
+
+        deadline = time.time() + 15
+        prompt_kind = ""
+        while time.time() < deadline:
+            # A wrong password returns to the password page with an error
+            # instead of any MFA view - report that instead of timing out.
+            error = _visible_niam_login_error(page)
+            if error:
+                raise NiamAuthenticationError(
+                    "The NIAM password was rejected by Microsoft. Check the NIAM "
+                    f"password saved in NIAM Credentials.\n\n{error}"
+                )
+            try:
+                if approve_prompt_locator.first.is_visible():
+                    prompt_kind = "approve"
+                    break
+                if verify_prompt_locator.first.is_visible():
+                    prompt_kind = "verify"
+                    break
+                if face_prompt_locator.first.is_visible():
+                    prompt_kind = "face"
+                    break
+            except Exception:
+                pass
+            page.wait_for_timeout(500)
+
+        logs.append(
+            f"{task_name}: MFA prompt detected ({prompt_kind or 'none'}) ---- "
+            f"{timestamp_fn()}"
+        )
+
+        # Now check which one it is
+        if prompt_kind == "approve":
+            logs = niam_approve_sign_in_handle(page, runtime, task, logs, timestamp_fn)
+
+        elif prompt_kind == "verify":
+            # print("Line No. 367 - Verifying identity.")
+            while page.get_by_text(
+                "Approve a request on my Microsoft Authenticator app"
+            ).is_visible():
+                page.get_by_text(
+                    "Approve a request on my Microsoft Authenticator app"
+                ).click(button="left")
+                page.wait_for_timeout(1000)
+
+            try:
+                approve_prompt = page.get_by_text("Approve sign in request")
+                while True:
+                    if approve_prompt.is_visible():
+                        break
+                    else:
+
+                        approve_prompt_failed_prompt = page.get_by_text(
+                            "Approve a request on my Microsoft Authenticator app"
+                        )
+                        while not approve_prompt_failed_prompt.is_visible():
+                            approve_prompt_failed_prompt.click(button="left")
+                            page.wait_for_timeout(1000)
+                        approve_prompt.wait_for(state="visible", timeout=10000)
+                # The number-matching code appears once the method is chosen;
+                # surface it in the notice iframe so the user can approve.
+                try:
+                    text_code = ""
+                    code_deadline = time.time() + 10
+                    while time.time() < code_deadline:
+                        text_code = _niam_sign_in_code(page)
+                        if text_code:
+                            break
+                        page.wait_for_timeout(500)
+                    if text_code:
+                        show_user_notice(
+                            runtime, task, logs, timestamp_fn, text_code
+                        )
+                except Exception:
+                    pass
+                # print("Waiting for sign in approval after verification step.")
+                approve_prompt.wait_for(state="hidden", timeout=60000)
+                # Approved (or prompt gone): hide the code again.
+                clear_user_notice(runtime)
+                # print("Sign in approved by user after verification.")
+
+            except Exception as e:
+                # if manager:
+                #     # manager.show_info_signal.emit(
+                #     #     "   Timeout",
+                #     #     "Timed out waiting for sign-in approval after verification. Please try again.",
+                #     #     "error"
+                #     # )
+                #     pass
+
+                # else:
+                #     # from tkinter import messagebox
+                #     # from messages import Messagebox
+                #     # messagebox = Messagebox()
+                #     # messagebox.showerror(
+                #     #     "Timeout",
+                #     #     "Timed out waiting for sign-in approval after verification. Please try again.",
+                #     # )
+                #     pass
+                # context_playwright_deleter(context, playwright)
+                pass
+
+        elif prompt_kind == "face":
+            try:
+                approve_prompt = page.get_by_text(
+                    "Face, fingerprint, PIN, or security key"
+                )
+                while True:
+                    if not approve_prompt.is_visible():
+                        break
+                    else:
+                        approve_prompt.wait_for(state="hidden", timeout=10000)
+            except Exception as e:
+                # if manager:
+                #     # manager.show_info_signal.emit(
+                #     #     "   Timeout",
+                #     #     "Timed out waiting for sign-in approval after verification. Please try again.",
+                #     #     "error"
+                #     # )
+                #     pass
+                # else:
+                #     # from tkinter import messagebox
+                #     # from messages import Messagebox
+                #     # messagebox = Messagebox()
+                #     # messagebox.showerror(
+                #     #     "   Timeout",
+                #     #     "Timed out waiting for sign-in approval after verification. Please try again.",
+                #     # )
+                #     pass
+                # context_playwright_deleter(context, playwright)
+                pass
+
+    except Exception:
+        # If neither prompt appeared after waiting
+        # if manager:
+        #     # manager.show_info_signal.emit(
+        #     #     "  Timeout Error!",
+        #     #     "MFA prompt not detected within the timeout. Assuming no MFA is required or page is different than expected.",
+        #     #     "error"
+        #     # )
+        #     pass
+        # else:
+        #     # from tkinter import messagebox
+        #     # from messages import Messagebox
+        #     # messagebox = Messagebox()
+        #     # messagebox.showerror(
+        #     #     "  Timeout Error!",
+        #     #     "MFA prompt not detected within the timeout. Assuming no MFA is required or page is different than expected.",
+        #     # )
+        #     pass
+        # Check whether Microsoft actually rejected the credentials instead of
+        # silently continuing (MFA timeouts are handled inside the branches).
+        error = _visible_niam_login_error(page)
+        clear_user_notice(runtime, status=None)
+        if error:
+            raise NiamAuthenticationError(
+                "NIAM login was rejected by Microsoft. Check the NIAM user ID "
+                f"and password saved in NIAM Credentials.\n\n{error}"
+            )
+    
+
+def get_niam_password(user_name: str) -> dict:
+    from dashboard.models import UserManagement
+
+    # The dashboard passes the Django username; older callers passed the
+    # employee name. Accept both so the NIAM credentials are found either way.
+    # Always read the master DB: credentials are saved there from the dashboard
+    # and a lagging replica would otherwise look like missing credentials.
+    user = (
+        UserManagement.objects.using("default").filter(username=user_name).first()
+        or UserManagement.objects.using("default")
+        .filter(employee_name=user_name)
+        .first()
+    )
+    if user is None:
+        raise NiamCredentialsError(
+            f"No dashboard user found for '{user_name}'. "
+            "Save your NIAM OLM ID and password in NIAM Credentials."
+        )
+
+    olm_id = (user.niam_olm_id or user.username or "").strip()
+    password = user.niam_password or ""
+    if not olm_id or not password:
+        raise NiamCredentialsError(
+            f"NIAM OLM ID / password are not saved for user '{user.username}'. "
+            "Save them in NIAM Credentials and run the task again."
+        )
+    return {"username": olm_id, "password": password}
+
+def login_to_niam(
+    page: Page,
+    user_name: str,
+    niam_credentials: dict | None = None,
+):
+    # Resolve the credentials before entering the Playwright sync context when
+    # possible: the sync API runs an asyncio loop in this thread, which makes
+    # Django's ORM raise SynchronousOnlyOperation.
+    __niam_data = niam_credentials or get_niam_password(user_name)
+    username = f"{str(__niam_data['username']).strip().upper()}@airtel.com"
+    password = __niam_data['password']
+    
+    # Wait for the Microsoft sign-in page, but do not loop forever if the page
+    # failed to load or already shows an error.
+    deadline = time.time() + 60
+    while time.time() < deadline:
+        page.wait_for_timeout(500)
+        error = _visible_niam_login_error(page)
+        if error:
+            raise NiamAuthenticationError(
+                "Microsoft sign-in failed before the NIAM user ID could be "
+                f"entered: {error}"
+            )
+        try:
+            if page.locator('//div[text()="Sign in"]').is_visible():
+                break
+        except Exception:
+            pass
+    else:
+        raise NiamAuthenticationError(
+            "Timed out waiting for the Microsoft sign-in page. "
+            "Check the NIAM website/network and try again."
+        )
+
+    page.wait_for_timeout(500)
+    page.locator('//input[@id="i0116"]').fill(username)
+
+    # Submitting the email: Microsoft's page re-renders during its own
+    # transition, which can disable/detach the Next button while the click is
+    # waiting on it. Click briefly, then fall back to Enter in the email field,
+    # which submits the form regardless of the button's state.
+    next_button = page.locator('//input[@id="idSIButton9"]')
+    try:
+        next_button.click(timeout=10000)
+    except Exception:
+        try:
+            page.locator('//input[@id="i0116"]').press("Enter")
+        except Exception:
+            pass
+
+    # Microsoft either moves on to the password prompt, the passwordless
+    # (NGC) approve prompt, or its "Use my password" fallback - or rejects the
+    # user ID. Accept all of those outcomes here; the MFA handling after the
+    # password step knows how to continue each of them.
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        error = _visible_niam_login_error(page)
+        if error:
+            raise NiamAuthenticationError(
+                "The NIAM user ID was rejected by Microsoft. Check the NIAM OLM "
+                f"ID saved in NIAM Credentials.\n\n{error}"
+            )
+        if (
+            _password_view_visible(page)
+            or _niam_approve_view_visible(page)
+            or _password_fallback_visible(page)
+        ):
+            break
+        page.wait_for_timeout(500)
+    else:
+        raise NiamAuthenticationError(
+            "The Microsoft sign-in did not advance after submitting the NIAM "
+            "user ID. Check the NIAM OLM ID saved in NIAM Credentials."
+        )
+
+    return password
+
+
+def _save_login_failure_screenshot(page, logs, timestamp_fn, prefix="niam"):
+    """Capture the page state when a login fails.
+
+    The automation browser may be invisible (Xvfb on the server), so the
+    screenshot is often the only way to see which view Microsoft was showing.
+    """
+    try:
+        shot_dir = Path(str(settings.MEDIA_ROOT)) / "login_screenshots"
+        shot_dir.mkdir(parents=True, exist_ok=True)
+        shot_path = shot_dir / (
+            f"{prefix}_login_failure_"
+            f"{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+        )
+        page.screenshot(path=str(shot_path), full_page=True)
+        logs.append(
+            f"Login-failure screenshot saved: {shot_path} ---- "
+            f"{timestamp_fn() if callable(timestamp_fn) else ''}"
+        )
+    except Exception as shot_err:
+        logs.append(
+            f"Could not save login-failure screenshot: {shot_err} ---- "
+            f"{timestamp_fn() if callable(timestamp_fn) else ''}"
+        )
+
+
+def niam_logger(
+    playwright: Playwright,
+    user_name: str,
+    logs: list = None,
+    runtime=None,
+    task=None,
+    timestamp_fn=None,
+    niam_credentials: dict | None = None,
+) -> Tuple[Browser, BrowserContext, Page, list]:
+    logs = logs if logs is not None else []
+    selected_path_for_browser = ""
+
+    selected_path_for_browser = get_browser()
+
+    browser = playwright.chromium.launch(
+        executable_path=selected_path_for_browser, headless=False
+    )
+
+    # context = browser.new_context(viewport={"width": 1920, "height": 1080})
+    context = browser.new_context()
+    page = context.new_page()
+
+    try:
+        # page.goto("https://nextgentm-in.sdt.ericsson.net/arsys", wait_until="load")
+        page.goto(
+            "https://airtel.service-now.com/",
+            wait_until="load",
+        )
+
+        # finding the id 'domain' and 'Employee' in the option value
+        # select_element = page.locator("select#domain")
+        # select_element.select_option("Employee")
+        # page.wait_for_selector("//a[@id='loginBtn']")
+        # page.locator(selector="//a[@id='loginBtn']", has_text="Log On").click()
+
+        password = login_to_niam(page, user_name, niam_credentials)
+
+        page.wait_for_load_state("load")
+
+        # if page.locator("//span[@class='detail-text error' and text()='Try again after some time or contact your help desk']").is_visible():
+        #     # from tkinter import messagebox
+        #     messagebox.showerror("Error", "Please enter the correct password")
+        #     main_func(workbook=workbook)
+
+        expect(
+            page.get_by_text("Try again after some time or contact your help desk")
+        ).to_be_hidden()
+
+        handle_niam_login(
+            page,
+            context,
+            password,
+            playwright,
+            runtime=runtime,
+            task=task,
+            logs=logs,
+            timestamp_fn=timestamp_fn,
+        )
+        
+        page.wait_for_timeout(500)
+        page.wait_for_load_state("networkidle")
+
+        # Bound the wait for the ServiceNow homepage so a login that silently
+        # failed cannot keep this thread (and the task) hanging forever.
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            page.wait_for_timeout(500)
+            page.wait_for_load_state("networkidle")
+            try:
+                if page.locator(
+                    '//div[@class="row text-title" and text()="Stay signed in?"]'
+                ).is_visible(timeout=3000):
+                    page.locator('//input[@id="idBtn_Back"]').click(timeout=5000)
+                    continue
+
+                if page.locator(
+                    '//*[@id="homepage-search"]/div/h2',
+                    has_text="We're Here to Help You.",
+                ).is_visible():
+                    break
+            except Exception:
+                pass
+        else:
+            error = _visible_niam_login_error(page)
+            if error:
+                raise NiamAuthenticationError(
+                    "NIAM login was rejected by Microsoft. Check the NIAM user ID "
+                    f"and password saved in NIAM Credentials.\n\n{error}"
+                )
+            raise NiamAuthenticationError(
+                "NIAM login did not reach the ServiceNow homepage. "
+                "Check the NIAM user ID / password saved in NIAM Credentials "
+                "and try again."
+            )
+
+        page.wait_for_timeout(500)
+        page.wait_for_load_state("networkidle")
+
+        context.storage_state(path=os.getenv("NIAM_SESSION_FILE"))
+
+    except NiamAuthenticationError as e:
+        logs.append(
+            f"   Exception Occurred (NiamAuthenticationError)\n"
+            f"{traceback.format_exc()}\n\n{str(e)}"
+        )
+        clear_user_notice(runtime, status=None)
+        show_user_alert(
+            runtime,
+            task,
+            logs,
+            timestamp_fn,
+            title="NIAM login failed",
+            text=(
+                "Microsoft rejected the NIAM user ID or password.\n\n"
+                "Update the NIAM OLM ID / password in NIAM Credentials and run "
+                f"the task again.\n\nDetails: {e}"
+            ),
+        )
+        _save_login_failure_screenshot(page, logs, timestamp_fn)
+        exception_returner(playwright, context, browser, page)
+        return None, None, None, logs
+
+    except TimeoutError as e:
+        logs.append(
+            f"   Exception Occurred (TimeoutError)\n"
+            f"{traceback.format_exc()}\n\n{str(e)}"
+        )
+        clear_user_notice(runtime, status=None)
+        show_user_alert(
+            runtime,
+            task,
+            logs,
+            timestamp_fn,
+            title="NIAM login timed out",
+            text=(
+                "The NIAM sign-in page did not respond in time. "
+                "Check the NIAM website/network and try again.\n\n"
+                f"Details: {e}"
+            ),
+        )
+        _save_login_failure_screenshot(page, logs, timestamp_fn)
+        exception_returner(playwright, context, browser, page)
+        return None, None, None, logs
+
+    except Exception as e:
+        # from tkinter import messagebox
+
+        if logs:
+            logs.append(
+                f"   Exception Occurred ({e.__class__.__name__})\n"
+                f"{traceback.format_exc()}\n\n{str(e)}"
+            )
+        # else:
+        #     messagebox = Messagebox()
+        #     messagebox.showerror(
+        #         f"   Exception Occurred ({e.__class__.__name__})",
+        #         f"{traceback.format_exc()}\n\n{str(e)}",
+        #     )
+        clear_user_notice(runtime, status=None)
+        if isinstance(e, NiamCredentialsError):
+            alert_title = "NIAM credentials missing"
+            alert_text = str(e)
+        else:
+            alert_title = "NIAM login failed"
+            alert_text = (
+                "Could not log in to NIAM. Check the NIAM OLM ID / password "
+                f"saved in NIAM Credentials.\n\nDetails: {e}"
+            )
+        show_user_alert(
+            runtime, task, logs, timestamp_fn, title=alert_title, text=alert_text
+        )
+        _save_login_failure_screenshot(page, logs, timestamp_fn)
+        exception_returner(playwright, context, browser, page)
+        return None, None, None, logs
+
+    return browser, context, page, logs
+
+
+
+def niam_session_maker(
+    user_name: str,
+    logs: list = None,
+    session_file: str | os.PathLike | None = None,
+    runtime=None,
+    task=None,
+    timestamp_fn=None,
+) -> Tuple[bool, None | os.PathLike, list]:
+    logs = logs if logs is not None else []
+    session_path = session_file or os.getenv("NIAM_SESSION_FILE")
+    if not session_path:
+        logs.append("NIAM session file path is not configured.")
+        return False, None, logs
+
+    # Resolve the NIAM credentials BEFORE entering the Playwright sync context.
+    # Playwright's sync API runs an asyncio loop in this thread, which makes
+    # Django's ORM raise SynchronousOnlyOperation if it is queried inside.
+    try:
+        niam_credentials = get_niam_password(user_name)
+    except Exception as e:
+        logs.append(
+            f"  Could not load NIAM credentials ({e.__class__.__name__})\n"
+            f"{traceback.format_exc()}\n\n{e}"
+        )
+        clear_user_notice(runtime, status=None)
+        if isinstance(e, NiamCredentialsError):
+            alert_title = "NIAM credentials missing"
+            alert_text = str(e)
+        else:
+            alert_title = "NIAM credentials could not be loaded"
+            alert_text = (
+                "Could not read your NIAM OLM ID / password. "
+                "Open NIAM Credentials, save them again and retry.\n\n"
+                f"Details: {e}"
+            )
+        show_user_alert(
+            runtime, task, logs, timestamp_fn, title=alert_title, text=alert_text
+        )
+        return False, None, logs
+
+    try:
+        with sync_playwright() as playwright:
+            browser, main_context, login_page, logs = niam_logger(
+                playwright,
+                user_name=user_name,
+                logs=logs,
+                runtime=runtime,
+                task=task,
+                timestamp_fn=timestamp_fn,
+                niam_credentials=niam_credentials,
+            )
+            if main_context is None:
+                logs.append(
+                    "NIAM login did not create a browser context. "
+                    "See the exception above for the real cause."
+                )
+                clear_user_notice(runtime, status=None)
+                return False, None, logs
+
+            # storage_state(path=...) writes the JSON file and returns the state
+            # dictionary. Return the path, not that dictionary: callers pass the
+            # result to browser.new_context(storage_state=...), which expects a
+            # filename.
+            main_context.storage_state(path=str(session_path))
+            # A retry may have succeeded after an earlier failed attempt: drop
+            # any dialog queued by that attempt so it does not pop up now.
+            clear_user_alert(runtime)
+            if main_context:
+                main_context.close()
+                del main_context
+                
+            if browser:
+                browser.close()
+                del browser
+
+            if playwright:
+                playwright.stop()
+                # keyboard.press_and_release("ctrl+c")
+                del playwright
+
+            return True, session_path, logs
+    
+    except Exception as e:
+        logs.append(
+            f"  Exception Occurred {e.__class__.__name__}\n"
+            f"{traceback.format_exc()}\n\n{e}"
+        )
+        # A failed login must not leave the sign-in notice iframe open.
+        clear_user_notice(runtime, status=None)
+        if runtime is not None and not runtime.get("alert_required"):
+            show_user_alert(
+                runtime,
+                task,
+                logs,
+                timestamp_fn,
+                title="NIAM login failed",
+                text=(
+                    "Could not log in to NIAM. Check the NIAM OLM ID / password "
+                    f"saved in NIAM Credentials.\n\nDetails: {e}"
+                ),
+            )
+        return False, None, logs
+
+
+def niam_session_breaker(
+    session_file: str | os.PathLike | None = None,
+):
+    session_path = session_file or os.getenv("NIAM_SESSION_FILE")
+    if not session_path:
+        return
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            headless=True, executable_path=get_browser()
+        )
+        main_context = browser.new_context(storage_state=str(session_path))
+        login_page = main_context.new_page()
+        login_page.goto(
+            "https://airtel.service-now.com/airtel?id=sc_cat_item&sys_id=01caf3ecdbaac30018af9ea3db9619f0",
+            wait_until="load"
+        )
+        login_page.wait_for_timeout(1000)
+        if login_page.locator(
+            "//div/div/nav/div/ul/li/a[@id='profile-dropdown']"
+        ).is_visible():
+            login_page.locator(
+                "//div/div/nav/div/ul/li/a[@id='profile-dropdown']"
+            ).click()
+            login_page.wait_for_timeout(1000)
+        login_page.close()
+
+        if main_context:
+            main_context.close()
+
+        if playwright:
+            playwright.stop()
+            # keyboard.press_and_release("ctrl+c")
+            del playwright
+
+    session_path_obj = Path(str(session_path))
+    if session_path_obj.exists():
+        session_path_obj.unlink()
+
+
+def niam_new_page_opener(
+    context: BrowserContext,
+    logs: list
+):
+    result = None
+    try:
+        if logs:
+            logs.append("Opening a new page....")
+
+        page = context.new_page()
+        
+        result = page
+
+    except Exception as e:
+        if logs:
+            logs.append(
+                f"  Exception Occurred {e.__class__.__name__}\n"
+                f"{traceback.format_exc()}\n\n{e}"
+            )
+
+    return result, logs
+    
+    
+def send_input_wait_for_result_and_click(page, input_data):
+    page.wait_for_load_state("networkidle")
+    page.wait_for_load_state("domcontentloaded")
+    page.wait_for_load_state("load")
+    # page.wait_for_timeout(500)
+
+    page.wait_for_selector(
+        "//div[contains(@id, 'select2-drop')]//input[contains(@id, 's2id_autogen')]"
+    )
+    if page.locator(
+        "//div[contains(@id, 'select2-drop')]//input[contains(@id, 's2id_autogen')]"
+    ).is_visible():
+        page.locator(
+            "//div[contains(@id, 'select2-drop')]//input[contains(@id, 's2id_autogen')]"
+        ).fill(input_data)
+
+    start = time.time()
+    while True:
+        if page.locator(
+            "//ul[@class='select2-results']/li/div", has_text=input_data
+        ).first.is_visible():
+            page.wait_for_timeout(200)
+            break
+        if time.time() - start > 5:
+            if (
+                page.locator(
+                    "//div[contains(@id, 'select2-drop')]//input[contains(@id, 's2id_autogen')]"
+                ).first.is_visible()
+                and not page.locator(
+                    "//ul[@class='select2-results']/li/div", has_text=input_data
+                ).first.is_visible()
+            ):
+                raise Exception("Time Out")
+    try:
+        # options = page.locator("//ul[@class='select2-results']/li/div")
+        # target_option = options.filter(has_text=re.compile(f"^{re.escape(input_data)}$"))
+        # target_option.first.click()
+        # page.get_by_text(input_data, exact=True).click()
+        page.get_by_role("option", name=input_data, exact=True).click()
+    except Exception:
+        # print(f"Error clicking on input: {e}")
+        try:
+            page.locator(
+            "//ul[@class='select2-results']/li/div", has_text=input_data
+            ).first.click()
+        
+        except Exception as e:
+            raise Exception(
+                "Error clicking on input"
+            )
+    
+
+def niam_locator_finder_and_input_provider(locator_list: List[AnyStr], variable_list: List[AnyStr], page: Page):
+    j = 0
+    while j < len(locator_list):
+        locator = locator_list[j]
+        var = variable_list[j]
+
+        page.wait_for_timeout(800)
+        page.locator(locator).click()
+        page.wait_for_timeout(600)
+        send_input_wait_for_result_and_click(page, var)
+        j += 1
+        
+        
+def wait_for_niam_ne_search_results(page: Page, results_list: Locator, timeout_ms: int = 15000) -> list:
+    deadline = time.monotonic() + (timeout_ms / 1000)
+    while time.monotonic() < deadline:
+        items = results_list.all()
+        if items:
+            first_text = items[0].inner_text().strip()
+            # Skip transient states
+            if first_text and first_text not in ('Searching...', 'Searching…', 'Loading...'):
+                return items
+        page.wait_for_timeout(200)
+    # timeout — return whatever we have (may be empty / still searching)
+    return results_list.all()
+
+
+def search_niam_ne_node(page: Page, search_input: Locator, results_list: Locator, query: str) -> list:
+    search_input.fill(query)
+    return wait_for_niam_ne_search_results(page, results_list)  # ← UNCOMMENT THIS
+
+
+# ✅ SAFE — reads all text in a single JS call, no stale refs
+def get_dropdown_texts(results_list) -> list[str]:
+    try:
+        texts = results_list.evaluate_all(
+            "items => items.map(el => el.innerText.trim()).filter(t => t.length > 0)"
+        )
+        return texts
+    except Exception:
+        return []
+
+
+def niam_tt_raiser(
+    row_dict: Dict[AnyStr, AnyStr],
+    page: Page,
+) -> Tuple[AnyStr, Dict[AnyStr, AnyStr]]:
+    cr = row_dict['SR OR CHANGE NO']
+    node_names = row_dict['NIAM Node Name']
+    
+    result = {}
+    
+    Requested_For_email = row_dict["Requested For(email)"]
+    Request_Type = row_dict["Request Type"]
+
+    Request_For = row_dict["Request For"]
+    Node_Managed_By = row_dict["Node Managed By"]
+    Subtype = row_dict["Subtype"]
+
+    Domain = row_dict["Domain"]
+
+    Access_Type = str(row_dict["Access Type"])
+
+    UID_Type = row_dict["UID Type"]
+
+    Policy_period = row_dict["Policy period"]
+
+    User_Type = row_dict["User Type"]
+
+    Request_IP_10 = row_dict["Request IP>10 ?"]
+
+    SR_CR_Start_Date_Time = str(
+        row_dict["SR_CR_Start Date-Time"]
+    )
+    SR_CR_End_Date_Time = str(row_dict["SR_CR_End Date-Time"])
+
+    # NIAM_Access_Start_Date_Time = str(
+    #     row_dict["NIAM Access Start Date"]
+    # )
+    # NIAM_Access_End_Date_Time = str(
+    #     row_dict["NIAM Access END Date"]
+    # )
+    
+    Business_Justification = row_dict["Business Justification"]
+    NIAM_Activity_Name = row_dict["Activity Name"]
+    NIAM_Project_Name = row_dict["Project Name"]
+    Execution_Location = row_dict["Execution Location"]
+    
+    loop_break = False
+    
+    first_locator_batch = [
+        "//div[@id='s2id_sp_formfield_v_request_type']/a",  # Request Type
+        "//div[@id='s2id_sp_formfield_node_managed_by']/a",  # Node Managed By
+        "//div[@id='s2id_sp_formfield_niam_domain']/a",  # Domain
+    ]
+    
+    second_locator_batch = [
+        "//div[@id='s2id_sp_formfield_access_type']/a",  # Access Type
+        "//div[@id='s2id_sp_formfield_request_ip_more_than']/a",  # Request IP > 10?
+    ]
+    
+    first_locator_batch_variable_list = [
+        Request_Type,
+        Node_Managed_By,
+        Domain,
+    ]
+    
+    third_locator_batch =[
+        "//div[@id='s2id_sp_formfield_v_request_for']/a",  # Request For
+        "//div[@id='s2id_sp_formfield_v_subtype']/a",  # Subtype
+        "//div[@id='s2id_sp_formfield_v_uid_type']/a",  # UID Type
+        "//div[@id='s2id_sp_formfield_execution_location']/a",  # Execution Location
+        "//div[@id='s2id_sp_formfield_policy_period']/a",  # Policy period
+        "//div[@id='s2id_sp_formfield_project_name']/a",  # Project Name
+        "//div[@id='s2id_sp_formfield_user_type']/a",  # User Type
+        "//div[@id='s2id_sp_formfield_activity_name']/a",  # Activity Name
+    ]
+    
+    third_locator_batch_variable_list = [
+        Request_For,
+        Subtype,
+        UID_Type,
+        Execution_Location,
+        Policy_period,
+        NIAM_Project_Name,
+        User_Type,
+        NIAM_Activity_Name,
+    ]
+    
+    # output_dict = {
+    #     "Activity Title": str(row_dict["Activity Title"]),
+    #     "Circle": User_Type,
+    #     "Change Responsible": Requested_For_email,
+    #     "Request For": Request_For,
+    #     "Activity Name": NIAM_Activity_Name,
+    #     "Project Name": NIAM_Project_Name,
+    #     "Execution Location": Execution_Location,
+    #     "Execution Date": str(SR_CR_Start_Date_Time)
+    # }
+    
+    Access_Type_List = [str(element).strip() for element in Access_Type.split('and')]
+    
+    i = 0
+    while i < len(Access_Type_List):
+        try:
+            if not loop_break:
+                # Login to the NIAM TT Page
+                page.goto(
+                    "https://airtel.service-now.com/airtel?id=sc_cat_item&sys_id=01caf3ecdbaac30018af9ea3db9619f0",
+                        wait_until="load",
+                )
+                
+                page.wait_for_load_state("domcontentloaded")
+                page.wait_for_load_state("load")
+                page.on("dialog", lambda dialog: dialog.dismiss())
+                
+                # Request For (Email)
+                page.locator(
+                    "//div[@id='s2id_sp_formfield_requested_for']/a"
+                ).click()
+                
+                page.locator(
+                            "//div[contains(@id, 'select2-drop')]//input[contains(@id, 's2id_autogen')]"
+                        ).fill(Requested_For_email)
+                
+                while (
+                        len(
+                            page.locator("//ul[@class='select2-results']/li/div").all()
+                        )
+                        > 1
+                    ):
+                        page.wait_for_timeout(1000)
+                page.wait_for_timeout(1000)
+
+                page.locator("//ul[@class='select2-results']/li/div").click()
+                
+                # if condition for M2M 4G Network Optimization to add location
+                if (
+                    str(Requested_For_email).strip()
+                    == "M2M 4G Network Optimization"
+                ):
+                    page.locator(
+                        "//div[@id='s2id_sp_formfield_current_location']/a"
+                    ).click()
+
+                    # page.wait_for_timeout(1000)
+                    page.wait_for_timeout(500)
+                    page.locator(
+                        "//div[contains(@id, 'select2-drop')]//input[contains(@id, 's2id_autogen')]"
+                    ).fill("Noida")
+                    page.wait_for_timeout(500)
+
+                    if (
+                        len(
+                            page.locator(
+                                "//ul[@class='select2-results']/li/div"
+                            ).all()
+                        )
+                        > 0
+                    ):
+                        if (
+                            len(
+                                page.locator(
+                                    "//ul[@class='select2-results']/li/div/*[text()='Noida']"
+                                ).all()
+                            )
+                            > 0
+                        ):
+                            for element in page.locator(
+                                "//ul[@class='select2-results']/li/div/*[text()='Noida']"
+                            ).all():
+                                element.click()
+                                break
+                
+                niam_locator_finder_and_input_provider(
+                    first_locator_batch, 
+                    first_locator_batch_variable_list, 
+                    page
+                )
+                
+                niam_locator_finder_and_input_provider(
+                    second_locator_batch, 
+                    [
+                        Access_Type_List[i],
+                        Request_IP_10,
+                    ],
+                    page
+                )
+                
+                node_names_list = [str(element).strip() for element in str(node_names).split('\n')]
+                
+                ne_field_opener = page.locator('//div[@id="select2-drop"]/ul')  # ← adjust if needed
+                search_input = page.locator('//input[@id="s2id_autogen34"]')
+                results_list = page.locator('//ul[@id="s2id_autogen34_results"]/li')
+
+                loop_break = False
+
+                for name in node_names_list:
+                    selected_node = f"*{name}"
+                    clicked_texts = set()
+                    consecutive_failures = 0
+                    MAX_FAILURES = 3
+                    iteration = 0
+                    MAX_ITERATIONS = 50  # hard cap — never loop more than 50 times per node
+
+                    while iteration < MAX_ITERATIONS:
+                        iteration += 1
+                        # print(f"\n--- [{name}] iteration {iteration} ---")
+
+                        # ===== STEP 1: Open the dropdown =====
+                        try:
+                            if not search_input.is_visible(timeout=1000):
+                                ne_field_opener.click()
+                                page.wait_for_timeout(400)
+                        except Exception:
+                            try:
+                                ne_field_opener.click()
+                                page.wait_for_timeout(400)
+                            except Exception as e:
+                                # print(f"[{name}] cannot open dropdown: {e}")
+                                consecutive_failures += 1
+                                if consecutive_failures >= MAX_FAILURES:
+                                    break
+                                continue
+
+                        # ===== STEP 2: Type the search query =====
+                        try:
+                            search_input.fill("")
+                            page.wait_for_timeout(150)
+                            search_input.fill(selected_node)
+                        except Exception as e:
+                            # print(f"[{name}] cannot fill search: {e}")
+                            consecutive_failures += 1
+                            if consecutive_failures >= MAX_FAILURES:
+                                break
+                            continue
+
+                        # ===== STEP 3: Wait for AJAX to settle =====
+                        ajax_done = False
+                        ajax_deadline = time.monotonic() + 10  # 10s max
+                        while time.monotonic() < ajax_deadline:
+                            page.wait_for_timeout(200)
+                            texts = get_dropdown_texts(results_list)
+                            if not texts:
+                                continue
+                            first_text = texts[0]
+                            if first_text and first_text not in ('Searching...', 'Searching…', 'Loading...'):
+                                ajax_done = True
+                                break
+
+                        if not ajax_done:
+                            # print(f"[{name}] AJAX never settled")
+                            consecutive_failures += 1
+                            if consecutive_failures >= MAX_FAILURES:
+                                break
+                            continue
+
+                        # ===== STEP 4: Read all options IN ONE JS CALL =====
+                        all_texts = get_dropdown_texts(results_list)
+                        # print(f"[{name}] options visible: {all_texts}")
+
+                        # ===== STEP 5: Decide what to do =====
+                        # Case A: dropdown shows "No matches found"
+                        if all_texts == ['No matches found']:
+                            if not clicked_texts:
+                                # Never clicked anything → node truly missing
+                                # print(f"[{name}] NOT FOUND in DB")
+                                loop_break = True
+                            # else:
+                            #     # Already clicked some → exhausted matches
+                            #     print(f"[{name}] all {len(clicked_texts)} matches clicked")
+                            break
+
+                        # Case B: find first option not yet clicked
+                        target = None
+                        for t in all_texts:
+                            if t == 'No matches found':
+                                continue
+                            if t not in clicked_texts:
+                                target = t
+                                break
+
+                        if target is None:
+                            # Every visible option already clicked → done
+                            # print(f"[{name}] no new options ({len(clicked_texts)} clicked total)")
+                            break
+
+                        # ===== STEP 6: Click it =====
+                        try:
+                            page.get_by_role('option', name=target, exact=True).click(timeout=5000)
+                            clicked_texts.add(target)
+                            consecutive_failures = 0
+                            page.wait_for_timeout(400)
+                            # print(f"[{name}] ✓ clicked: {target}")
+                        except Exception as e:
+                            # print(f"[{name}] click failed for {target!r}: {e}")
+                            consecutive_failures += 1
+                            if consecutive_failures >= MAX_FAILURES:
+                                break
+
+                    if iteration >= MAX_ITERATIONS:
+                        # print(f"[{name}] hit iteration cap — bailing")
+                        loop_break = True
+
+                    if loop_break:
+                        break
+
+                if loop_break:
+                    raise Exception(f"Node selection failed for: {name}")
+                
+                # === END OF NODE SELECTION LOOP ===
+
+                # 1. Close dropdown
+                try:
+                    search_input.press("Escape")
+                    page.wait_for_timeout(200)
+                except Exception:
+                    # 2. Tab away from the field
+                    try:
+                        search_input.press("Tab")
+                        page.wait_for_timeout(300)
+                    except Exception:
+                        # 3. Click neutral area to fully defocus
+                        try:
+                            page.locator("//body").click(position={"x": 10, "y": 10})
+                            page.wait_for_timeout(300)
+                        except Exception:
+                            pass
+
+                # print("[node select] \u2705 Select2 field released. Proceeding to next field.")
+
+                
+                niam_locator_finder_and_input_provider(
+                    third_locator_batch, 
+                    third_locator_batch_variable_list, 
+                    page
+                )
+                
+                # CR No
+                # page.locator('/html/body/div[1]/section/main/div[1]/div/sp-page-row/div/div/span[1]/div/div/div/div[2]/div/div[3]/sp-cat-item/form/div[1]/div/sp-variable-layout/div[4]/div/div[1]/div[25]/div/span/span/input').fill(cr)
+                page.locator('[id="sp_formfield_sr_or_change_no"]').fill(cr)
+                # page.wait_for_timeout(1000)
+
+                # Start Date-Time
+                page.locator('[id="sp_formfield_sr_cr_start_date"]').fill(
+                    SR_CR_Start_Date_Time
+                )
+                page.keyboard.press("Enter")
+                
+                # End Date-Time
+                page.locator('[id="sp_formfield_sr_cr_end_date"]').fill(
+                    SR_CR_End_Date_Time
+                )
+                
+                # Business Justification
+                page.locator('[id="sp_formfield_v_business_justification"]').fill(
+                    Business_Justification
+                )
+                
+                #########################
+                # Submitting the Ticket #
+                #########################
+                
+                page.wait_for_timeout(1000)
+                page.locator('//*[text()="Submit"]').click()
+                while True:
+                    page.wait_for_timeout(500)
+                    page.wait_for_load_state("networkidle")
+                    try:
+                        if page.locator('//*[text()="Submitted"]').is_visible():
+                            # print("NIAM_Playwright Line 466")
+                            break
+                    except Exception:
+                        pass
+                    
+                page.wait_for_timeout(1000)
+
+                #################
+                # Ticket Status #
+                #################
+                page.goto(
+                    "https://airtel.service-now.com/airtel?id=requests_lists&table=sc_req_item"
+                )
+                page.wait_for_load_state("networkidle")
+                page.wait_for_timeout(500)
+
+                table = page.locator(
+                    '//section/main/div/div/sp-page-row/div/div/div/sp-page-row/div/div/span/div/div/div/div/div/div[2]/table/tbody/tr/td[@role="text"]'
+                ).all()
+                ritm = ""
+                if len(table) > 0:
+                    ritm = table[0].text_content().strip()
+                    # result.append(ritm)
+                    result[Access_Type_List[i]] = ritm
+                # result[Access_Type_List[i]] = "Success"
+            else:
+                result[Access_Type_List[i]] = "Failure"
+                result["Failure Reason"] = f"{str(e).split(':', 1)[-1].strip()} not found"
+                break
+        
+        except Exception as e:
+            result[Access_Type_List[i]] = "Failure"
+            result["Failure Reason"] = f"{str(e).split(':', 1)[-1].strip()} not found"
+        i += 1
+    
+    # return cr,node_names,result, output_dict
+    return cr,  result
+
