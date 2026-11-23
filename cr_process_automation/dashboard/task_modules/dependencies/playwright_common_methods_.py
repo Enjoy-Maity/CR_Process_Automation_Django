@@ -3104,6 +3104,14 @@ def handle_niam_login(
                 pass
 
         page.wait_for_load_state("load")
+
+    if page.get_by_text('Choose a way to sign in').first.is_visible():
+        page.locator(f'//*[contains(text(), "Approve a request")]').first.click()
+
+        page.wait_for_timeout(500)
+        page.wait_for_load_state("load")
+        logs.append(f"{task_name}: Approve a request clicked ---- {timestamp_fn()}")
+        logs = niam_approve_sign_in_handle(page, runtime, task, logs, timestamp_fn)
     
     if approve_prompt := page.get_by_text("Approve sign in request").first:
         if approve_prompt.is_visible():
