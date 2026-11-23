@@ -3054,7 +3054,7 @@ def handle_niam_login(
     # ID Microsoft shows the method chooser ("Choose a way to sign in"); "Use my
     # password" there opens the password view. The approve view (with its
     # number) is handled further down, so its link is never clicked here.
-    deadline = time.time() + 30
+    deadline = time.time() + 10
     fallback_attempts = 0
     while time.time() < deadline:
         error = _visible_niam_login_error(page)
@@ -3130,7 +3130,7 @@ def handle_niam_login(
             "//*[contains(text(),'Face, fingerprint, PIN, or security key')]"
         )
 
-        deadline = time.time() + 15
+        deadline = time.time() + 10
         prompt_kind = ""
         while time.time() < deadline:
             # A wrong password returns to the password page with an error
