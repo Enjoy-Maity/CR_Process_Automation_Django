@@ -29,6 +29,7 @@ from django.http import JsonResponse
 from django.db import transaction
 from django.db.models import Q
 from dashboard.utils.file_locks import file_lock
+from dashboard.utils.niam_paths import niam_template_path_for, niam_user_root
 from dashboard.task_modules.dependencies.excel_modifier import ExcelModifier
 from dashboard.task_modules.dependencies.extra_dependencies import (
     selected_date_df_maker, 
@@ -45,17 +46,16 @@ from dashboard.task_modules.dependencies.extra_dependencies import (
 )
 
 
-# Base location under which generated NIAM workbooks are written
-# (HOST_DOWNLOAD_DIR/NIAM_Excel_files/<date>/RITM Input_...xlsx).
+# Legacy fallback used only when no request user is available (e.g. a direct
+# script call). Web runs replace this with the authenticated user's directory.
 workbook_path = os.path.join(settings.HOST_DOWNLOAD_DIR, "NIAM_Excel_files")
 
 
-def niam_workbook_path_for(date_: datetime) -> Path:
-    """Canonical output path of the RITM workbook for a given date."""
-    return Path(workbook_path).joinpath(
-        date_.strftime("%d_%b_%Y"),
-        f"RITM Input_PS_Core_{date_.strftime('%d_%b_%Y')}.xlsx",
-    )
+def niam_workbook_path_for(date_: datetime, user=None) -> Path:
+    """RITM Input workbook path for one user (falls back to the legacy path)."""
+    if user is not None:
+        return niam_template_path_for(date_, user=user)
+    return niam_template_path_for(date_, base=workbook_path)
 
 
 def get_max_row_in_column(worksheet, column_index: int) -> int:
@@ -1121,13 +1121,21 @@ def run_task(
     user_name=None, 
     regions=None
 ):
-    global glogs
+    global glogs, workbook_path
     if GLOBAL_LOGS is None:
         GLOBAL_LOGS = []
     timestamp_fn = timestamp_fn or _timestamp
 
     runtime["status"] = "Running"
     runtime["download_ready"] = False
+
+    # This module is loaded fresh for every run, so its globals are private to
+    # this user. Point the template writer at their own directory; another
+    # user's Fetch CR run can never overwrite this workbook.
+    request_user = getattr(request, "user", None)
+    workbook_path = str(niam_user_root(request_user) / "templates")
+    night = dp.parse(str(selected_date)) if selected_date else datetime.now()
+    runtime["niam_template_path"] = str(niam_workbook_path_for(night))
 
     # Password fields (new)
     runtime["password_required"] = False

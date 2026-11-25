@@ -20,7 +20,7 @@ from django.db.models import Q
 from django.views.decorators.clickjacking import xframe_options_sameorigin
 
 import dashboard.views
-from dashboard.views import _timestamp, GLOBAL_LOGS, CURRENT_RUNNING_TASK
+from dashboard.views import _timestamp, CURRENT_RUNNING_TASK
 from dashboard.Night_Execution.services import (
     NIGHT_EXECUTION_TASKS,
     build_cr_status_payload_from_itsm,
@@ -257,22 +257,21 @@ def start_night_execution_task(request):
 
 # ── Start a status-fetch job (background thread) ────────────────────────────
 class DualLogList(list):
-    def __init__(self, job_logs, global_logs):
+    """User-scoped live log buffer (no process-wide GLOBAL_LOGS mirroring)."""
+
+    def __init__(self, job_logs):
         super().__init__()
         self.job_logs = job_logs
-        self.global_logs = global_logs
 
     def append(self, item):
         self.job_logs.append(item)
-        self.global_logs.append(item)
-        
+
     def extend(self, items):
         self.job_logs.extend(items)
-        self.global_logs.extend(items)
 
     def __iter__(self):
         return iter(self.job_logs)
-        
+
     def __len__(self):
         return len(self.job_logs)
 
@@ -311,7 +310,7 @@ def fetch_night_cr_status(request):
         dashboard.views.CURRENT_RUNNING_TASK = task["name"]
         payload, logs = build_cr_status_payload_from_itsm(
             cr_numbers=cr_numbers,
-            logs=DualLogList(job["logs"], GLOBAL_LOGS),          # dual list -> live log updates
+            logs=DualLogList(job["logs"]),          # live log updates, user-scoped
             task=task,
             runtime=job["runtime"],    # SAME dict polled by dashboard.js
             headless_arg=False,        # OTP/password iframes need a visible browser

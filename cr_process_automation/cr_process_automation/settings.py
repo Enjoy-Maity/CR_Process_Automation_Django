@@ -31,6 +31,17 @@ def env_list(name, default=''):
 SECRET_KEY = os.getenv('DJANGO_SECRET_KEY', 'django-insecure-change-me')
 DEBUG = env_bool('DJANGO_DEBUG', 'True')
 
+# Read the path from the environment, fallback to a local 'downloads' folder
+HOST_DOWNLOAD_DIR = os.environ.get(
+    'DJANGO_DOWNLOAD_DIR', 
+    os.path.join(
+        os.path.abspath(os.sep) if sys.platform=='win32' else os.path.expanduser('~'),
+        "Automation", 
+        "PS_Core_Automation", 
+        "Task_Wise_Automation"
+    )
+)
+
 # Hosts allowed to reach the app. Defaults to '*' so a client can connect using
 # the server's IP/hostname out of the box; set DJANGO_ALLOWED_HOSTS (comma or
 # space separated, e.g. "10.0.0.5,cr-app.internal,localhost") to restrict it.
@@ -53,6 +64,19 @@ if env_bool('DJANGO_SECURE_COOKIES', 'False'):
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True
 
+# Login sessions are stored in the DB so they survive a Waitress restart.
+SESSION_ENGINE = 'django.contrib.sessions.backends.db'
+
+# Idle timeout. SESSION_COOKIE_AGE alone is an absolute lifetime; the
+# SessionIdleTimeoutMiddleware below refreshes it on real user activity only,
+# which turns it into an inactivity timeout. Dashboard polling is excluded.
+SESSION_COOKIE_AGE = int(os.getenv('USER_IDLE_TIMEOUT_SECONDS', '1800'))
+SESSION_SAVE_EVERY_REQUEST = True
+SESSION_EXPIRE_AT_BROWSER_CLOSE = True
+SESSION_COOKIE_HTTPONLY = True
+SESSION_COOKIE_SAMESITE = 'Lax'
+USER_IDLE_TIMEOUT_SECONDS = SESSION_COOKIE_AGE
+
 INSTALLED_APPS = [
     'django.contrib.admin',
     'django.contrib.auth',
@@ -70,6 +94,7 @@ MIDDLEWARE = [
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
+    'dashboard.middleware.SessionIdleTimeoutMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     'dashboard.middleware.CustomExceptionMiddleware',
@@ -142,7 +167,8 @@ DATABASES = {
 DATABASE_ROUTERS = ['cr_process_automation.routers.CoWRouter',]
 
 # BASE_DIR = Path(__file__).resolve().parent.parent
-LOGS_DIR = BASE_DIR / 'logs'
+# LOGS_DIR = BASE_DIR / 'logs'
+LOGS_DIR = Path(HOST_DOWNLOAD_DIR) / 'logs'
 LOGS_DIR.mkdir(exist_ok=True)  # Create if it doesn't exist
 
 LOGGING = {
@@ -214,7 +240,8 @@ STATICFILES_DIRS = []
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 
 MEDIA_URL = '/media/'
-MEDIA_ROOT = BASE_DIR / 'media'
+# MEDIA_ROOT = BASE_DIR / 'media'
+MEDIA_ROOT = Path(HOST_DOWNLOAD_DIR) / 'media'
 
 # Static files are served by WhiteNoise (when installed) so the deployment does
 # not require nginx/Apache just to deliver CSS/JS. With a reverse proxy in front
@@ -263,16 +290,7 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 X_FRAME_OPTIONS = 'SAMEORIGIN'
 
-# Read the path from the environment, fallback to a local 'downloads' folder
-HOST_DOWNLOAD_DIR = os.environ.get(
-    'DJANGO_DOWNLOAD_DIR', 
-    os.path.join(
-        os.path.abspath(os.sep) if sys.platform=='win32' else os.path.expanduser('~'),
-        "Automation", 
-        "PS_Core_Automation", 
-        "Task_Wise_Automation"
-    )
-)
+
 
 CR_WISE_STATUS_FIELDS = [
     "id", "sno", "execution_date", "cr_no", "activity_description", "region", "circle",

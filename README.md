@@ -53,6 +53,7 @@ the process environment. Common variables:
 | `DJANGO_CSRF_TRUSTED_ORIGINS` | *(empty)* | e.g. `https://cr-app.internal` when behind TLS |
 | `DJANGO_BEHIND_PROXY` | `False` | trust `X-Forwarded-Proto`/`X-Forwarded-Host` from nginx |
 | `DJANGO_SECURE_COOKIES` | `False` | mark session/CSRF cookies `Secure` (HTTPS only) |
+| `USER_IDLE_TIMEOUT_SECONDS` | `1800` (30 min) | logout after this period of real inactivity; polling does not extend it |
 | `DJANGO_DOWNLOAD_DIR` | `~/Automation/PS_Core_Automation/Task_Wise_Automation` | root folder for generated task output files |
 | `DB_*` / master-replica settings | local docker | PostgreSQL connection settings |
 
@@ -87,6 +88,38 @@ Otherwise point the `DB_*` settings at your own PostgreSQL instance, then:
 python manage.py migrate
 python manage.py loaddata cr_process_automation/sync_data.json
 ```
+
+## Login sessions and result isolation
+
+Sessions are stored in the database and expire after `USER_IDLE_TIMEOUT_SECONDS`
+of real inactivity. Browser polling endpoints do not reset the idle clock, so an
+open tab cannot keep a session alive forever. Log out (or idle expiry) clears
+the user's in-memory run state immediately.
+
+Every task start creates a `TaskRun` owned by `request.user` and the current
+`session_key`. Logs are written as `TaskLog` rows against that run, and the UI
+only reads logs through that owner/session filter. Generated files are copied
+into a private `MEDIA_ROOT/task_runs/<run_key>/` folder and downloads are
+served only after the same ownership check; path traversal outside that folder
+is rejected.
+
+`raw_report_file` and `planning_sheet` remain **shared** inputs (guarded by the
+existing file locks in the task modules). Only logs and generated results are
+user/session-scoped.
+
+NIAM workbooks are written under `MEDIA_ROOT/niam/user_<id>_<username>/`:
+`templates/<night>/RITM Input_...xlsx` for template generation (task 8) and
+`outputs/<night>/RITM Output_...xlsx` for the ticket result (task 9). The
+"Save Changes" action writes to the current user's template workbook, so users
+can no longer overwrite each other's NIAM files.
+
+Apply the schema change with:
+
+```bash
+python manage.py migrate dashboard
+```
+
+Then restart the WSGI server — Waitress/Gunicorn do not auto-reload code.
 
 ## Production behind nginx
 

@@ -16,6 +16,7 @@ from playwright.sync_api import sync_playwright
 
 import dashboard.task_modules.dependencies.batch_methods as cbm
 from dashboard.models import NIAMTicketGenerationTable
+from dashboard.utils.niam_paths import niam_output_path_for, niam_user_root
 from dashboard.task_modules.dependencies import playwright_common_methods_ as pcm
 from dashboard.task_modules.dependencies.extra_dependencies import (
     NIAM_COLUMN_TO_FIELD_MAPPING,
@@ -49,13 +50,11 @@ def get_niam_workbook_path_for(date_: datetime) -> Path:
     )
 
 
-def get_niam_output_path_for(date_: datetime) -> Path:
-    """Result workbook holding the NIAM ticket statuses / failure reasons."""
-    global workbook_path
-    return Path(workbook_path).joinpath(
-        date_.strftime("%d_%b_%Y"),
-        f"RITM Output_PS_Core_{date_.strftime('%d_%b_%Y')}.xlsx",
-    )
+def get_niam_output_path_for(date_: datetime, user=None) -> Path:
+    """Result workbook for one user (falls back to the run's base directory)."""
+    if user is not None:
+        return niam_output_path_for(date_, user=user)
+    return niam_output_path_for(date_, base=workbook_path or None)
 
 
 def thread_task(
@@ -1036,8 +1035,14 @@ def run_task(
     queue_ = Queue()
     glogs = Queue()
     sr_or_change_index = 0
-    workbook_path = os.path.join(settings.HOST_DOWNLOAD_DIR, "NIAM_Excel_files")
+
+    # This module is loaded fresh for every run, so its globals are private to
+    # this user. Keep the result workbook under their own directory and never
+    # under the shared HOST_DOWNLOAD_DIR tree.
+    request_user = getattr(request, "user", None)
+    workbook_path = str(niam_user_root(request_user) / "outputs")
     night = _parse_selected_date(selected_date)
+    runtime["niam_output_path"] = str(get_niam_output_path_for(night))
 
     # Each run gets its own NIAM browser session storage file so concurrent
     # users never overwrite each other's cookies.

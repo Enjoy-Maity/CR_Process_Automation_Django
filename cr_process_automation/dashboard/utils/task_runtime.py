@@ -15,12 +15,15 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import os
 import threading
 import sys
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from dateutil import parser as date_parser
 from django.conf import settings
 
 # Tasks that authenticate against ITSM (password + OTP iframes).
@@ -106,6 +109,12 @@ class _RuntimeRegistry:
         with self._lock:
             self._contexts.pop((user_id, task_id), None)
 
+    def clear_all_for_user(self, user_id: Any) -> None:
+        """Drop every live run context owned by a user (logout / idle expiry)."""
+        with self._lock:
+            for key in [k for k in self._contexts if k[0] == user_id]:
+                self._contexts.pop(key, None)
+
 
 def load_fresh_module(module_path: str):
     """
@@ -145,6 +154,47 @@ def run_output_dir(run_key: str) -> Path:
     root = Path(settings.MEDIA_ROOT) / "task_runs" / run_key
     root.mkdir(parents=True, exist_ok=True)
     return root
+
+
+def _as_datetime(selected_date: Any) -> datetime:
+    if selected_date is None or selected_date == "":
+        return datetime.now()
+    if hasattr(selected_date, "strftime"):
+        return selected_date
+    return date_parser.parse(str(selected_date))
+
+
+def shared_input_paths(selected_date: Any = None) -> Dict[str, str]:
+    """
+    Canonical paths of the two deliberately shared input files.
+
+    These files stay shared between users (protected by the file locks inside
+    the task modules). Only the *results* copied into a run's private directory
+    are user-specific.
+    """
+    parsed = _as_datetime(selected_date)
+    folder_date = parsed.strftime("%d-%b-%y")
+
+    raw_folder_template = os.getenv("RAW_REPORT_DOWNLOAD_FOLDER", "")
+    raw_report_file = ""
+    if raw_folder_template:
+        raw_report_file = os.path.join(
+            raw_folder_template.format(folder_date),
+            f"PS_Core_Raw_Report_{parsed.strftime('%Y-%m-%d')}.csv",
+        )
+
+    planning_folder_template = os.getenv("PLANNING_SHEET_DOWNLOAD_FOLDER", "")
+    planning_sheet = ""
+    if planning_folder_template:
+        planning_sheet = os.path.join(
+            planning_folder_template.format(folder_date),
+            os.getenv("PLANNING_SHEET_WORKBOOK_NAME", "Standard_Planning_Sheet.xlsx"),
+        )
+
+    return {
+        "raw_report_file": raw_report_file,
+        "planning_sheet": planning_sheet,
+    }
 
 
 def isolate_output(runtime: Dict[str, Any], source) -> Optional[str]:

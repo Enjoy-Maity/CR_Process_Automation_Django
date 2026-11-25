@@ -126,6 +126,7 @@ class TaskRun(models.Model):
     uploaded_template = models.FileField(upload_to='task_templates/', null=True, blank=True)
     output_file = models.FileField(upload_to='task_outputs/', null=True, blank=True)
     run_key = models.CharField(max_length=64, blank=True, default='', db_index=True)
+    session_key = models.CharField(max_length=40, blank=True, default='', db_index=True)
     message = models.TextField(blank=True, default='')
     started_at = models.DateTimeField(auto_now_add=True)
     completed_at = models.DateTimeField(null=True, blank=True)

@@ -31,10 +31,12 @@ from .models import (
     UserManagement,
     RegionLock,
     TaskRun,
+    TaskLog,
     AutomationTask,
 )
 from .utils import task_runtime
 from .utils.task_runtime import RUN_REGISTRY
+from .utils.niam_paths import niam_output_path_for, niam_template_path_for
 from .exceptions import (
     ValidationException,
     NotFoundException,
@@ -210,6 +212,7 @@ def logout_view(request):
     """Handle user logout and release any region locks they hold."""
     user = request.user.username if request.user.is_authenticated else "Unknown"
     if request.user.is_authenticated:
+        RUN_REGISTRY.clear_all_for_user(request.user.id)
         try:
             RegionLock.objects.using("default").filter(locked_by=request.user).delete()
         except Exception:
@@ -245,6 +248,67 @@ def _database_root():
 def _timestamp():
     """Get current timestamp."""
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _persist_user_log(runtime, message):
+    """Persist one log line against the owning user's TaskRun."""
+    run_id = runtime.get("task_run_id")
+    if not run_id:
+        return
+    try:
+        TaskLog.objects.using("default").create(
+            run_id=run_id,
+            level="INFO",
+            message=str(message),
+        )
+    except Exception:
+        logger.exception("Failed to persist user task log for run %s", run_id)
+
+
+class UserLogList(list):
+    """
+    Live log buffer for one run. Every append (including appends made inside
+    task modules, which receive this object as their ``GLOBAL_LOGS`` argument)
+    is persisted against the authenticated user's TaskRun.
+    """
+
+    def __init__(self, runtime, initial=()):
+        super().__init__(initial)
+        self._runtime = runtime
+
+    def append(self, item):
+        super().append(item)
+        _persist_user_log(self._runtime, item)
+
+    def extend(self, items):
+        for item in items:
+            self.append(item)
+
+    def __iadd__(self, other):
+        self.extend(other)
+        return self
+
+    def __add__(self, other):
+        result = UserLogList(self._runtime, list(self))
+        result.extend(other)
+        return result
+
+
+def log_user(runtime, message):
+    """
+    Append a message to the requesting user's live log buffer. It is persisted
+    automatically by UserLogList; nothing touches the process-wide GLOBAL_LOGS,
+    so one user's messages can never surface in another user's session.
+    """
+    logs = runtime.get("logs")
+    if not isinstance(logs, UserLogList):
+        # Older/iframe callers may still hold a plain list; wrap it so future
+        # appends persist too, and persist the existing messages once.
+        logs = UserLogList(runtime, logs or [])
+        runtime["logs"] = logs
+        for existing in list(logs):
+            _persist_user_log(runtime, existing)
+    logs.append(message)
 
 
 def _count_rows_in_sqlite(db_path):
@@ -321,16 +385,29 @@ def _build_tasks_for_ui(user_id=None, include_niam=False):
     ]
 
 
-def _user_logs(user_id, limit=20):
-    """Return the requesting user's own recent logs (falls back to global)."""
-    entries = []
-    if user_id is not None:
-        for ctx in RUN_REGISTRY.all_for_user(user_id).values():
-            for entry in ctx.get("logs", []) or []:
-                entries.append(entry)
-    if not entries:
-        entries = list(GLOBAL_LOGS)
-    return entries[-limit:]
+def _user_logs(request, limit=20):
+    """
+    Return only the requesting user's logs for the current login session.
+
+    TaskRun/triggered_by + session_key are the source of truth, so the result
+    cannot leak across users even if the process restarts or is restarted with
+    more than one worker.
+    """
+    if not request.user.is_authenticated:
+        return []
+
+    qs = (
+        TaskLog.objects.using("default")
+        .filter(
+            run__triggered_by=request.user,
+            run__session_key=request.session.session_key or "",
+        )
+        .order_by("-created_at")[:limit]
+    )
+    return [
+        f"{entry.message} ---- {entry.created_at:%Y-%m-%d %H:%M:%S}"
+        for entry in reversed(list(qs))
+    ]
 
 
 def _split_log(entry):
@@ -348,13 +425,13 @@ def _common_context(request):
         user_role = getattr(request.user, 'role', 'User')
         user_id = request.user.id
         running_task = _current_running_task_for(user_id)
-        task_logs = _user_logs(user_id)
+        task_logs = _user_logs(request)
     else:
         user_name = "Guest"
         user_role = "Standard User"
         user_id = None
-        running_task = CURRENT_RUNNING_TASK
-        task_logs = list(GLOBAL_LOGS)
+        running_task = "No task is running currently."
+        task_logs = []
 
     return {
         "page_title": "CR Process Automation",
@@ -769,21 +846,61 @@ def start_task(request, task_id):
     runtime["_timing_start"] = time.monotonic()
     runtime["requires_auth"] = _requires_auth(task_id)
     runtime["run_dir"] = str(task_runtime.run_output_dir(runtime["run_key"]))
-    runtime["logs"] = [f"{task['name']}: task started ---- {_timestamp()}"]
+    runtime["logs"] = []
     runtime["username"] = request.user.username
 
+    # raw_report_file and planning_sheet are deliberately shared between users.
+    # Their canonical paths are recorded on the run for traceability; only the
+    # results copied into run_dir are private.
+    runtime["shared_inputs"] = task_runtime.shared_input_paths(selected_date)
+    runtime["raw_report_file"] = runtime["shared_inputs"]["raw_report_file"]
+    runtime["planning_sheet"] = runtime["shared_inputs"]["planning_sheet"]
+
+    # NIAM template/output workbooks are user-owned (unlike the two shared
+    # source files above). Record their private locations on the run.
+    niam_night = (
+        datetime.strptime(selected_date, "%Y-%m-%d")
+        if selected_date
+        else datetime.now()
+    )
+    runtime["niam_template_path"] = str(
+        niam_template_path_for(niam_night, request.user)
+    )
+    runtime["niam_output_path"] = str(
+        niam_output_path_for(niam_night, request.user)
+    )
+
+    # Persist ownership so downloads and logs stay scoped to this user + login.
+    # Tasks 7-9 (NIAM) are synthetic UI entries and may not have a DB row yet.
+    task_row, _ = AutomationTask.objects.using("default").get_or_create(
+        sequence_no=task_id,
+        defaults={
+            "name": task["name"],
+            "download_required": bool(task.get("download_required", False)),
+        },
+    )
+    run_row = TaskRun.objects.using("default").create(
+        task=task_row,
+        triggered_by=request.user,
+        session_key=request.session.session_key or "",
+        run_key=runtime["run_key"],
+        status="Running",
+    )
+    runtime["task_run_id"] = run_row.id
+
     CURRENT_RUNNING_TASK = task["name"]
-    GLOBAL_LOGS.append(f"{task['name']}: task started by {request.user.username} ---- {_timestamp()}")
+    log_user(runtime, f"{task['name']}: task started by {request.user.username} ---- {_timestamp()}")
 
     def _runner():
         """Run the task in a background thread with isolated module globals."""
         global CURRENT_RUNNING_TASK
         task_module = None
         thread_started = time.monotonic()
-        runtime["logs"].append(
+        log_user(
+            runtime,
             f"{task['name']}: task thread started "
             f"(+{thread_started - runtime.get('_timing_start', thread_started):.2f}s) "
-            f"---- {_timestamp()}"
+            f"---- {_timestamp()}",
         )
         try:
             task_module = task_runtime.load_fresh_module(task_module_path)
@@ -825,17 +942,34 @@ def start_task(request, task_id):
                 runtime.update(result["counts"])
 
             message = result.get("message", f"{task['name']} completed successfully.")
-            runtime["logs"].append(f"{task['name']}: {message} ---- {_timestamp()}")
+            log_user(runtime, f"{task['name']}: {message} ---- {_timestamp()}")
             logger.info(f"Task {task_id} completed for user {user_id}: {message}")
 
         except Exception as exc:
             runtime["status"] = "Failed"
             msg = f"{task['name']} failed: {str(exc)}"
-            runtime["logs"].append(f"{msg} ---- {_timestamp()}")
-            runtime["logs"].append(traceback.format_exc())
+            log_user(runtime, f"{msg} ---- {_timestamp()}")
+            log_user(runtime, traceback.format_exc())
             logger.error(f"Task {task_id} failed for user {user_id}: {str(exc)}", exc_info=True)
 
         finally:
+            # Persist final state against the authenticated owner's TaskRun.
+            try:
+                run_row.status = (
+                    "Successful" if runtime["status"] == "Completed" else "Unsuccessful"
+                )
+                download_name = runtime.get("download_name") or ""
+                run_row.output_file = Path(download_name).name if download_name else ""
+                run_row.message = runtime.get("status", "")
+                run_row.completed_at = timezone.now()
+                run_row.save(
+                    update_fields=["status", "output_file", "message", "completed_at"]
+                )
+            except Exception:
+                logger.exception("Failed to finalise TaskRun %s", run_row.id)
+            finally:
+                connection.close()
+
             # Safety: clear authentication flags and any read-only notice.
             runtime["otp_required"] = False
             runtime["password_required"] = False
@@ -906,7 +1040,7 @@ def submit_otp(request, task_id):
     if otp_event:
         otp_event.set()
     
-    runtime.setdefault("logs", []).append(f"{task['name']}: OTP received from user ---- {_timestamp()}")
+    log_user(runtime, f"{task['name']}: OTP received from user ---- {_timestamp()}")
     logger.info(f"OTP received for task {task_id}")
 
     return JsonResponse({
@@ -955,7 +1089,7 @@ def submit_password(request, task_id):
     if pwd_event:
         pwd_event.set()
 
-    runtime.setdefault("logs", []).append(f"{task['name']}: Password received from user ---- {_timestamp()}")
+    log_user(runtime, f"{task['name']}: Password received from user ---- {_timestamp()}")
     logger.info(f"Password received for task {task_id}")
 
     return JsonResponse({
@@ -1001,7 +1135,7 @@ def task_dashboard_data(request):
 
     return JsonResponse({
         "running_task": _current_running_task_for(request.user.id),
-        "logs": [_split_log(x) for x in _user_logs(request.user.id)],
+        "logs": [_split_log(x) for x in _user_logs(request)],
         "tasks": tasks,
         "user_name": request.user.get_full_name() or request.user.username,
         "user_role": getattr(request.user, "role", ""),
@@ -1024,8 +1158,26 @@ def download_task_output(request, task_id):
         raise NotFoundException(f"Task with ID {task_id} not found.")
 
     runtime = RUN_REGISTRY.peek(request.user.id, task_id)
-    file_path = runtime.get("download_name") if runtime else None
+    if not runtime:
+        raise NotFoundException(
+            "No active run found for this task. Please start the task again.",
+            title="No Active Run"
+        )
 
+    # The DB row is the authority: the file must belong to this user's current
+    # login session, not merely to a task id.
+    owned = TaskRun.objects.using("default").filter(
+        triggered_by=request.user,
+        session_key=request.session.session_key or "",
+        run_key=runtime["run_key"],
+    ).exists()
+    if not owned:
+        raise NotFoundException(
+            "You do not have access to this file.",
+            title="Access Denied"
+        )
+
+    file_path = runtime.get("download_name")
     if not file_path or not runtime.get("download_ready"):
         raise NotFoundException(
             "No file is available for download yet.",
@@ -1038,6 +1190,15 @@ def download_task_output(request, task_id):
             "The requested file could not be found on the server.",
             title="File Not Found"
         )
+
+    # Reject any path outside this run's private directory.
+    allowed_root = Path(settings.MEDIA_ROOT) / "task_runs" / runtime["run_key"]
+    try:
+        inside_run_dir = allowed_root.resolve() in path_obj.resolve().parents
+    except OSError:
+        inside_run_dir = False
+    if not inside_run_dir:
+        raise NotFoundException("Invalid download path.", title="Access Denied")
 
     logger.info(f"Downloading task {task_id} output for user {request.user.username}: {path_obj.name}")
 
@@ -1169,7 +1330,7 @@ def playwright_auth_iframe(request):
                     otp_event.set()
                     logger.info(f"OTP event set for task {task_id}")
 
-                runtime.setdefault("logs", []).append(f"Task ID {task_id}: OTP received via Iframe ---- {_timestamp()}")
+                log_user(runtime, f"Task ID {task_id}: OTP received via Iframe ---- {_timestamp()}")
 
                 return render(request, 'dashboard/iframe_success.html')
 
@@ -1218,7 +1379,7 @@ def playwright_password_iframe(request):
                     pwd_event.set()
                     logger.info(f"Password event set for task {task_id}")
 
-                runtime.setdefault("logs", []).append(f"Task ID {task_id}: Password received via Iframe ---- {_timestamp()}")
+                log_user(runtime, f"Task ID {task_id}: Password received via Iframe ---- {_timestamp()}")
 
                 return render(request, 'dashboard/iframe_success.html')
 
@@ -4115,14 +4276,12 @@ def save_niam_template_changes(request):
         }
     )
     if workbook_exec_dates:
-        from dashboard.task_modules.niam_ticket_generation.tasks import (
-            niam_workbook_path_for,
-        )
-
         try:
             for exec_date in workbook_exec_dates:
-                workbook_path = niam_workbook_path_for(
-                    datetime.combine(exec_date - timedelta(days=1), datetime.min.time())
+                # Write to this user's template workbook, not a shared path.
+                workbook_path = niam_template_path_for(
+                    datetime.combine(exec_date - timedelta(days=1), datetime.min.time()),
+                    request.user,
                 )
                 count, warn = _write_niam_edits_to_workbook(
                     workbook_path, updates_by_key
