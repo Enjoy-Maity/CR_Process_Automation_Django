@@ -12,6 +12,7 @@ class TwoFactorAuthForm(forms.Form):
         label="2FA Code"
     )
     task_id = forms.CharField(widget=forms.HiddenInput(), required=True)
+    run_key = forms.CharField(widget=forms.HiddenInput(), required=True)
 
 
 class PasswordAuthForm(forms.Form):
@@ -26,6 +27,7 @@ class PasswordAuthForm(forms.Form):
         label="Password"
     )
     task_id = forms.CharField(widget=forms.HiddenInput(), required=True)
+    run_key = forms.CharField(widget=forms.HiddenInput(), required=True)
 
 
 class LoginForm(forms.Form):

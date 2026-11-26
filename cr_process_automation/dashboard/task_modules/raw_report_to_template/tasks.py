@@ -3,7 +3,6 @@ import uuid
 import platform
 import ctypes
 import traceback
-import threading
 import numpy as np
 import charset_normalizer as cn
 import pandas as pd
@@ -500,15 +499,12 @@ def run_task(
     runtime["status"] = "Running"
     runtime["download_ready"] = False
     
-    # Password fields (new)
+    # Auth events are created once in make_runtime(); recreating them here
+    # would make a submission set an event the waiting thread no longer holds.
     runtime["password_required"] = False
     runtime["password"] = None
-    runtime["pwd_event"] = threading.Event()
-
-    # OTP fields (existing)
     runtime["otp_required"] = False
     runtime["otp"] = None
-    runtime["otp_event"] = threading.Event()
 
     playwright = None
     browser=None

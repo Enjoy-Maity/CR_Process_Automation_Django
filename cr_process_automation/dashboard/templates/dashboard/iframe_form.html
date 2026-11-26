@@ -117,12 +117,13 @@
                         {% if form.fields.password %}Password{% else %}OTP Code{% endif %}
                     </label>
                     {% for field in form %}
-                        {% if field.name != 'job_id' and field.name != 'task_id' %}
+                        {% if field.name != 'job_id' and field.name != 'task_id' and field.name != 'run_key' %}
                             {{ field }}
                         {% endif %}
                     {% endfor %}
                     {% if form.job_id %}{{ form.job_id }}{% endif %}
                     {% if form.task_id %}{{ form.task_id }}{% endif %}
+                    {% if form.run_key %}{{ form.run_key }}{% endif %}
                 </div>
                 <button type="submit" class="btn">
                     {% if form.fields.password %}Submit Password{% else %}Submit OTP{% endif %}

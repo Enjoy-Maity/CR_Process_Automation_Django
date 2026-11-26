@@ -50,7 +50,7 @@ queue_ = None
 
 
 # ── ITSM Thread Task ────────────────────────────────────────────────────────────
-def itsm_thread_task(batch: list):
+def itsm_thread_task(batch: list, session_file=None):
     global glogs, queue_
 
     stop_Event = Event()
@@ -60,7 +60,9 @@ def itsm_thread_task(batch: list):
             executable_path=pcm.get_browser()
         )
         logs = []
-        thread_context = browser.new_context(storage_state=os.getenv("ITSM_SESSION_FILE"))
+        thread_context = browser.new_context(
+            storage_state=session_file or os.getenv("ITSM_SESSION_FILE")
+        )
         try:
             thread_page, logs =pcm.new_page_opener(thread_context, logs)
             for cr in batch:
@@ -179,6 +181,7 @@ def fetch_cr_status_dict_from_itsm(
 
     glogs = Queue()
     queue_ = Queue()
+    session_file = pcm.get_itsm_session_file_path(runtime)
     unique_crs_in_df = np.array(cr_numbers)
     
     if unique_crs_in_df.size > 0:
@@ -207,7 +210,7 @@ def fetch_cr_status_dict_from_itsm(
             with ThreadPoolExecutor(max_workers=5) as executor:
                 futures = [
                     executor.submit(
-                        itsm_thread_task, batch,
+                        itsm_thread_task, batch, session_file,
                     )
                     for batch in batches
                 ]
@@ -215,7 +218,7 @@ def fetch_cr_status_dict_from_itsm(
                 for future in futures:
                     future.result()
             
-            pcm.session_breaker()
+            pcm.session_breaker(runtime=runtime)
 
             if glogs:
                 while not glogs.empty():

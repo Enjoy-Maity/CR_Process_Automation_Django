@@ -19,7 +19,7 @@ from dashboard.task_modules.dependencies.extra_dependencies import (
 from dashboard.task_modules.dependencies.excel_modifier import ExcelModifier
 from dashboard.exceptions import CustomException
 from playwright.sync_api import sync_playwright, Page
-from typing import AnyStr, List, Tuple, Literal, Callable
+from typing import AnyStr, List, Tuple, Literal, Callable, Optional
 from numpy.typing import ArrayLike
 from threading import Event
 from datetime import datetime, timedelta, date
@@ -111,7 +111,9 @@ def design_type_identifier(design_type: str):
         return "auto"
 
 
-def first_download_itsm_thread_task(cr_batch: List[AnyStr], date_: datetime):
+def first_download_itsm_thread_task(
+    cr_batch: List[AnyStr], date_: datetime, session_file: Optional[str] = None
+):
     global glogs, queue_
     global work_detail_queue
     
@@ -122,7 +124,9 @@ def first_download_itsm_thread_task(cr_batch: List[AnyStr], date_: datetime):
             executable_path=pcm.get_browser()
         )
         logs = []
-        thread_context = browser.new_context(storage_state=os.getenv("ITSM_SESSION_FILE"))
+        thread_context = browser.new_context(
+            storage_state=session_file or os.getenv("ITSM_SESSION_FILE")
+        )
         try:
             thread_page, logs =pcm.new_page_opener(thread_context, logs)
             token_for_locking = True
@@ -271,7 +275,9 @@ def first_download_itsm_thread_task(cr_batch: List[AnyStr], date_: datetime):
             stop_Event.set()
 
 
-def second_cr_hygiene_itsm_thread_task(cr_batch: List[AnyStr], logs: list):
+def second_cr_hygiene_itsm_thread_task(
+    cr_batch: List[AnyStr], logs: list, session_file: Optional[str] = None
+):
     global relationship_nodes_queue, text_contents
     global tasks_queue
     global glogs
@@ -282,7 +288,9 @@ def second_cr_hygiene_itsm_thread_task(cr_batch: List[AnyStr], logs: list):
             headless=False,
             executable_path=pcm.get_browser()
         )
-        thread_context = browser.new_context(storage_state=os.getenv("ITSM_SESSION_FILE"))
+        thread_context = browser.new_context(
+            storage_state=session_file or os.getenv("ITSM_SESSION_FILE")
+        )
         logs = []
         try:
             thread_page, logs =pcm.new_page_opener(thread_context, logs)
@@ -358,7 +366,8 @@ def first_itsm_job_starter(
             )
         
             session_created = None
-        
+            session_file = pcm.get_itsm_session_file_path(runtime)
+
             while not session_created:
                 session_created, logs = pcm.session_maker(
                     logs,
@@ -372,7 +381,7 @@ def first_itsm_job_starter(
             with ThreadPoolExecutor(max_workers=5) as executor:
                 futures = [
                     executor.submit(
-                        first_download_itsm_thread_task, batch, date_
+                        first_download_itsm_thread_task, batch, date_, session_file
                     )
                     for batch in batches
                 ]
@@ -413,8 +422,9 @@ def second_itsm_job_starter(
             )
         
             session_created = None
-            if not os.path.exists(os.getenv("ITSM_SESSION_FILE")):
-                os.makedirs(os.path.dirname(os.getenv("ITSM_SESSION_FILE")), exist_ok=True)
+            session_file = pcm.get_itsm_session_file_path(runtime)
+            if not os.path.exists(session_file):
+                os.makedirs(os.path.dirname(session_file), exist_ok=True)
                 while not session_created:
                     session_created, logs = pcm.session_maker(
                         logs,
@@ -428,7 +438,7 @@ def second_itsm_job_starter(
             with ThreadPoolExecutor(max_workers=5) as executor:
                 futures = [
                     executor.submit(
-                        second_cr_hygiene_itsm_thread_task, batch, logs
+                        second_cr_hygiene_itsm_thread_task, batch, logs, session_file
                     )
                     for batch in batches
                 ]
@@ -436,8 +446,8 @@ def second_itsm_job_starter(
                 for future in futures:
                     future.result()
             
-            if os.path.exists(os.getenv("ITSM_SESSION_FILE")):
-                pcm.session_breaker()
+            if os.path.exists(session_file):
+                pcm.session_breaker(runtime=runtime)
             
             while not glogs.empty():
                 logs.append(
@@ -1266,15 +1276,12 @@ def run_task(
     runtime["status"] = "Running"
     runtime["download_ready"] = False
     
-    # Password fields (new)
+    # Password/OTP events are created once by make_runtime(); do not replace
+    # them here or a stale submitted form could set an event nobody waits on.
     runtime["password_required"] = False
     runtime["password"] = None
-    runtime["pwd_event"] = Event()
-
-    # OTP fields (existing)
     runtime["otp_required"] = False
     runtime["otp"] = None
-    runtime["otp_event"] = Event()
 
     text_contents = None
     manual_crs_attachment_dict = defaultdict(str)

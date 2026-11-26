@@ -125,11 +125,15 @@ def _serve_gunicorn(host: str, port: int, workers: int, threads: int, timeout: i
     from gunicorn.app.base import BaseApplication
 
     if workers > 1:
+        # RUN_REGISTRY is process-local. More than one worker would split the
+        # task thread from the polling/auth requests and break OTP/password
+        # delivery. Scale with threads instead.
         print(
-            "[warn] WSGI_WORKERS > 1 is not recommended: in-memory task state is "
-            "per-process. Use a single worker with many threads.",
+            f"[warn] WSGI_WORKERS={workers} is unsupported; forcing 1 worker. "
+            "Increase WSGI_THREADS instead.",
             flush=True,
         )
+        workers = 1
 
     class _Application(BaseApplication):
         def load_config(self):

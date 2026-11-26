@@ -61,9 +61,11 @@ _JOBS = {}
 _JOBS_LOCK = threading.Lock()
 
 
-def _new_job():
+def _new_job(user_id=None):
     job_id = uuid.uuid4().hex
     runtime = {
+        "run_key": job_id,
+        "user_id": user_id,
         "status": "Starting",
         "password_required": False,
         "otp_required": False,
@@ -85,6 +87,17 @@ def _new_job():
 def _get_job(job_id):
     with _JOBS_LOCK:
         return _JOBS.get(job_id)
+
+
+def _job_for_request(job_id, request):
+    """Return a job only when it belongs to the requesting user."""
+    job = _get_job(job_id)
+    if not job:
+        return None
+    owner_id = job["runtime"].get("user_id")
+    if owner_id is not None and owner_id != getattr(request.user, "id", None):
+        return None
+    return job
 
 
 # ── Page render ─────────────────────────────────────────────────────────────
@@ -313,7 +326,7 @@ def fetch_night_cr_status(request):
     user_email = body.get("user_email") or (
         request.user.email if request.user.is_authenticated else ""
     )
-    job_id = _new_job()
+    job_id = _new_job(request.user.id)
     job = _get_job(job_id)
 
     task = {"name": "Night Execution CR Status Fetch"}
@@ -351,9 +364,9 @@ def night_cr_status_result(request):
     plus the final statuses payload once done.
     """
     job_id = request.GET.get("job_id")
-    job = _get_job(job_id)
+    job = _job_for_request(job_id, request)
     if not job:
-        return JsonResponse({"ok": False, "message": "Unknown job_id"}, status=404)
+        return JsonResponse({"ok": False, "message": "Unknown or expired job_id"}, status=404)
 
     runtime = job["runtime"]
     resp = {
@@ -382,9 +395,9 @@ def submit_night_password(request):
     except json.JSONDecodeError:
         return JsonResponse({"ok": False, "message": "Invalid JSON body"}, status=400)
 
-    job = _get_job(body.get("job_id"))
+    job = _job_for_request(body.get("job_id"), request)
     if not job:
-        return JsonResponse({"ok": False, "message": "Unknown job_id"}, status=404)
+        return JsonResponse({"ok": False, "message": "Unknown or expired job_id"}, status=404)
 
     runtime = job["runtime"]
     runtime["password"] = body.get("password", "")
@@ -408,9 +421,9 @@ def submit_night_otp(request):
     except json.JSONDecodeError:
         return JsonResponse({"ok": False, "message": "Invalid JSON body"}, status=400)
 
-    job = _get_job(body.get("job_id"))
+    job = _job_for_request(body.get("job_id"), request)
     if not job:
-        return JsonResponse({"ok": False, "message": "Unknown job_id"}, status=404)
+        return JsonResponse({"ok": False, "message": "Unknown or expired job_id"}, status=404)
 
     runtime = job["runtime"]
     runtime["otp"] = body.get("otp", "")
@@ -424,6 +437,7 @@ def submit_night_otp(request):
 
 # ── Iframe views for password/OTP input ────────────────────────────────────
 @xframe_options_sameorigin
+@login_required(login_url="login")
 def night_password_iframe(request):
     """Handle password authentication via iframe for Night Execution."""
     job_id = request.GET.get("job_id")
@@ -433,11 +447,11 @@ def night_password_iframe(request):
             'error': 'Missing job_id'
         })
 
-    job = _get_job(job_id)
+    job = _job_for_request(job_id, request)
     if not job:
         return render(request, 'dashboard/iframe_form.html', {
             'form': NightPasswordForm(),
-            'error': 'Unknown job_id'
+            'error': 'Unknown or expired job_id'
         })
 
     if request.method == 'POST':
@@ -467,6 +481,7 @@ def night_password_iframe(request):
 
 
 @xframe_options_sameorigin
+@login_required(login_url="login")
 def night_otp_iframe(request):
     """Handle OTP authentication via iframe for Night Execution."""
     job_id = request.GET.get("job_id")
@@ -476,11 +491,11 @@ def night_otp_iframe(request):
             'error': 'Missing job_id'
         })
 
-    job = _get_job(job_id)
+    job = _job_for_request(job_id, request)
     if not job:
         return render(request, 'dashboard/iframe_form.html', {
             'form': NightOTPForm(),
-            'error': 'Unknown job_id'
+            'error': 'Unknown or expired job_id'
         })
 
     if request.method == 'POST':

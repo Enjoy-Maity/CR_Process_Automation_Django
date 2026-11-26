@@ -1013,13 +1013,11 @@ def run_task(
     runtime["status"] = "Running"
     runtime["download_ready"] = False
 
+    # Events are created by make_runtime() and must stay stable for the run.
     runtime["password_required"] = False
     runtime["password"] = None
-    runtime["pwd_event"] = None
-
     runtime["otp_required"] = False
     runtime["otp"] = None
-    runtime["otp_event"] = Event()
 
     # Read-only notice shown during the Microsoft Authenticator sign-in.
     runtime["notice_required"] = False

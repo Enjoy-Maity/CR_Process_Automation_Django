@@ -9,7 +9,6 @@ import numpy as np
 from pathlib import Path
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
-from threading import Event
 from playwright.sync_api import sync_playwright
 from typing import AnyStr, List, Union, Tuple
 from queue import Queue
@@ -1136,15 +1135,11 @@ def run_task(
         niam_workbook_path_for(night, region=active_region)
     )
 
-    # Password fields (new)
+    # Password/OTP events come from make_runtime() and are never replaced.
     runtime["password_required"] = False
     runtime["password"] = None
-    runtime["pwd_event"] = Event()
-
-    # OTP fields (existing)
     runtime["otp_required"] = False
     runtime["otp"] = None
-    runtime["otp_event"] = Event()
 
     # "Fetch CR" (task id 8, NIAM Template Database page): fetch the selected
     # night's CRs, then add template rows for the CRs flagged

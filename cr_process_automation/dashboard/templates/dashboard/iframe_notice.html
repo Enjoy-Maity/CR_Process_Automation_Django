@@ -72,6 +72,7 @@
     <script>
         (function () {
             const taskId = {{ task_id|default:"null" }};
+            const runKey = "{{ run_key|default:''|escapejs }}";
             const codeEl = document.getElementById('notice-code');
             const statusEl = document.getElementById('notice-status');
 
@@ -101,7 +102,8 @@
                     if (response.ok) {
                         const data = await response.json();
                         const task = (data.tasks || []).find(
-                            item => Number(item.id) === Number(taskId)
+                            item => Number(item.id) === Number(taskId) &&
+                                (!runKey || String(item.run_key || '') === runKey)
                         );
 
                         if (task) {

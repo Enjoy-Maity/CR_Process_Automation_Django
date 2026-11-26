@@ -12,7 +12,7 @@ from django.conf import settings
 from django.core.management import call_command
 from django.db import transaction
 from playwright.sync_api import sync_playwright, Page
-from typing import AnyStr, List, Callable, Dict, Any
+from typing import AnyStr, List, Callable, Dict, Any, Optional
 from threading import Event, Thread
 from datetime import datetime, timedelta
 from queue import Queue
@@ -100,7 +100,8 @@ def page_tasks(
     batch_number,
     cr_batch: List[str],
     cr_to_circle_dict: Dict[str, str],
-    date_: datetime
+    date_: datetime,
+    session_file: Optional[str] = None,
 ):
     global glogs
     stop_event = Event()
@@ -111,7 +112,9 @@ def page_tasks(
             timeout=15000,
         )
         logs = []
-        thread_context = browser.new_context(storage_state=os.getenv("ITSM_SESSION_FILE"))
+        thread_context = browser.new_context(
+            storage_state=session_file or os.getenv("ITSM_SESSION_FILE")
+        )
         page, logs = pcm.new_page_opener(thread_context, logs)
         page.on("dialog", lambda d: d.accept())
         
@@ -308,6 +311,7 @@ def run_download_tasks(
     global glogs
 
     session_created = False
+    session_file = pcm.get_itsm_session_file_path(runtime)
     while not session_created:
         session_created, logs = pcm.session_maker(
             logs,
@@ -329,14 +333,15 @@ def run_download_tasks(
                     i,
                     batch_dict[f"batch_{i}"],
                     cr_to_circle_dict,
-                    date_
+                    date_,
+                    session_file,
                 )
                 for i, batch in enumerate(batches)
             ]
         for future in futures:
                 future.result()
 
-    pcm.session_breaker()
+    pcm.session_breaker(runtime=runtime)
 
     if glogs:
         while not glogs.empty():
@@ -395,15 +400,12 @@ def run_task(
     runtime["status"] = "Running"
     runtime["download_ready"] = False
     
-    # Password fields (new)
+    # Password/OTP events are created once by make_runtime(); do not replace
+    # them here or a stale submitted form could set an event nobody waits on.
     runtime["password_required"] = False
     runtime["password"] = None
-    runtime["pwd_event"] = Event()
-
-    # OTP fields (existing)
     runtime["otp_required"] = False
     runtime["otp"] = None
-    runtime["otp_event"] = Event()
 
     try:
         parsed_date = dp.parse(selected_date)

@@ -112,6 +112,16 @@ REGION_KEYS = ("north", "west", "east", "south")
 
 TASKS_REQUIRING_AUTH = {1, 2, 3, 4, 5}
 
+# A second start for the same (user, task) would replace the runtime that the
+# first Playwright thread is still waiting on, so refuse it explicitly.
+ACTIVE_RUN_STATUSES = {
+    "Running",
+    "Waiting for Password",
+    "Waiting for OTP",
+    "Waiting for Sign-in Approval",
+}
+
+
 def _requires_auth(task_id):
     """Check if a task requires authentication."""
     return task_id in TASKS_REQUIRING_AUTH
@@ -352,11 +362,36 @@ def _apply_counts_to_tasks():
 
 def _merge_runtime_for_request(user_id, task_id):
     """
-    Merge the per-user runtime context (status/download/auth flags) on top of
-    the shared default runtime (regional counts) for one task. Users never see
-    each other's run state.
+    Build the UI state for one task from static defaults plus the requesting
+    user's current run context.
+
+    ``TASK_RUNTIME`` is only a source of regional counts/default labels now;
+    auth flags, events and status come exclusively from ``RUN_REGISTRY`` so a
+    stale global runtime can never open an iframe for the wrong run/user.
     """
-    merged = dict(TASK_RUNTIME[task_id])
+    defaults = TASK_RUNTIME[task_id]
+    merged = {
+        "status": "Pending",
+        "download_ready": False,
+        "download_name": "",
+        "download_url": "",
+        "logs": [f"{defaults.get('name', f'Task {task_id}')} is waiting for execution."],
+        "requires_auth": defaults.get("requires_auth", False),
+        "otp_required": False,
+        "password_required": False,
+        "notice_required": False,
+        "notice_text": "",
+        "alert_required": False,
+        "alert_title": "",
+        "alert_text": "",
+        "alert_seq": 0,
+        "run_key": "",
+        "total_crs": defaults.get("total_crs", 0),
+        "north_crs": defaults.get("north_crs", 0),
+        "west_crs": defaults.get("west_crs", 0),
+        "east_crs": defaults.get("east_crs", 0),
+        "south_crs": defaults.get("south_crs", 0),
+    }
     ctx = RUN_REGISTRY.peek(user_id, task_id) if user_id is not None else None
     if ctx:
         merged.update({
@@ -364,16 +399,16 @@ def _merge_runtime_for_request(user_id, task_id):
             "download_ready": ctx.get("download_ready", False),
             "download_name": ctx.get("download_name", ""),
             "download_url": ctx.get("download_url", ""),
-            "otp_required": ctx.get("otp_required", False),
-            "password_required": ctx.get("password_required", False),
+            "otp_required": bool(ctx.get("otp_required", False)),
+            "password_required": bool(ctx.get("password_required", False)),
             "notice_required": bool(ctx.get("notice_required", False)),
-            "notice_text": ctx.get("notice_text", ""),
+            "notice_text": ctx.get("notice_text", "") or "",
             "alert_required": bool(ctx.get("alert_required", False)),
-            "alert_title": ctx.get("alert_title", ""),
-            "alert_text": ctx.get("alert_text", ""),
+            "alert_title": ctx.get("alert_title", "") or "",
+            "alert_text": ctx.get("alert_text", "") or "",
             "alert_seq": int(ctx.get("alert_seq", 0) or 0),
-            "logs": ctx.get("logs", []),
-            "run_key": ctx.get("run_key", ""),
+            "logs": ctx.get("logs", merged["logs"]),
+            "run_key": ctx.get("run_key", "") or "",
         })
     return merged
 
@@ -842,6 +877,15 @@ def start_task(request, task_id):
             title="Missing Task Function"
         )
 
+    # Refuse to overwrite a live runtime: the old thread would keep waiting on
+    # its original events while the UI/iframe now points at the new run.
+    existing = RUN_REGISTRY.peek(user_id, task_id)
+    if existing and existing.get("status") in ACTIVE_RUN_STATUSES:
+        raise ValidationException(
+            "This task is already running. Wait for it to finish before starting it again.",
+            title="Task Already Running",
+        )
+
     # Isolated, per-(user, task) runtime context.
     runtime = RUN_REGISTRY.begin(user_id, task_id)
     runtime["status"] = "Running"
@@ -856,6 +900,7 @@ def start_task(request, task_id):
     runtime["run_dir"] = str(task_runtime.run_output_dir(runtime["run_key"]))
     runtime["logs"] = []
     runtime["username"] = request.user.username
+    runtime["user_id"] = user_id
 
     # raw_report_file and planning_sheet are shared per night/region. Their
     # canonical paths are recorded on the run for traceability.
@@ -900,7 +945,11 @@ def start_task(request, task_id):
     runtime["task_run_id"] = run_row.id
 
     CURRENT_RUNNING_TASK = task["name"]
-    log_user(runtime, f"{task['name']}: task started by {request.user.username} ---- {_timestamp()}")
+    log_user(
+        runtime,
+        f"{task['name']}: task started by {request.user.username} "
+        f"(user_id={user_id}, run_key={runtime['run_key']}) ---- {_timestamp()}",
+    )
 
     def _runner():
         """Run the task in a background thread with isolated module globals."""
@@ -1058,21 +1107,42 @@ def submit_otp(request, task_id):
             title="Missing OTP"
         )
 
-    runtime = RUN_REGISTRY.peek(request.user.id, task_id)
+    run_key = request.POST.get("run_key", "").strip()
+    if not run_key:
+        raise ValidationException(
+            "The run identifier is missing. Reload the page and start the task again.",
+            title="Stale Run"
+        )
+
+    runtime = RUN_REGISTRY.get(request.user.id, task_id, run_key)
     if runtime is None:
         raise NotFoundException(
             "No active run found for this task. Please start the task again.",
             title="No Active Run"
         )
+    if not runtime.get("otp_required"):
+        raise ValidationException(
+            "OTP is no longer required for this run.",
+            title="Stale OTP"
+        )
+
     runtime["otp"] = otp
     runtime["otp_required"] = False
-    
+
     otp_event = runtime.get("otp_event")
-    if otp_event:
+    if otp_event is not None:
         otp_event.set()
-    
-    log_user(runtime, f"{task['name']}: OTP received from user ---- {_timestamp()}")
-    logger.info(f"OTP received for task {task_id}")
+
+    log_user(
+        runtime,
+        f"{task['name']}: OTP received via API "
+        f"(user_id={request.user.id}, run_key={run_key}, "
+        f"event_id={id(otp_event)}) ---- {_timestamp()}",
+    )
+    logger.info(
+        "OTP received for task %s user_id=%s run_key=%s",
+        task_id, request.user.id, run_key,
+    )
 
     return JsonResponse({
         "ok": True,
@@ -1107,21 +1177,42 @@ def submit_password(request, task_id):
             title="Missing Password"
         )
 
-    runtime = RUN_REGISTRY.peek(request.user.id, task_id)
+    run_key = request.POST.get("run_key", "").strip()
+    if not run_key:
+        raise ValidationException(
+            "The run identifier is missing. Reload the page and start the task again.",
+            title="Stale Run"
+        )
+
+    runtime = RUN_REGISTRY.get(request.user.id, task_id, run_key)
     if runtime is None:
         raise NotFoundException(
             "No active run found for this task. Please start the task again.",
             title="No Active Run"
         )
+    if not runtime.get("password_required"):
+        raise ValidationException(
+            "Password is no longer required for this run.",
+            title="Stale Password"
+        )
+
     runtime["password"] = password
     runtime["password_required"] = False
 
     pwd_event = runtime.get("pwd_event")
-    if pwd_event:
+    if pwd_event is not None:
         pwd_event.set()
 
-    log_user(runtime, f"{task['name']}: Password received from user ---- {_timestamp()}")
-    logger.info(f"Password received for task {task_id}")
+    log_user(
+        runtime,
+        f"{task['name']}: Password received via API "
+        f"(user_id={request.user.id}, run_key={run_key}, "
+        f"event_id={id(pwd_event)}) ---- {_timestamp()}",
+    )
+    logger.info(
+        "Password received for task %s user_id=%s run_key=%s",
+        task_id, request.user.id, run_key,
+    )
 
     return JsonResponse({
         "ok": True,
@@ -1148,6 +1239,11 @@ def task_dashboard_data(request):
         task_id = task["id"]
         requires_auth = _requires_auth(task_id)
         status = task["status"]
+        runtime_ctx = RUN_REGISTRY.peek(request.user.id, task_id)
+        if runtime_ctx and runtime_ctx.get("status") in ACTIVE_RUN_STATUSES:
+            # Auth waits are per-run UI state; a shared region marker must not
+            # hide "Waiting for Password/OTP/Sign-in Approval" for this user.
+            status = runtime_ctx["status"]
         download_ready = task["download_ready"]
         download_name = task["download_name"]
         if task_id in region_paths.REGION_TASK_IDS:
@@ -1159,9 +1255,11 @@ def task_dashboard_data(request):
                 # No date/regions selected on CR Planning: there is no AND
                 # condition to satisfy, so never expose a download button.
                 download_ready = False
-            if check_region_files:
+            if check_region_files and status not in ACTIVE_RUN_STATUSES:
                 # Badge follows what any user did for these regions, not the
                 # viewing user's own run: AND across every selected region.
+                # Per-run auth waits keep priority so the user can see why no
+                # iframe opened and the task appears stuck.
                 status = region_status.combined_status(
                     task_id, requested_date, requested_regions
                 )
@@ -1171,7 +1269,6 @@ def task_dashboard_data(request):
                 )
                 if primary_path:
                     download_name = str(primary_path)
-                    runtime_ctx = RUN_REGISTRY.peek(request.user.id, task_id)
                     if runtime_ctx:
                         runtime_ctx["download_name"] = download_name
                         runtime_ctx["download_ready"] = True
@@ -1473,9 +1570,10 @@ def filter_region_crs(request):
 
 
 @xframe_options_sameorigin
+@login_required(login_url="login")
 def playwright_auth_iframe(request):
-    """Handle OTP authentication via iframe."""
-    logger.debug(f"playwright_auth_iframe called with method={request.method}")
+    """Handle OTP authentication via an iframe bound to one exact run."""
+    logger.debug("playwright_auth_iframe called with method=%s", request.method)
 
     if request.method == 'POST':
         form = TwoFactorAuthForm(request.POST)
@@ -1484,47 +1582,82 @@ def playwright_auth_iframe(request):
             try:
                 task_id = int(form.cleaned_data['task_id'])
                 two_factor_code = form.cleaned_data['two_factor_code']
+                run_key = (form.cleaned_data.get('run_key') or '').strip()
 
                 if not _requires_auth(task_id):
-                    logger.warning(f"Task {task_id} does not require auth")
-                    return render(request, 'dashboard/iframe_form.html', {'form': form})
+                    logger.warning("Task %s does not require auth", task_id)
+                    return render(
+                        request,
+                        'dashboard/iframe_form.html',
+                        {'form': form, 'error': 'This task does not require OTP.'},
+                    )
 
-                runtime = RUN_REGISTRY.peek(request.user.id, task_id) if request.user.is_authenticated else None
-
-                if runtime is None:
-                    logger.error(f"No runtime found for task {task_id}")
-                    return render(request, 'dashboard/iframe_form.html', {'form': form})
+                runtime = RUN_REGISTRY.get(request.user.id, task_id, run_key)
+                if runtime is None or not runtime.get("otp_required"):
+                    logger.warning(
+                        "Stale OTP submission task=%s run_key=%s otp_required=%s",
+                        task_id, run_key,
+                        bool(runtime and runtime.get("otp_required")),
+                    )
+                    return render(
+                        request,
+                        'dashboard/iframe_form.html',
+                        {
+                            'form': form,
+                            'error': 'This task run is no longer waiting for OTP. Start the task again.',
+                        },
+                    )
 
                 runtime["otp"] = two_factor_code
                 runtime["otp_required"] = False
 
                 otp_event = runtime.get("otp_event")
-                if otp_event:
+                if otp_event is not None:
                     otp_event.set()
-                    logger.info(f"OTP event set for task {task_id}")
 
-                log_user(runtime, f"Task ID {task_id}: OTP received via Iframe ---- {_timestamp()}")
+                log_user(
+                    runtime,
+                    f"Task ID {task_id}: OTP received via iframe "
+                    f"(user_id={request.user.id}, run_key={run_key}, "
+                    f"event_id={id(otp_event)}) ---- {_timestamp()}",
+                )
+                logger.info(
+                    "OTP event set for task %s user_id=%s run_key=%s",
+                    task_id, request.user.id, run_key,
+                )
 
                 return render(request, 'dashboard/iframe_success.html')
 
-            except ValueError as e:
-                logger.error(f"Invalid task_id: {str(e)}")
-                return render(request, 'dashboard/iframe_form.html', {'form': form})
+            except ValueError as exc:
+                logger.error("Invalid task_id: %s", exc)
+                return render(
+                    request,
+                    'dashboard/iframe_form.html',
+                    {'form': form, 'error': 'Invalid task identifier.'},
+                )
         else:
-            logger.warning(f"Invalid form submission: {form.errors.as_json()}")
-            return render(request, 'dashboard/iframe_form.html', {'form': form})
+            logger.warning("Invalid form submission: %s", form.errors.as_json())
+            return render(
+                request,
+                'dashboard/iframe_form.html',
+                {
+                    'form': form,
+                    'error': 'This OTP submission is stale. Reload the page and start the task again.',
+                },
+            )
 
-    else:
-        task_id = request.GET.get('task_id', '')
-        form = TwoFactorAuthForm(initial={'task_id': task_id})
+    task_id = request.GET.get('task_id', '')
+    run_key = request.GET.get('run_key', '')
+    form = TwoFactorAuthForm(initial={'task_id': task_id, 'run_key': run_key})
 
     return render(request, 'dashboard/iframe_form.html', {'form': form})
 
 
 @xframe_options_sameorigin
+@login_required(login_url="login")
 def playwright_password_iframe(request):
-    """Handle password authentication via iframe."""
-    logger.debug(f"playwright_password_iframe called with method={request.method}")
+    """Handle password authentication via an iframe bound to one exact run."""
+    logger.debug("playwright_password_iframe called with method=%s", request.method)
 
     if request.method == 'POST':
         form = PasswordAuthForm(request.POST)
@@ -1533,39 +1666,73 @@ def playwright_password_iframe(request):
             try:
                 task_id = int(form.cleaned_data['task_id'])
                 password = form.cleaned_data['password']
+                run_key = (form.cleaned_data.get('run_key') or '').strip()
 
                 if not _requires_auth(task_id):
-                    logger.warning(f"Task {task_id} does not require auth")
-                    return render(request, 'dashboard/password_form.html', {'form': form})
+                    logger.warning("Task %s does not require auth", task_id)
+                    return render(
+                        request,
+                        'dashboard/password_form.html',
+                        {'form': form, 'error': 'This task does not require a password.'},
+                    )
 
-                runtime = RUN_REGISTRY.peek(request.user.id, task_id) if request.user.is_authenticated else None
-
-                if runtime is None:
-                    logger.error(f"No runtime found for task {task_id}")
-                    return render(request, 'dashboard/password_form.html', {'form': form})
+                runtime = RUN_REGISTRY.get(request.user.id, task_id, run_key)
+                if runtime is None or not runtime.get("password_required"):
+                    logger.warning(
+                        "Stale password submission task=%s run_key=%s password_required=%s",
+                        task_id, run_key,
+                        bool(runtime and runtime.get("password_required")),
+                    )
+                    return render(
+                        request,
+                        'dashboard/password_form.html',
+                        {
+                            'form': form,
+                            'error': 'This task run is no longer waiting for a password. Start the task again.',
+                        },
+                    )
 
                 runtime["password"] = password
                 runtime["password_required"] = False
 
                 pwd_event = runtime.get("pwd_event")
-                if pwd_event:
+                if pwd_event is not None:
                     pwd_event.set()
-                    logger.info(f"Password event set for task {task_id}")
 
-                log_user(runtime, f"Task ID {task_id}: Password received via Iframe ---- {_timestamp()}")
+                log_user(
+                    runtime,
+                    f"Task ID {task_id}: Password received via iframe "
+                    f"(user_id={request.user.id}, run_key={run_key}, "
+                    f"event_id={id(pwd_event)}) ---- {_timestamp()}",
+                )
+                logger.info(
+                    "Password event set for task %s user_id=%s run_key=%s",
+                    task_id, request.user.id, run_key,
+                )
 
                 return render(request, 'dashboard/iframe_success.html')
 
-            except ValueError as e:
-                logger.error(f"Invalid task_id: {str(e)}")
-                return render(request, 'dashboard/password_form.html', {'form': form})
+            except ValueError as exc:
+                logger.error("Invalid task_id: %s", exc)
+                return render(
+                    request,
+                    'dashboard/password_form.html',
+                    {'form': form, 'error': 'Invalid task identifier.'},
+                )
         else:
-            logger.warning(f"Invalid form submission: {form.errors.as_json()}")
-            return render(request, 'dashboard/password_form.html', {'form': form})
+            logger.warning("Invalid form submission: %s", form.errors.as_json())
+            return render(
+                request,
+                'dashboard/password_form.html',
+                {
+                    'form': form,
+                    'error': 'This password submission is stale. Reload the page and start the task again.',
+                },
+            )
 
-    else:
-        task_id = request.GET.get('task_id', '')
-        form = PasswordAuthForm(initial={'task_id': task_id})
+    task_id = request.GET.get('task_id', '')
+    run_key = request.GET.get('run_key', '')
+    form = PasswordAuthForm(initial={'task_id': task_id, 'run_key': run_key})
 
     return render(request, 'dashboard/password_form.html', {'form': form})
 
@@ -1587,12 +1754,13 @@ def playwright_notice_iframe(request):
         task_id = int(task_id) if task_id is not None else None
     except (TypeError, ValueError):
         task_id = None
+    run_key = (request.GET.get('run_key', '') or '').strip()
 
     notice_text = ""
     status = "Waiting for Sign-in Approval"
 
     if task_id is not None and request.user.is_authenticated:
-        runtime = RUN_REGISTRY.peek(request.user.id, task_id)
+        runtime = RUN_REGISTRY.get(request.user.id, task_id, run_key)
         if runtime:
             notice_text = runtime.get("notice_text", "") or ""
             status = runtime.get("status", status) or status
@@ -1602,6 +1770,7 @@ def playwright_notice_iframe(request):
         'dashboard/iframe_notice.html',
         {
             'task_id': task_id,
+            'run_key': run_key,
             'notice_text': notice_text,
             'status': status,
         },
@@ -1626,12 +1795,13 @@ def playwright_alert_iframe(request):
         task_id = int(task_id) if task_id is not None else None
     except (TypeError, ValueError):
         task_id = None
+    run_key = (request.GET.get('run_key', '') or '').strip()
 
     alert_title = "Attention"
     alert_text = ""
 
     if task_id is not None and request.user.is_authenticated:
-        runtime = RUN_REGISTRY.peek(request.user.id, task_id)
+        runtime = RUN_REGISTRY.get(request.user.id, task_id, run_key)
         if runtime:
             alert_title = runtime.get("alert_title", "") or alert_title
             alert_text = runtime.get("alert_text", "") or ""
@@ -1641,6 +1811,7 @@ def playwright_alert_iframe(request):
         'dashboard/iframe_alert.html',
         {
             'task_id': task_id,
+            'run_key': run_key,
             'alert_title': alert_title,
             'alert_text': alert_text,
         },

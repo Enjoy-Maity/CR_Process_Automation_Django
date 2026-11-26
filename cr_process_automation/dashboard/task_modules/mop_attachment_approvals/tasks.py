@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dashboard.task_modules.dependencies import batch_methods as bm
 from playwright.sync_api import sync_playwright
 from datetime import datetime, timedelta, date
-from typing import Dict, AnyStr, Tuple, List
+from typing import Dict, AnyStr, Tuple, List, Optional
 from django.conf import settings
 from django.http import JsonResponse
 from django.db import transaction
@@ -496,8 +496,9 @@ def crs_with_blank_or_wrong_protocols_finder(
 def thread_task(
     cr_batch: List[AnyStr],
     cr_approval: bool,
-    mop_attachment_string_dict: Optional[Dict[AnyStr, AnyStr], None] = None,
+    mop_attachment_string_dict: Optional[Dict[AnyStr, AnyStr]] = None,
     username: str = "",
+    session_file: Optional[str] = None,
 ):
     global glogs
     stop_event = Event()
@@ -508,7 +509,9 @@ def thread_task(
             executable_path=pcm.get_browser(),
             timeout=15000,
         )
-        context = browser.new_context(storage_state=os.getenv("ITSM_SESSION_FILE"))
+        context = browser.new_context(
+            storage_state=session_file or os.getenv("ITSM_SESSION_FILE")
+        )
         page, logs = pcm.new_page_opener(context, logs)
 
         try:
@@ -610,6 +613,7 @@ def mop_attachment_func(
                 
                 if batch_creation_success:
                     session_created = None
+                    session_file = pcm.get_itsm_session_file_path(runtime)
                     # print(batches)
 
                     while not session_created:
@@ -625,7 +629,12 @@ def mop_attachment_func(
                     with ThreadPoolExecutor(max_workers=5) as executor:
                         futures = [
                             executor.submit(
-                                thread_task, batch, False, planning_cr_mop_attachment_dict, username
+                                thread_task,
+                                batch,
+                                False,
+                                planning_cr_mop_attachment_dict,
+                                username,
+                                session_file,
                             )
                             for batch in batches
                         ]
@@ -633,7 +642,7 @@ def mop_attachment_func(
                     for future in futures:
                         future.result()
                     
-                    pcm.session_breaker()
+                    pcm.session_breaker(runtime=runtime)
         
                 if mop_attachment_queue:
                     logs = attachment_queue_writer(planning_cr_mop_attachment_dict, True, False, logs, date_)
@@ -687,6 +696,7 @@ def cr_approval_func(
         df = df.loc[df["CR No"].astype(str).str.upper().map(len) > 10]
         if df.shape[0] > 0:
             session_created = None
+            session_file = pcm.get_itsm_session_file_path(runtime)
 
             while not session_created:
                 session_created, logs = pcm.session_maker(
@@ -703,14 +713,14 @@ def cr_approval_func(
                 with ThreadPoolExecutor(max_workers=5) as executor:
                     futures = [
                         executor.submit(
-                            thread_task, batch, True, None, username
+                            thread_task, batch, True, None, username, session_file
                         )
                         for batch in batches
                     ]
 
                     for future in futures:
                         future.result()
-            pcm.session_breaker()
+            pcm.session_breaker(runtime=runtime)
             
             if cr_approval_queue:
                 logs = attachment_queue_writer(planned_df_dict, False, True, logs, date_)
@@ -758,15 +768,12 @@ def run_task(
     runtime["status"] = "Running"
     runtime["download_ready"] = False
     
-    # Password fields (new)
+    # Password/OTP events are created once by make_runtime(); do not replace
+    # them here or a stale submitted form could set an event nobody waits on.
     runtime["password_required"] = False
     runtime["password"] = None
-    runtime["pwd_event"] = Event()
-
-    # OTP fields (existing)
     runtime["otp_required"] = False
     runtime["otp"] = None
-    runtime["otp_event"] = Event()
 
     
     try:

@@ -517,7 +517,7 @@ def interdomain_kpi_activity_name_interdomain_kpi_required_check(df: pd.DataFram
             i += 1
 
 
-def itsm_thread_task(cr_batch: List[AnyStr]):
+def itsm_thread_task(cr_batch: List[AnyStr], session_file: Optional[str] = None):
     global glogs
     global relationship_nodes_queue
     global work_detail_queue
@@ -528,7 +528,9 @@ def itsm_thread_task(cr_batch: List[AnyStr]):
             headless=False,
             executable_path=pcm.get_browser(),
         )
-        thread_context = browser.new_context(storage_state=os.getenv("ITSM_SESSION_FILE"))
+        thread_context = browser.new_context(
+            storage_state=session_file or os.getenv("ITSM_SESSION_FILE")
+        )
         logs = []
         try:
             thread_page, logs = pcm.new_page_opener(thread_context, logs)
@@ -598,6 +600,7 @@ def itsm_job_starter(df: pd.DataFrame, runtime, logs, timestamp_fn, user_email, 
     session_created = False
     max_attempts = 3
     attempt = 0
+    session_file = pcm.get_itsm_session_file_path(runtime)
 
     while not session_created and attempt < max_attempts:
         attempt += 1
@@ -618,11 +621,14 @@ def itsm_job_starter(df: pd.DataFrame, runtime, logs, timestamp_fn, user_email, 
         )
 
     with ThreadPoolExecutor(max_workers=5) as executor:
-        futures = [executor.submit(itsm_thread_task, batch) for batch in batches]
+        futures = [
+            executor.submit(itsm_thread_task, batch, session_file)
+            for batch in batches
+        ]
         for future in futures:
             future.result()
 
-    pcm.session_breaker()
+    pcm.session_breaker(runtime=runtime)
 
     # Drain glogs (your original code has a bug: while glogs.is_empty() is wrong)
     while not glogs.empty():
@@ -811,15 +817,12 @@ def run_task(
     runtime["status"] = "Running"
     runtime["download_ready"] = False
     
-    # Password fields (new)
+    # Password/OTP events are created once by make_runtime(); do not replace
+    # them here or a stale submitted form could set an event nobody waits on.
     runtime["password_required"] = False
     runtime["password"] = None
-    runtime["pwd_event"] = Event()
-
-    # OTP fields (existing)
     runtime["otp_required"] = False
     runtime["otp"] = None
-    runtime["otp_event"] = Event()
 
     relationship_nodes_queue = Queue()
     work_detail_queue = Queue()

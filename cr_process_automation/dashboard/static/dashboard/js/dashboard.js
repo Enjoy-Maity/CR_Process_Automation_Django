@@ -70,28 +70,38 @@ function updateCountCells(row, task) {
     });
 }
 
-// Track which task currently has an iframe open, and what type,
-// so we don't reset the iframe src while the user is typing.
+// Track which task/run currently has an iframe open, and what type,
+// so we don't reset the iframe src while the user is typing. The run_key is
+// part of the contract: a stale iframe must never set another run's event.
 let activeIframeTaskId = null;
-let activeIframeType = null;   // 'otp' | 'password' | 'notice'
+let activeIframeType = null;   // 'otp' | 'password' | 'notice' | 'alert'
+let activeIframeRunKey = null;
 
-function openAuthIframe(taskId, type) {
+function openAuthIframe(taskId, type, runKey = '') {
     const authOverlay = document.getElementById('auth-overlay');
     const authIframe = document.getElementById('auth-iframe');
     if (!authOverlay || !authIframe) return;
 
-    // Only (re)load the iframe when the task OR the type changes
+    // Only (re)load the iframe when the task, run or type changes
     // (don't reload while user is typing)
-    if (activeIframeTaskId !== taskId || activeIframeType !== type) {
+    if (
+        activeIframeTaskId !== taskId ||
+        activeIframeType !== type ||
+        activeIframeRunKey !== runKey
+    ) {
+        const query = new URLSearchParams({
+            task_id: String(taskId),
+            run_key: String(runKey || ''),
+        }).toString();
         let url;
         if (type === 'password') {
-            url = `/playwright-password-iframe/?task_id=${taskId}`;
+            url = `/playwright-password-iframe/?${query}`;
         } else if (type === 'notice') {
-            url = `/playwright-notice-iframe/?task_id=${taskId}`;
+            url = `/playwright-notice-iframe/?${query}`;
         } else if (type === 'alert') {
-            url = `/playwright-alert-iframe/?task_id=${taskId}`;
+            url = `/playwright-alert-iframe/?${query}`;
         } else {
-            url = `/playwright-auth-iframe/?task_id=${taskId}`;
+            url = `/playwright-auth-iframe/?${query}`;
         }
         authIframe.src = url;
         // The sign-in code needs a little more room than the auth form.
@@ -100,6 +110,7 @@ function openAuthIframe(taskId, type) {
             (type === 'alert') ? '320px' : '';
         activeIframeTaskId = taskId;
         activeIframeType = type;
+        activeIframeRunKey = runKey;
     }
     authOverlay.style.display = 'flex';
 }
@@ -114,6 +125,7 @@ function closeAuthIframe() {
     }
     activeIframeTaskId = null;
     activeIframeType = null;
+    activeIframeRunKey = null;
 }
 
 // The shared overlay lives in base_main.html; bind its close button once the
@@ -158,7 +170,7 @@ function showPendingAlert(tasks) {
     });
     if (!alertTask) return;
     if (!document.getElementById('auth-overlay')) return;
-    openAuthIframe(alertTask.id, 'alert');
+    openAuthIframe(alertTask.id, 'alert', alertTask.run_key || '');
     // The iframe now owns the dialog; only reopen it for a NEW alert
     // (different run / alert_seq), not on every poll.
     seenAlertKeys.add(alertKey);
@@ -214,7 +226,7 @@ async function refreshTaskPanels() {
 
         if (noticeTask) {
             anyInputRequired = true;
-            openAuthIframe(noticeTask.id, 'notice');
+            openAuthIframe(noticeTask.id, 'notice', noticeTask.run_key || '');
         }
 
         document.querySelectorAll('tr[data-task-id]').forEach(row => {
@@ -245,10 +257,10 @@ async function refreshTaskPanels() {
 
         if (passwordNeeded) {
             anyInputRequired = true;
-            openAuthIframe(task.id, 'password');
+            openAuthIframe(task.id, 'password', task.run_key || '');
         } else if (otpNeeded) {
             anyInputRequired = true;
-            openAuthIframe(task.id, 'otp');
+            openAuthIframe(task.id, 'otp', task.run_key || '');
         }
     });
 

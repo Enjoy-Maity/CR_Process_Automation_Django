@@ -15,6 +15,14 @@ Static files are served by **WhiteNoise** from Django itself, so the app is
 self-contained and an external reverse proxy (nginx) is optional — though it is
 recommended in production for TLS and caching.
 
+## Documentation
+
+| Document | Use it for |
+| --- | --- |
+| [`docs/PROJECT_DOCUMENTATION.md`](docs/PROJECT_DOCUMENTATION.md) | Consolidated project guide: modules/files, features, tabs, exceptions, runtime flow, and operations. |
+| [`docs/TEAM_HANDOVER.md`](docs/TEAM_HANDOVER.md) | Day-to-day operations, task workflows, region locks, NIAM MFA, and troubleshooting. |
+| [`docs/TECHNICAL_BACKEND.md`](docs/TECHNICAL_BACKEND.md) | Backend internals: endpoints, runtime isolation, models, routing, and concurrency. |
+
 ## Quick start
 
 ```bash
@@ -32,8 +40,9 @@ start.bat                            # Windows
 ```
 
 `start.sh` / `start.bat` run migrations + `collectstatic` and then bind
-`0.0.0.0:8000`. Open `http://<server-ip>:8000/` from a client; the launcher
-prints the reachable URL(s) on startup.
+`0.0.0.0:9000` by default. Open `http://<server-ip>:9000/` from a client; the
+launcher prints the reachable URL(s) on startup. Pass `--port 8000` explicitly
+if you are using the sample nginx configuration.
 
 > **Headless Linux:** the automation launches a *non-headless* Chromium, so a
 > virtual display is required when there is no desktop session. `start.sh`
@@ -98,8 +107,10 @@ the user's in-memory run state immediately.
 
 Every task start creates a `TaskRun` owned by `request.user` and the current
 `session_key`. Logs are written as `TaskLog` rows against that run, and the UI
-only reads logs through that owner/session filter. Downloads still require the
-same ownership check; path traversal outside the allowed roots is rejected.
+only reads logs through that owner/session filter. Private/legacy
+`MEDIA_ROOT/task_runs/<run_key>/` downloads require that ownership, while shared
+region artefacts may be downloaded by any logged-in user once they exist for
+every selected region. Path traversal outside the allowed roots is rejected.
 
 Generated task files are region-based:
 
@@ -112,6 +123,13 @@ into every selected region folder. The CR Planning download button is shown
 only when that artefact exists for **all** selected regions, independent of the
 task status badge. Older runs' private `MEDIA_ROOT/task_runs/<run_key>/` copies
 remain downloadable.
+
+Status badges are shared too. Each run writes a marker per selected region at
+`settings.HOST_DOWNLOAD_FOLDER/.task_status/<task>/<date>/<region>.json`, and the
+CR Planning badge reduces them with boolean AND: `Completed` only when every
+selected region is Completed, `Failed` when any region is Failed, and `Pending`
+otherwise. Artefacts from older runs that predate markers still count as
+`Completed` when present for all selected regions. This needs no schema change.
 
 `raw_report_file` and `planning_sheet` are shared per night/region and remain
 guarded by the task modules' file locks. The `region` column already present on

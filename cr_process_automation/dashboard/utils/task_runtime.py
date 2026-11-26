@@ -95,6 +95,21 @@ class _RuntimeRegistry:
         with self._lock:
             return self._contexts.get((user_id, task_id))
 
+    def get(
+        self, user_id: Any, task_id: int, run_key: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Return the current context, optionally requiring an exact run key.
+
+        Auth submissions must use ``run_key`` so a stale iframe/form cannot set
+        the event of a newer run for the same (user, task).
+        """
+        ctx = self.peek(user_id, task_id)
+        if ctx is None:
+            return None
+        if run_key is None:
+            return ctx
+        return ctx if str(ctx.get("run_key", "")) == str(run_key) else None
+
     def all_for_user(self, user_id: Any) -> Dict[int, Dict[str, Any]]:
         with self._lock:
             return {

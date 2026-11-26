@@ -331,6 +331,87 @@ def _click_authenticator_request(
     return False
 
 
+_MFA_PROMPT_PHRASES = (
+    ("approve", "approve sign in"),
+    ("verify", "verify your identity"),
+    ("face", "face, fingerprint, pin, or security key"),
+)
+
+
+def _mfa_prompt_xpath(phrase: str) -> str:
+    """Innermost element containing an MFA phrase, case-insensitively."""
+    text = (
+        "translate(normalize-space(.), "
+        "'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')"
+    )
+    return f"//*[contains({text}, '{phrase}') and not(*[contains({text}, '{phrase}')])]"
+
+
+def _visible_mfa_prompt(page: Page) -> tuple[str, str]:
+    """Return ``(kind, text)`` of the first visible Microsoft MFA prompt.
+
+    Microsoft keeps hidden templates for the other methods in the DOM. Checking
+    visibility per variant avoids selecting one of those templates with
+    ``.first`` and waiting on it forever.
+    """
+    for kind, phrase in _MFA_PROMPT_PHRASES:
+        locator = page.locator(_mfa_prompt_xpath(phrase))
+        try:
+            total = locator.count()
+        except Exception:
+            total = 0
+        for index in range(min(total, 10)):
+            candidate = locator.nth(index)
+            try:
+                if candidate.is_visible():
+                    return kind, (candidate.text_content() or phrase).strip()
+            except Exception:
+                continue
+    return "", ""
+
+
+_MICROSOFT_LOGIN_HOSTS = (
+    "login.microsoftonline.com",
+    "login.live.com",
+    "msftauth.net",
+)
+
+
+def _on_microsoft_sign_in(page: Page) -> bool:
+    try:
+        url = (page.url or "").lower()
+    except Exception:
+        return False
+    return any(host in url for host in _MICROSOFT_LOGIN_HOSTS)
+
+
+def _authenticator_approval_complete(page: Page, started_on_microsoft: bool) -> bool:
+    """True only on a real post-approval signal, not a hidden-template race."""
+    # ServiceNow's application-list icon appears after the redirect.
+    try:
+        if page.locator(
+            '//div/img[@id="reg_img_304316340" and @artxt="Show Application List"]'
+        ).first.is_visible():
+            return True
+    except Exception:
+        pass
+
+    # Microsoft shows this only after the push was approved.
+    try:
+        if page.get_by_text("Stay signed in?", exact=False).first.is_visible():
+            return True
+    except Exception:
+        pass
+
+    # Leaving the Microsoft login domain with no MFA prompt visible is the
+    # normal success path. Do not use "prompt hidden" alone: the DOM briefly
+    # re-renders while the code is still being displayed.
+    if started_on_microsoft and not _on_microsoft_sign_in(page):
+        if not _visible_mfa_prompt(page)[0]:
+            return True
+    return False
+
+
 def request_password_from_user(runtime, task, logs, timestamp_fn, timeout=300):
     """
     Pauses the Playwright thread until the user submits a password
@@ -354,7 +435,12 @@ def request_password_from_user(runtime, task, logs, timestamp_fn, timeout=300):
     runtime["password_required"] = True   # <-- dashboard.js polling opens the iframe
     runtime["status"] = "Waiting for Password"
 
-    logs.append(f"{task_name}: waiting for password from user ---- {timestamp_fn()}")
+    logs.append(
+        f"{task_name}: waiting for password from user "
+        f"(user_id={runtime.get('user_id', '')}, "
+        f"run_key={runtime.get('run_key', '')}, event_id={id(pwd_event)}) "
+        f"---- {timestamp_fn()}"
+    )
     print("🔑 Waiting for user to submit password via iframe...")
     print(f"🔎 [Playwright] Waiting on pwd_event id={id(pwd_event)}, runtime id={id(runtime)}")
 
@@ -392,7 +478,12 @@ def request_2fa_code_from_user(runtime, task, logs, timestamp_fn, timeout=300):
     runtime["otp"] = None
     runtime["otp_required"] = True
 
-    logs.append(f"{task_name}: waiting for 2FA code from user ---- {timestamp_fn()}")
+    logs.append(
+        f"{task_name}: waiting for 2FA code from user "
+        f"(user_id={runtime.get('user_id', '')}, "
+        f"run_key={runtime.get('run_key', '')}, event_id={id(otp_event)}) "
+        f"---- {timestamp_fn()}"
+    )
     print("🔐 Waiting for user to submit 2FA code via iframe...")
 
     got_it = otp_event.wait(timeout=timeout)
@@ -439,10 +530,18 @@ def show_user_notice(
     runtime["notice_required"] = True
     runtime["status"] = status
 
+    identity = (
+        f"user_id={runtime.get('user_id', '')}, "
+        f"run_key={runtime.get('run_key', '')}"
+    )
     if logs is not None and timestamp_fn is not None:
-        logs.append(f"{task_name}: sign-in code shown to user ---- {timestamp_fn()}")
+        logs.append(
+            f"{task_name}: sign-in code shown to user ({identity}) "
+            f"---- {timestamp_fn()}"
+        )
     logging.getLogger("dashboard.notice").info(
-        "%s: sign-in code shown to user (code=%s)", task_name, notice_text
+        "%s: sign-in code shown to user (code=%s, %s)",
+        task_name, notice_text, identity,
     )
     _timing_mark(
         logs, task_name, "notice flag set (iframe can open)", timing_start, timestamp_fn
@@ -500,7 +599,11 @@ def show_user_alert(
         try:
             task_name = task["name"] if task else "Task"
             stamp = timestamp_fn() if callable(timestamp_fn) else ""
-            logs.append(f"{task_name}: {runtime['alert_title']} ---- {stamp}")
+            logs.append(
+                f"{task_name}: {runtime['alert_title']} "
+                f"(user_id={runtime.get('user_id', '')}, "
+                f"run_key={runtime.get('run_key', '')}) ---- {stamp}"
+            )
         except Exception:
             pass
 
@@ -511,16 +614,32 @@ def get_browser() -> str:
     print("Browser path ", os.path.join(str(os.environ["PROJECT_ROOT"]) , str(os.getenv("BROWSER_PATH"))))
     return os.path.join(str(os.environ["PROJECT_ROOT"]) , str(os.getenv("BROWSER_PATH")))
 
-def get_itsm_session_file_path() -> str:
-    os.makedirs(
-        os.path.dirname(
-            os.path.join(
-                str(os.environ["PROJECT_ROOT"]), str(os.getenv("ITSM_SESSION_FILE"))
-                )
-            ),  exist_ok=True
-        )
-    
-    return os.path.join(str(os.environ["PROJECT_ROOT"]) , str(os.getenv("ITSM_SESSION_FILE")))
+def get_itsm_session_file_path(runtime_or_key=None) -> str:
+    """Return the ITSM storage-state path for one run.
+
+    ``runtime`` carries a unique ``run_key`` for dashboard tasks and Night
+    Execution jobs. Using one global file let concurrent logins overwrite or
+    delete each other's session state. Callers without a run key (legacy/night
+    helpers) continue to use the configured global file.
+    """
+    default_path = os.path.join(
+        str(os.environ["PROJECT_ROOT"]), str(os.getenv("ITSM_SESSION_FILE"))
+    )
+
+    run_key = ""
+    if isinstance(runtime_or_key, dict):
+        run_key = str(runtime_or_key.get("run_key", "") or "")
+    elif runtime_or_key:
+        run_key = str(runtime_or_key)
+
+    safe_key = re.sub(r"[^A-Za-z0-9_-]", "", run_key)[:64]
+    session_path = (
+        os.path.join(os.path.dirname(default_path), f"itsm_session_{safe_key}.json")
+        if safe_key
+        else default_path
+    )
+    os.makedirs(os.path.dirname(session_path), exist_ok=True)
+    return session_path
 
 
 def call_with_modal_ack(func, *args, max_retries=3, **kwargs):
@@ -2105,6 +2224,186 @@ def iframe_message_handler(
 
     return result, logs
 
+def _click_first_visible(locator, label: str, logs: list, task_name: str, timestamp_fn) -> bool:
+    """Click the first visible match without failing on hidden duplicates."""
+    try:
+        count = min(locator.count(), 10)
+    except Exception:
+        count = 0
+    for index in range(count):
+        candidate = locator.nth(index)
+        try:
+            if candidate.is_visible():
+                candidate.click(timeout=5000)
+                if logs is not None:
+                    logs.append(f"{task_name}: clicked {label} ---- {timestamp_fn()}")
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _choose_verification_code(
+    page: Page,
+    logs: list,
+    task_name: str,
+    timestamp_fn,
+    wait_ms: int = 2500,
+) -> bool:
+    """Try to switch any Microsoft MFA variant to verification-code entry.
+
+    Returns True only when the OTP input is actually visible, so the dashboard
+    iframe is never opened for a flow that cannot accept a code.
+    """
+    for phrase in (
+        "I can't use my Microsoft Authenticator app right now",
+        "I can't use my Microsoft Authenticator app",
+    ):
+        if _click_first_visible(
+            page.get_by_text(phrase, exact=False), phrase, logs, task_name, timestamp_fn
+        ):
+            break
+
+    for phrase in ("Use a verification code", "Use a verification code instead"):
+        if _click_first_visible(
+            page.get_by_text(phrase, exact=False), phrase, logs, task_name, timestamp_fn
+        ):
+            break
+
+    # Legacy IAM DOM shape; the generic text locators above cover newer UIs.
+    _click_first_visible(
+        page.locator(
+            '//*[@id="idDiv_SAOTCS_Proofs"]//*[contains(text(),"Use a verification code")]'
+        ),
+        "legacy Use a verification code option",
+        logs,
+        task_name,
+        timestamp_fn,
+    )
+
+    try:
+        page.locator('#idTxtBx_SAOTCC_OTC').wait_for(state="visible", timeout=wait_ms)
+        return True
+    except Exception:
+        return False
+
+
+def _dismiss_stay_signed_in(page: Page) -> None:
+    """Accept the 'Stay signed in?' prompt when Microsoft shows it."""
+    try:
+        if page.locator("//*[text()='Stay signed in?']").is_visible():
+            page.locator('#idSIButton9').click(timeout=5000)
+            page.wait_for_load_state("load", timeout=30000)
+    except Exception:
+        pass
+
+
+def _submit_verification_code(
+    page: Page, runtime: dict, task: dict, logs: list, timestamp_fn
+) -> None:
+    """Ask the user for the code, submit it and finish the MFA redirect."""
+    clear_user_notice(runtime)
+    code = request_2fa_code_from_user(runtime, task, logs, timestamp_fn)
+    otp_input = page.locator('#idTxtBx_SAOTCC_OTC')
+    otp_input.wait_for(state="visible", timeout=15000)
+    otp_input.fill(code)
+    page.locator('#idSubmit_SAOTCC_Continue').click()
+    _dismiss_stay_signed_in(page)
+    page.wait_for_load_state("load", timeout=60000)
+    logs.append(
+        f"{task['name'] if task else 'Task'}: 2FA code submitted ---- {timestamp_fn()}"
+    )
+
+
+def _wait_for_authenticator_approval(
+    page: Page,
+    runtime: dict,
+    task: dict,
+    logs: list,
+    timestamp_fn,
+    timeout: int = 120,
+) -> bool:
+    """Wait for push approval, showing the sign-in code and any rejection.
+
+    Returns True if the flow switched to verification-code entry mid-wait.
+    """
+    task_name = task["name"] if task else "Task"
+    started = time.monotonic()
+    started_on_microsoft = _on_microsoft_sign_in(page)
+    deadline = time.time() + timeout
+    last_notice_code = ""
+
+    while time.time() < deadline:
+        error = _visible_niam_login_error(page)
+        if error:
+            message = f"Microsoft rejected the ITSM sign-in: {error}"
+            show_user_alert(
+                runtime,
+                task,
+                logs,
+                timestamp_fn,
+                title="ITSM sign-in failed",
+                text=message,
+            )
+            raise RuntimeError(message)
+
+        # "Verify your identity" first offers this chooser. Advance it so the
+        # number-matching page (which has the verification-code fallback) is
+        # reached for every MFA variant.
+        _click_authenticator_request(page, logs, task_name, timestamp_fn)
+
+        # Microsoft can offer the code option a moment after the push prompt.
+        if _choose_verification_code(page, logs, task_name, timestamp_fn, wait_ms=1500):
+            _timing_mark(
+                logs, task_name, "verification code selected after push prompt",
+                started, timestamp_fn,
+            )
+            return True
+
+        code = _niam_sign_in_code(page)
+        if code and code != last_notice_code:
+            show_user_notice(
+                runtime,
+                task,
+                logs,
+                timestamp_fn,
+                text=code,
+                status="Waiting for Sign-in Approval",
+                timing_start=started,
+            )
+            last_notice_code = code
+
+        # Only a real approval signal clears the notice. A hidden template or a
+        # momentary re-render must not make the code disappear for the user.
+        if _authenticator_approval_complete(page, started_on_microsoft):
+            _dismiss_stay_signed_in(page)
+            if last_notice_code:
+                clear_user_notice(runtime)
+                _timing_mark(
+                    logs, task_name, "push approval completed", started, timestamp_fn
+                )
+            else:
+                logs.append(
+                    f"{task_name}: push approval detected before sign-in code "
+                    f"was rendered ---- {timestamp_fn()}"
+                )
+            return False
+
+        page.wait_for_timeout(1500)
+
+    clear_user_notice(runtime)
+    message = "ITSM sign-in approval timed out. Approve the Microsoft prompt or use a verification code."
+    show_user_alert(
+        runtime,
+        task,
+        logs,
+        timestamp_fn,
+        title="ITSM sign-in timed out",
+        text=message,
+    )
+    raise TimeoutError(message)
+
+
 def handle_authenticator(
     page: Page,
     password: str,
@@ -2167,135 +2466,127 @@ def handle_authenticator(
             print(f"Alternative auth flow skipped: {inner}")
     
     try:
-        password_string_locator = page.locator("//*[text()='Enter password']")
         password_input_locator = page.locator('//div/input[@id="i0118"]')
-
-        if password_string_locator.is_visible():
+        if password_input_locator.is_visible():
             password_input_locator.fill(str(password).strip())
-            page.wait_for_selector(
-                '//div/input[@id="i0118"]', state="visible", timeout=15000
-            )
-            page.locator('//div/input[@id="i0118"]').fill(str(password).strip())
             page.locator('//div/input[@id="idSIButton9"]').click()
 
-        page.wait_for_load_state("load", timeout=2000)
+        page.wait_for_load_state("load", timeout=5000)
 
-        neo_mfa_prompt_locator = page.locator("//*[text()='Approve sign in request']")
-        
-        if neo_mfa_prompt_locator.is_visible():
-            page.get_by_text("Approve sign in request").wait_for(
-                    state="hidden", timeout=60000
-                )
-    
+        error = _visible_niam_login_error(page)
+        if error:
+            message = f"Microsoft rejected the ITSM password: {error}"
+            show_user_alert(
+                runtime,
+                task,
+                logs,
+                timestamp_fn,
+                title="ITSM sign-in failed",
+                text=message,
+            )
+            raise RuntimeError(message)
+
+        logs.append(
+            f"{task_name}: password submitted "
+            f"(user_id={runtime.get('user_id', '')}, "
+            f"run_key={runtime.get('run_key', '')}) ---- {timestamp_fn()}"
+        )
+    except RuntimeError:
+        raise
     except Exception:
         pass
 
-
-    mfa_prompt_locator = page.locator(
-            "//*[text()='Approve sign in request' or text()='Verify your identity' or text()='Face, fingerprint, PIN, or security key']"
+    # Whichever MFA variant Microsoft chose, prefer verification-code entry so
+    # the OTP iframe is available to every user instead of only one branch.
+    if _choose_verification_code(page, logs, task_name, timestamp_fn):
+        _timing_mark(
+            logs, task_name, "verification code selected from first MFA page",
+            time.monotonic(), timestamp_fn,
         )
-    
-    
+        _submit_verification_code(page, runtime, task, logs, timestamp_fn)
+        return
+
+
+    # Wait for a *visible* MFA prompt. Hidden Microsoft templates can match the
+    # old exact-text locator and never become visible, which left one run stuck
+    # in this wait while another reached the OTP iframe.
+    prompt_kind = ""
+    prompt_deadline = time.time() + 15
+    while time.time() < prompt_deadline:
+        prompt_kind, _ = _visible_mfa_prompt(page)
+        if prompt_kind:
+            break
+        error = _visible_niam_login_error(page)
+        if error:
+            message = f"Microsoft rejected the ITSM sign-in: {error}"
+            show_user_alert(
+                runtime,
+                task,
+                logs,
+                timestamp_fn,
+                title="ITSM sign-in failed",
+                text=message,
+            )
+            raise RuntimeError(message)
+        page.wait_for_timeout(500)
+
+    if not prompt_kind:
+        logs.append(
+            f"{task_name}: MFA prompt check skipped (no visible prompt) "
+            f"---- {timestamp_fn()}"
+        )
+        return
+
     try:
-        # Wait for either prompt to appear
-        mfa_prompt_locator.first.wait_for(state="visible", timeout=15000)
-
-        prompt_text = mfa_prompt_locator.first.text_content()
-
-        # Now check which one it is
-        if "Approve sign in request" in prompt_text:
+        if prompt_kind == "approve":
+            logs.append(
+                f"{task_name}: MFA branch = Approve sign in request "
+                f"(user_id={runtime.get('user_id', '')}, "
+                f"run_key={runtime.get('run_key', '')}) ---- {timestamp_fn()}"
+            )
             try:
-                # Wait for the prompt to disappear
-                # page.get_by_text("Approve sign in request").wait_for(
-                #     state="hidden", timeout=60000
-                # )
-                if page.get_by_text("I can't use my Microsoft Authenticator app right now").is_visible():
-                    page.get_by_text("I can't use my Microsoft Authenticator app right now").click()
-
-                page.wait_for_selector("//*[text() = 'Use a verification code']")
-
-                # if page.get_by_text("Use a verification code").is_visible():
-                #     page.get_by_text("Use a verification code").click()
-
-                print("\"Use a verification code\" is visible =>", page.locator('//*[@id="idDiv_SAOTCS_Proofs"]/div[2]/div/div/div[2]/div[text()="Use a verification code"]').is_visible())
-                if page.locator('//*[@id="idDiv_SAOTCS_Proofs"]/div[2]/div/div/div[2]/div[text()="Use a verification code"]').is_visible():
-                    page.locator('//*[@id="idDiv_SAOTCS_Proofs"]/div[2]/div/div/div[2]/div[text()="Use a verification code"]').click()
-                
-                 # ===== Get the code from the user via iframe form =====
-                code = request_2fa_code_from_user(runtime, task, logs, timestamp_fn)
-
-                # Fill the code into the MS verification input (adjust selector if needed)
-                otp_input = page.locator('#idTxtBx_SAOTCC_OTC')
-                otp_input.wait_for(state="visible", timeout=15000)
-                otp_input.fill(code)
-
-                # Click "Verify" / "Sign in"
-                # After clicking Verify/Continue on OTP
-                page.locator('#idSubmit_SAOTCC_Continue').click()
-
-                # Handle the "Stay signed in?" prompt that often appears after MFA
-                try:
-                    stay_signed_in = page.locator("//*[text()='Stay signed in?']")
-                    stay_signed_in.wait_for(state="visible", timeout=15000)
-                    # Click "Yes" to persist the session (important for storage_state!)
-                    page.locator('#idSIButton9').click()   # "Yes" button
-                except Exception:
-                    pass
-
-                page.wait_for_load_state("load", timeout=60000)   # not 2000
-                logs.append(f"{task_name}: 2FA code submitted ---- {timestamp_fn()}")
-                # ======================================================
-
-            except Exception as e:
-                print(f"OTP handling error: {e}")
-                logs.append(f"{task_name}: OTP handling error: {e} ---- {timestamp_fn()}")
+                # The first attempt above may have raced the MFA page load.
+                if _choose_verification_code(page, logs, task_name, timestamp_fn):
+                    _submit_verification_code(page, runtime, task, logs, timestamp_fn)
+                    return
+                if _wait_for_authenticator_approval(
+                    page, runtime, task, logs, timestamp_fn
+                ):
+                    _submit_verification_code(page, runtime, task, logs, timestamp_fn)
+            except Exception as exc:
+                logs.append(
+                    f"{task_name}: OTP handling error: {exc} ---- {timestamp_fn()}"
+                )
                 raise
 
-        elif "Verify your identity" in prompt_text:
-            while page.get_by_text(
-                "Approve a request on my Microsoft Authenticator app"
-            ).is_visible():
-                page.get_by_text(
-                    "Approve a request on my Microsoft Authenticator app"
-                ).click(button="left")
-                page.wait_for_timeout(1000)
+        elif prompt_kind == "verify":
+            logs.append(
+                f"{task_name}: MFA branch = Verify your identity "
+                f"(user_id={runtime.get('user_id', '')}, "
+                f"run_key={runtime.get('run_key', '')}) ---- {timestamp_fn()}"
+            )
+            if _wait_for_authenticator_approval(
+                page, runtime, task, logs, timestamp_fn
+            ):
+                _submit_verification_code(page, runtime, task, logs, timestamp_fn)
 
-            try:
-                approve_prompt = page.get_by_text("Approve sign in request")
-                while True:
-                    if approve_prompt.is_visible():
-                        break
-                    else:
-                        
-                        approve_prompt_failed_prompt = page.get_by_text(
-                            "Approve a request on my Microsoft Authenticator app"
-                        )
-                        while not approve_prompt_failed_prompt.is_visible():
-                            approve_prompt_failed_prompt.click(button="left")
-                            page.wait_for_timeout(1000)
-                        approve_prompt.wait_for(state="visible", timeout=10000)
-                # print("Waiting for sign in approval after verification step.")
-                approve_prompt.wait_for(state="hidden", timeout=60000)
-                # print("Sign in approved by user after verification.")
+        elif prompt_kind == "face":
+            logs.append(
+                f"{task_name}: MFA branch = Face/fingerprint/PIN/security key "
+                f"(user_id={runtime.get('user_id', '')}, "
+                f"run_key={runtime.get('run_key', '')}) ---- {timestamp_fn()}"
+            )
+            if _wait_for_authenticator_approval(
+                page, runtime, task, logs, timestamp_fn
+            ):
+                _submit_verification_code(page, runtime, task, logs, timestamp_fn)
 
-            except Exception as e:
-                pass
-        
-        elif "Face, fingerprint, PIN, or security key" in prompt_text:
-            try:
-                approve_prompt = page.get_by_text(
-                    "Face, fingerprint, PIN, or security key"
-                )
-                while True:
-                    if not approve_prompt.is_visible():
-                        break
-                    else:
-                        approve_prompt.wait_for(state="hidden", timeout=10000)
-            except Exception as e:
-                pass
-    
-    except Exception:
-        pass
+    except (RuntimeError, TimeoutError):
+        raise
+    except Exception as exc:
+        logs.append(
+            f"{task_name}: MFA handling error: {exc} ---- {timestamp_fn()}"
+        )
 
 
 def search_for_cr(page: Page, cr: str, logs: list):
@@ -2645,7 +2936,7 @@ def itsm_logger(
         navigate_to_change_management(page)
 
         logs.append(f"{task_name}: logged in successfully ---- {timestamp_fn()}")
-        context.storage_state(path=get_itsm_session_file_path())
+        context.storage_state(path=get_itsm_session_file_path(runtime))
         logs.append("✓ Selected task is in progress please wait...")
 
     except Exception as e:
@@ -2893,7 +3184,7 @@ def session_maker(
             browser, main_context, login_page, logs = itsm_logger(
                 logs, playwright, headless_arg, task, runtime, timestamp_fn, user_email
             )
-            main_context.storage_state(path=get_itsm_session_file_path())
+            main_context.storage_state(path=get_itsm_session_file_path(runtime))
             session_made = True
             # if main_context:
             #     main_context.close()
@@ -2931,14 +3222,21 @@ def session_maker(
 
 
 
-def session_breaker():
+def session_breaker(runtime=None, session_file=None):
+    """Log out and delete the ITSM session state for one run.
+
+    Passing ``runtime`` keeps concurrent users from logging each other out or
+    deleting each other's storage-state file. Legacy callers may omit both
+    arguments and continue to use the global file.
+    """
+    path = session_file or get_itsm_session_file_path(runtime)
     try:
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(
                 headless=True, executable_path=get_browser()
             )
 
-            main_context = browser.new_context(storage_state=get_itsm_session_file_path())
+            main_context = browser.new_context(storage_state=path)
             login_page = main_context.new_page()
             login_page.goto(
                 str(os.getenv("LOGGED_ITSM_URL"))
@@ -2953,13 +3251,16 @@ def session_breaker():
             if main_context:
                 main_context.close()
 
+            if browser:
+                browser.close()
+
             if playwright:
                 playwright.stop()
                 del playwright
-        
-        if Path(get_itsm_session_file_path()).exists():
-            Path(get_itsm_session_file_path()).unlink()
-    
+
+        if Path(path).exists():
+            Path(path).unlink()
+
     except Exception:
         pass
 
