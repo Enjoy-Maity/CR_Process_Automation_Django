@@ -117,7 +117,7 @@ remain downloadable.
 guarded by the task modules' file locks. The `region` column already present on
 `MasterCRDatabase` and `SelectedDateTable` is reused for the backend CR filter;
 no new schema is required. Selecting a date and regions on CR Planning refreshes
-both the counts and the CR row table from `MasterCRDatabase` via
+the per-region CR counts in the task table from `MasterCRDatabase` via
 `/filter-region-crs/`.
 
 NIAM workbooks follow the same hierarchy:

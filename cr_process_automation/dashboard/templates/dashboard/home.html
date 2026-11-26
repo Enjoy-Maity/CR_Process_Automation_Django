@@ -89,70 +89,12 @@
         </div>
     </div>
 
-    <div class="data-panel" style="margin-top:16px;">
-        <div class="data-panel-scroll">
-            <div class="cr-history-filter-label" id="cr-planning-table-meta" style="margin-bottom:8px;">Select a date and region(s) to load CRs from the backend automatically.</div>
-            <table class="task-table compact-task-table ultra-compact-task-table" id="cr-planning-cr-table">
-                <thead>
-                    <tr>
-                        <th>CR No</th>
-                        <th>Region</th>
-                        <th>Circle</th>
-                        <th>Priority</th>
-                        <th>Planning Status</th>
-                        <th>NIAM Required</th>
-                        <th>NIAM Node Type</th>
-                        <th>Node Details</th>
-                        <th>Activity Description</th>
-                    </tr>
-                </thead>
-                <tbody id="cr-planning-cr-table-body">
-                    <tr><td colspan="9" class="text-muted">No CRs loaded.</td></tr>
-                </tbody>
-            </table>
-        </div>
-    </div>
 </div>
 
 <script>
 const HOME_SESSION_KEY = 'home_page_state';
 
-function escapeHtml(value) {
-    if (value === null || value === undefined) return '';
-    const div = document.createElement('div');
-    div.textContent = String(value);
-    return div.innerHTML;
-}
-
-function renderCrPlanningRows(rows) {
-    const body = document.getElementById('cr-planning-cr-table-body');
-    const meta = document.getElementById('cr-planning-table-meta');
-    if (!body) return;
-
-    const list = Array.isArray(rows) ? rows : [];
-    if (list.length === 0) {
-        body.innerHTML = '<tr><td colspan="9" class="text-muted">No CRs found for the selected date and region(s).</td></tr>';
-        if (meta) meta.textContent = 'No backend CR rows for this filter.';
-        return;
-    }
-
-    body.innerHTML = list.map(row => `
-        <tr>
-            <td>${escapeHtml(row.cr_no)}</td>
-            <td>${escapeHtml(row.region)}</td>
-            <td>${escapeHtml(row.circle)}</td>
-            <td>${escapeHtml(row.priority)}</td>
-            <td>${escapeHtml(row.planning_status)}</td>
-            <td>${escapeHtml(row.niam_ticket_required)}</td>
-            <td>${escapeHtml(row.niam_node_type)}</td>
-            <td>${escapeHtml(row.node_details)}</td>
-            <td>${escapeHtml(row.activity_description)}</td>
-        </tr>
-    `).join('');
-    if (meta) meta.textContent = `Loaded ${list.length} CR row(s) from the backend MasterCRDatabase table.`;
-}
-
-function saveHomeSessionState(date, regions, countsAll, countsPlanned, crRows) {
+function saveHomeSessionState(date, regions, countsAll, countsPlanned) {
     const perTaskCounts = [];
 
     document.querySelectorAll("tr[data-task-id]").forEach(row => {
@@ -177,7 +119,6 @@ function saveHomeSessionState(date, regions, countsAll, countsPlanned, crRows) {
         date,
         regions,
         perTaskCounts,
-        cr_rows: Array.isArray(crRows) ? crRows : [],
     };
 
     try {
@@ -194,10 +135,7 @@ async function applyRegionFilter(silent) {
     const regions = Array.from(checkboxes).map(cb => cb.value);
 
     if (!date || regions.length === 0) {
-        renderCrPlanningRows([]);
-        const meta = document.getElementById('cr-planning-table-meta');
-        if (meta) meta.textContent = 'Select a date and region(s) to load CRs from the backend automatically.';
-        saveHomeSessionState(date, regions, {}, {}, []);
+        saveHomeSessionState(date, regions, {}, {});
         if (!silent) alert("Please select a date and at least one region.");
         return false;
     }
@@ -213,8 +151,6 @@ async function applyRegionFilter(silent) {
 
         const countsAll = data.counts_all || {};
         const countsPlanned = data.counts_planned || {};
-        const crRows = Array.isArray(data.rows) ? data.rows : (data.cr_rows || []);
-
         document.querySelectorAll("tr[data-task-id]").forEach(row => {
             const taskId = parseInt(row.dataset.taskId, 10);
             const totalCell = row.querySelector(".js-total-crs");
@@ -232,9 +168,7 @@ async function applyRegionFilter(silent) {
             if (southCell) southCell.textContent = src.south_crs ?? 0;
         });
 
-        // The CR table is refreshed from the backend on every filter change.
-        renderCrPlanningRows(crRows);
-        saveHomeSessionState(date, regions, countsAll, countsPlanned, crRows);
+        saveHomeSessionState(date, regions, countsAll, countsPlanned);
         return true;
     } catch (e) {
         if (!silent) alert("Error fetching region CR data.");
@@ -261,9 +195,7 @@ function restoreHomeSessionState() {
         });
     }
 
-    renderCrPlanningRows(saved.cr_rows || []);
-
-    // Re-fetch from the backend instead of trusting the cached rows/counts.
+    // Re-fetch from the backend instead of trusting the cached counts.
     if (saved.date && Array.isArray(saved.regions) && saved.regions.length) {
         applyRegionFilter(true);
     }
@@ -274,7 +206,7 @@ document.getElementById("apply_region_filter_btn").addEventListener("click", fun
     applyRegionFilter(false);
 });
 
-// Selecting the night or changing regions refreshes the table from the
+// Selecting the night or changing regions refreshes the counts from the
 // backend immediately; the Apply button remains for an explicit re-fetch.
 document.getElementById("cr_filter_date").addEventListener("change", function () {
     applyRegionFilter(true);
