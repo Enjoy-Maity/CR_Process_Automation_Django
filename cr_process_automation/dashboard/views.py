@@ -39,6 +39,7 @@ from .utils import task_runtime
 from .utils.task_runtime import RUN_REGISTRY
 from .utils.niam_paths import niam_output_path_for, niam_template_path_for
 from .utils import region_paths
+from .utils import region_status
 from .utils.region_paths import primary_region
 from .exceptions import (
     ValidationException,
@@ -844,6 +845,10 @@ def start_task(request, task_id):
     # Isolated, per-(user, task) runtime context.
     runtime = RUN_REGISTRY.begin(user_id, task_id)
     runtime["status"] = "Running"
+    if task_id in region_paths.REGION_TASK_IDS and selected_date and region_values:
+        region_status.publish(
+            task_id, selected_date, region_values, region_status.RUNNING
+        )
     # Shared zero point for the NIAM timing checkpoints, set as soon as the
     # request is accepted so module-import/thread-start time is included too.
     runtime["_timing_start"] = time.monotonic()
@@ -931,6 +936,15 @@ def start_task(request, task_id):
                 result = {"status": "Completed", "download_ready": False}
 
             runtime["status"] = result.get("status", "Completed")
+            if task_id in region_paths.REGION_TASK_IDS and selected_date:
+                final_status = (
+                    region_status.COMPLETED
+                    if runtime["status"] == "Completed"
+                    else region_status.FAILED
+                )
+                region_status.publish(
+                    task_id, selected_date, region_values, final_status
+                )
 
             # Region-based tasks publish the artefact into every selected
             # region folder. Non-region tasks keep the private run copy.
@@ -960,6 +974,10 @@ def start_task(request, task_id):
 
         except Exception as exc:
             runtime["status"] = "Failed"
+            if task_id in region_paths.REGION_TASK_IDS and selected_date:
+                region_status.publish(
+                    task_id, selected_date, region_values, region_status.FAILED
+                )
             msg = f"{task['name']} failed: {str(exc)}"
             log_user(runtime, f"{msg} ---- {_timestamp()}")
             log_user(runtime, traceback.format_exc())
@@ -1129,6 +1147,7 @@ def task_dashboard_data(request):
     for task in _build_tasks_for_ui(request.user.id, include_niam=True):
         task_id = task["id"]
         requires_auth = _requires_auth(task_id)
+        status = task["status"]
         download_ready = task["download_ready"]
         download_name = task["download_name"]
         if task_id in region_paths.REGION_TASK_IDS:
@@ -1140,6 +1159,12 @@ def task_dashboard_data(request):
                 # No date/regions selected on CR Planning: there is no AND
                 # condition to satisfy, so never expose a download button.
                 download_ready = False
+            if check_region_files:
+                # Badge follows what any user did for these regions, not the
+                # viewing user's own run: AND across every selected region.
+                status = region_status.combined_status(
+                    task_id, requested_date, requested_regions
+                )
             if check_region_files and download_ready:
                 primary_path = region_paths.task_output_path(
                     task_id, requested_date, requested_regions[0]
@@ -1166,7 +1191,7 @@ def task_dashboard_data(request):
             })
         tasks.append({
             "id": task_id,
-            "status": task["status"],
+            "status": status,
             "download_ready": download_ready,
             "download_name": download_name,
             "download_url": download_url if download_ready else "",
