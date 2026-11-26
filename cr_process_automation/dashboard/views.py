@@ -1,4 +1,5 @@
 from pathlib import Path
+from urllib.parse import urlencode
 from dateutil import parser
 from datetime import datetime, timedelta
 import json
@@ -1154,12 +1155,21 @@ def task_dashboard_data(request):
                         # the download endpoint's AND check reject a valid file.
                         runtime_ctx["selected_date"] = requested_date
                         runtime_ctx["regions"] = list(requested_regions)
+        download_url = f"/download/task/{task_id}/"
+        if check_region_files and download_ready:
+            # Region artefacts are shared by every logged-in user, so the link
+            # must carry the filters that made it visible. A second user has no
+            # in-memory run of their own to fall back on.
+            download_url += "?" + urlencode({
+                "date": requested_date,
+                "regions": ",".join(requested_regions),
+            })
         tasks.append({
             "id": task_id,
             "status": task["status"],
             "download_ready": download_ready,
             "download_name": download_name,
-            "download_url": f"/download/task/{task_id}/" if download_ready else "",
+            "download_url": download_url if download_ready else "",
             "total_crs": task["total_crs"],
             "north_crs": task["north_crs"],
             "west_crs": task["west_crs"],
@@ -1195,7 +1205,13 @@ def task_dashboard_data(request):
 @login_required(login_url='login')
 @handle_exceptions
 def download_task_output(request, task_id):
-    """Download the output file produced by *this* user's run of the task."""
+    """Download a task output for the requesting user.
+
+    Region artefacts live in shared folders: once the file exists for every
+    selected region, any logged-in user may download it, even if they never
+    started the task themselves. Private/legacy ``task_runs`` copies still
+    require the requesting user's own active TaskRun.
+    """
     try:
         task_id = int(task_id)
     except (ValueError, TypeError):
@@ -1206,31 +1222,70 @@ def download_task_output(request, task_id):
         raise NotFoundException(f"Task with ID {task_id} not found.")
 
     runtime = RUN_REGISTRY.peek(request.user.id, task_id)
-    if not runtime:
-        raise NotFoundException(
-            "No active run found for this task. Please start the task again.",
-            title="No Active Run"
-        )
 
-    # The DB row is the authority: the file must belong to this user's current
-    # login session, not merely to a task id.
-    owned = TaskRun.objects.using("default").filter(
-        triggered_by=request.user,
-        session_key=request.session.session_key or "",
-        run_key=runtime["run_key"],
-    ).exists()
-    if not owned:
-        raise NotFoundException(
-            "You do not have access to this file.",
-            title="Access Denied"
-        )
+    # Private/legacy per-run copies stay tied to this user's login session.
+    if runtime:
+        owned = TaskRun.objects.using("default").filter(
+            triggered_by=request.user,
+            session_key=request.session.session_key or "",
+            run_key=runtime["run_key"],
+        ).exists()
+        if not owned:
+            raise NotFoundException(
+                "You do not have access to this file.",
+                title="Access Denied"
+            )
 
-    file_path = runtime.get("download_name")
-    if not file_path or not runtime.get("download_ready"):
-        raise NotFoundException(
-            "No file is available for download yet.",
-            title="File Not Ready"
+    # CR Planning carries the filters on the link, so a simultaneous user can
+    # resolve the shared artefact without a run of their own in RUN_REGISTRY.
+    requested_date = request.GET.get("date", "").strip()
+    requested_regions = _parse_regions(request.GET.get("regions", ""))
+    shared_path = None
+    if (
+        task_id in region_paths.REGION_TASK_IDS
+        and requested_date
+        and requested_regions
+    ):
+        shared_path = region_paths.task_output_path(
+            task_id, requested_date, requested_regions[0]
         )
+        if shared_path is None or not region_paths.all_region_files_ready(
+            task_id, requested_date, requested_regions
+        ):
+            raise NotFoundException(
+                "The output file is not available for all selected regions.",
+                title="File Not Ready"
+            )
+
+    if shared_path is not None:
+        file_path = str(shared_path)
+    else:
+        if not runtime:
+            raise NotFoundException(
+                "No active run found for this task. Please start the task again.",
+                title="No Active Run"
+            )
+        file_path = runtime.get("download_name")
+        if not file_path or not runtime.get("download_ready"):
+            raise NotFoundException(
+                "No file is available for download yet.",
+                title="File Not Ready"
+            )
+
+        # Older per-user runs must still satisfy the AND condition.
+        runtime_regions = _parse_regions(runtime.get("regions"))
+        if (
+            task_id in region_paths.REGION_TASK_IDS
+            and runtime.get("selected_date")
+            and runtime_regions
+            and not region_paths.all_region_files_ready(
+                task_id, runtime["selected_date"], runtime_regions
+            )
+        ):
+            raise NotFoundException(
+                "The output file is not available for all selected regions.",
+                title="File Not Ready"
+            )
 
     path_obj = Path(file_path)
     if not path_obj.exists():
@@ -1239,26 +1294,13 @@ def download_task_output(request, task_id):
             title="File Not Found"
         )
 
-    # With a selected date/regions the file must exist for every region (AND).
-    if (
-        task_id in region_paths.REGION_TASK_IDS
-        and runtime.get("selected_date")
-        and runtime.get("regions")
-        and not region_paths.all_region_files_ready(
-            task_id, runtime["selected_date"], runtime["regions"]
-        )
-    ):
-        raise NotFoundException(
-            "The output file is not available for all selected regions.",
-            title="File Not Ready"
-        )
-
     # Region outputs live under HOST_DOWNLOAD_FOLDER; older runs may still use
     # the private task_runs copy. Allow both, never an arbitrary filesystem path.
-    allowed_roots = [
-        Path(settings.HOST_DOWNLOAD_FOLDER),
-        Path(settings.MEDIA_ROOT) / "task_runs" / runtime["run_key"],
-    ]
+    allowed_roots = [Path(settings.HOST_DOWNLOAD_FOLDER)]
+    if runtime:
+        allowed_roots.append(
+            Path(settings.MEDIA_ROOT) / "task_runs" / runtime["run_key"]
+        )
     try:
         resolved_path = path_obj.resolve()
         inside_allowed_root = any(
