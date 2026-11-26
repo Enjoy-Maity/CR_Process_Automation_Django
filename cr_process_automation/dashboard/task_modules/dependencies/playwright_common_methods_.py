@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Union, Tuple, List, Literal, AnyStr, Dict
 import threading
 import  dateutil.parser as dp
+from dashboard.utils.region_paths import format_env_path, safe_region
 
 
 class NiamCredentialsError(ValueError):
@@ -1882,6 +1883,7 @@ def raw_report_downloader(
     runtime:dict|None=None,
     timestamp_fn:Callable=_timestamp,
     date_: datetime|date|str|None = None,
+    region: str|None = None,
 ) -> list:
     # date_1 = ""
     # date_2 = ""
@@ -1907,7 +1909,7 @@ def raw_report_downloader(
 
     folder_date = (dp.parse(date_1)).strftime("%d-%b-%y")
 
-    folder = str(os.getenv("RAW_REPORT_DOWNLOAD_FOLDER")).format(folder_date)
+    folder = str(format_env_path("RAW_REPORT_DOWNLOAD_FOLDER", folder_date, safe_region(region)))
     
     page.wait_for_load_state("domcontentloaded")
     page.wait_for_timeout(1000)

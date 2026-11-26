@@ -26,6 +26,8 @@ from typing import Any, Dict, Optional
 from dateutil import parser as date_parser
 from django.conf import settings
 
+from .region_paths import format_env_path, primary_region, task_date_label
+
 # Tasks that authenticate against ITSM (password + OTP iframes).
 TASK_REQUIRES_AUTH = {1, 2, 3, 4, 5}
 
@@ -164,31 +166,31 @@ def _as_datetime(selected_date: Any) -> datetime:
     return date_parser.parse(str(selected_date))
 
 
-def shared_input_paths(selected_date: Any = None) -> Dict[str, str]:
+def shared_input_paths(selected_date: Any = None, regions=None) -> Dict[str, str]:
     """
-    Canonical paths of the two deliberately shared input files.
+    Canonical paths of the two shared input files for one night and region.
 
-    These files stay shared between users (protected by the file locks inside
-    the task modules). Only the *results* copied into a run's private directory
-    are user-specific.
+    The files are shared between users (protected by the task-module file
+    locks); the region folder is the isolation boundary.  When several regions
+    are selected, the primary (first) region is the one recorded here and the
+    finished artefact is copied to every selected region by the caller.
     """
     parsed = _as_datetime(selected_date)
-    folder_date = parsed.strftime("%d-%b-%y")
+    folder_date = task_date_label(1, parsed)
+    region = primary_region(regions)
 
-    raw_folder_template = os.getenv("RAW_REPORT_DOWNLOAD_FOLDER", "")
     raw_report_file = ""
-    if raw_folder_template:
-        raw_report_file = os.path.join(
-            raw_folder_template.format(folder_date),
-            f"PS_Core_Raw_Report_{parsed.strftime('%Y-%m-%d')}.csv",
+    if os.getenv("RAW_REPORT_DOWNLOAD_FOLDER", ""):
+        raw_report_file = str(
+            format_env_path("RAW_REPORT_DOWNLOAD_FOLDER", folder_date, region)
+            / f"PS_Core_Raw_Report_{parsed.strftime('%Y-%m-%d')}.csv"
         )
 
-    planning_folder_template = os.getenv("PLANNING_SHEET_DOWNLOAD_FOLDER", "")
     planning_sheet = ""
-    if planning_folder_template:
-        planning_sheet = os.path.join(
-            planning_folder_template.format(folder_date),
-            os.getenv("PLANNING_SHEET_WORKBOOK_NAME", "Standard_Planning_Sheet.xlsx"),
+    if os.getenv("PLANNING_SHEET_DOWNLOAD_FOLDER", ""):
+        planning_sheet = str(
+            format_env_path("PLANNING_SHEET_DOWNLOAD_FOLDER", folder_date, region)
+            / os.getenv("PLANNING_SHEET_WORKBOOK_NAME", "Standard_Planning_Sheet.xlsx")
         )
 
     return {

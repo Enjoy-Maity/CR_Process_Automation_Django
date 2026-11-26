@@ -39,9 +39,17 @@ from dashboard.task_modules.cr_hygiene_checks.tasks import (
     cr_wise_status_modifier_update_func,
 )
 from dashboard.utils.file_locks import file_lock
+from dashboard.utils.region_paths import (
+    DEFAULT_REGION,
+    format_env_path,
+    primary_region,
+    task_date_label,
+)
 
 
 glogs = Queue()
+# Set by run_task; the module is loaded fresh for every run.
+active_region = DEFAULT_REGION
 session_file = None
 work_detail_queue = Queue()
 text_contents = None
@@ -68,7 +76,9 @@ def bpms_manual_cr_design_handler(cr: str, page: Page, date_: datetime, logs: li
     global manual_crs, cr_to_circle_dict
     manual_crs.append(cr)
     # folder = os.path.dirname(str(workbook_file_path))
-    folder = os.path.dirname(os.getenv("BPMS_CR_HYGIENE_CHECKS_FILE").format(date_.strftime('%d-%b-%y')))
+    folder = os.path.dirname(
+        str(format_env_path("BPMS_CR_HYGIENE_CHECKS_FILE", task_date_label(4, date_), active_region))
+    )
     # print(f"{folder=}")
     
     _, attachment_name, logs = pcm.bpms_crs_attachment_name_getter(cr, page, logs)
@@ -85,7 +95,9 @@ def bpms_auto_cr_design_handler(cr: str, page: Page, date_: datetime, logs: list
     auto_crs.append(cr)
 
     # folder = os.path.dirname(str(workbook_file_path))
-    folder = os.path.dirname(os.getenv("BPMS_CR_HYGIENE_CHECKS_FILE").format(date_.strftime('%d-%b-%y')))
+    folder = os.path.dirname(
+        str(format_env_path("BPMS_CR_HYGIENE_CHECKS_FILE", task_date_label(4, date_), active_region))
+    )
     
     _, attachment, logs = pcm.bpms_auto_crs_tasks_lld_automation_handler(cr, page, folder, cr_to_circle_dict[cr], date_, logs)
     auto_crs_attachment_dict[cr] = attachment
@@ -115,7 +127,9 @@ def first_download_itsm_thread_task(cr_batch: List[AnyStr], date_: datetime):
             thread_page, logs =pcm.new_page_opener(thread_context, logs)
             token_for_locking = True
             # workbook_parent = os.path.dirname(str(workbook_file_path))
-            workbook_parent = os.path.dirname(str(os.getenv("BPMS_CR_HYGIENE_CHECKS_FILE")).format(date_.strftime("%d-%b-%y")))
+            workbook_parent = os.path.dirname(
+                str(format_env_path("BPMS_CR_HYGIENE_CHECKS_FILE", task_date_label(4, date_), active_region))
+            )
             os.makedirs(workbook_parent, exist_ok=True)
             print(f"\n\n{workbook_parent=}")
             print(f"{os.path.exists(workbook_parent)=}")
@@ -638,7 +652,9 @@ def manual_installed_files_checker(
     # workbook_folder = os.path.dirname(str(workbook_file_path))
     # install_plan_and_test_plan_folder = Path(workbook_folder).joinpath(str(TODAY_CR_DATE_FOLDER))
     install_plan_and_test_plan_folder = Path(
-        os.path.dirname(str(os.getenv("BPMS_CR_HYGIENE_CHECKS_FILE")).format(date_.strftime("%d-%b-%y")))
+        os.path.dirname(
+            str(format_env_path("BPMS_CR_HYGIENE_CHECKS_FILE", task_date_label(4, date_), active_region))
+        )
     ).joinpath(
         "Install_and_Backout_Plan_Files",
         f"{date_.strftime('%d-%b-%Y')}"
@@ -961,9 +977,13 @@ def node_counts_remarks_maker(cr: str):
 
 def validation_summary_writer_and_planning_sheet_updater(filtered_df: pd.DataFrame, logs: list, date_: datetime) -> list:
     """Serialise writes to the shared planning-sheet workbook across users."""
-    workbook_file_path = os.path.join(
-        os.getenv("PLANNING_SHEET_DOWNLOAD_FOLDER").format(date_.strftime('%d-%b-%y')),
-        os.getenv("PLANNING_SHEET_WORKBOOK_NAME"),
+    workbook_file_path = str(
+        format_env_path(
+            "PLANNING_SHEET_DOWNLOAD_FOLDER",
+            task_date_label(4, date_),
+            active_region,
+        )
+        / os.getenv("PLANNING_SHEET_WORKBOOK_NAME")
     )
     with file_lock(workbook_file_path):
         return _validation_summary_writer_and_planning_sheet_updater_locked(filtered_df, logs, date_)
@@ -983,9 +1003,18 @@ def _validation_summary_writer_and_planning_sheet_updater_locked(filtered_df: pd
     global manual_crs_attachment_file_content_count_dict
     global manual_crs_file_content_status_dict
     
-    summary_excel_file_path = str(os.getenv("BPMS_CR_HYGIENE_CHECKS_FILE")).format(date_.strftime("%d-%b-%y"))
+    summary_excel_file_path = str(
+        format_env_path("BPMS_CR_HYGIENE_CHECKS_FILE", task_date_label(4, date_), active_region)
+    )
     os.makedirs(os.path.dirname(summary_excel_file_path), exist_ok=True)
-    workbook_file_path = os.path.join(os.getenv("PLANNING_SHEET_DOWNLOAD_FOLDER").format(date_.strftime('%d-%b-%y')), os.getenv("PLANNING_SHEET_WORKBOOK_NAME"))
+    workbook_file_path = str(
+        format_env_path(
+            "PLANNING_SHEET_DOWNLOAD_FOLDER",
+            task_date_label(4, date_),
+            active_region,
+        )
+        / os.getenv("PLANNING_SHEET_WORKBOOK_NAME")
+    )
     sheet_name = "BPMS CR Validation Summary"
     df = pd.DataFrame()
     
@@ -1168,7 +1197,16 @@ def _validation_summary_writer_and_planning_sheet_updater_locked(filtered_df: pd
     )
     
     excel_modifier_obj.save()
-    workbook_styling(os.path.join(os.getenv("PLANNING_SHEET_DOWNLOAD_FOLDER").format(date_.strftime('%d-%b-%y')), os.getenv("PLANNING_SHEET_WORKBOOK_NAME")))
+    workbook_styling(
+        str(
+            format_env_path(
+                "PLANNING_SHEET_DOWNLOAD_FOLDER",
+                task_date_label(4, date_),
+                active_region,
+            )
+            / os.getenv("PLANNING_SHEET_WORKBOOK_NAME")
+        )
+    )
     
     
     logs = validation_file_colorizer(
@@ -1220,6 +1258,7 @@ def run_task(
     global manual_crs_attachment_extension_dict
     global manual_crs_attachment_zip_validity_status
     global manual_crs_attachment_file_content_count_dict
+    global active_region
 
     GLOBAL_LOGS = GLOBAL_LOGS or []
     timestamp_fn = timestamp_fn or _timestamp
@@ -1267,6 +1306,7 @@ def run_task(
 
     parsed_date = dp.parse(selected_date)
     date_ = parsed_date
+    active_region = primary_region(regions)
 
     if regions is not None:
         regions = [str(region).upper() for region in regions]
@@ -1435,6 +1475,8 @@ def run_task(
         "status": "Completed",
         "message": f"{task['name']} completed successfully.",
         "download_ready": True,
-        "download_name": str(os.getenv("BPMS_CR_HYGIENE_CHECKS_FILE")).format(parsed_date.strftime("%d-%b-%y")),
+        "download_name": str(
+            format_env_path("BPMS_CR_HYGIENE_CHECKS_FILE", task_date_label(4, parsed_date), active_region)
+        ),
         "counts": {},
     }

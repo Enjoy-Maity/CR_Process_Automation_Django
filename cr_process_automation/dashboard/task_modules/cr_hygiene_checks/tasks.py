@@ -23,6 +23,7 @@ from django.http import JsonResponse
 from django_pandas.io import read_frame
 from dashboard.models import MasterCRDatabase, SelectedDateTable, CRWiseStatus
 from dashboard.utils.file_locks import file_lock
+from dashboard.utils.region_paths import format_env_path, primary_region, task_date_label
 import dashboard.task_modules.dependencies.batch_methods as bm
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
@@ -184,25 +185,38 @@ def interdomain_measuring_kpis_remarks_lambda_func(x:str) -> str:
     return "Not Mentioned" if pd.isna(x) or str(x).strip().lower().__contains__('none|na|n/a') else str(x).strip()
 
 
-def validation_summary_writer_and_planning_sheet_updater(filtered_df: pd.DataFrame, logs: list, date_: datetime) -> list:
-    """Serialise writes to the shared planning-sheet workbook across users."""
-    workbook = os.path.join(
-        os.getenv("PLANNING_SHEET_DOWNLOAD_FOLDER").format(date_.strftime('%d-%b-%y')),
-        os.getenv("PLANNING_SHEET_WORKBOOK_NAME"),
+def validation_summary_writer_and_planning_sheet_updater(filtered_df: pd.DataFrame, logs: list, date_: datetime, region=None) -> list:
+    """Serialise writes to the region's planning-sheet workbook."""
+    workbook = str(
+        format_env_path(
+            "PLANNING_SHEET_DOWNLOAD_FOLDER",
+            task_date_label(2, date_),
+            region,
+        )
+        / os.getenv("PLANNING_SHEET_WORKBOOK_NAME")
     )
     with file_lock(workbook):
-        return _validation_summary_writer_and_planning_sheet_updater_locked(filtered_df, logs, date_)
+        return _validation_summary_writer_and_planning_sheet_updater_locked(filtered_df, logs, date_, region)
 
 
-def _validation_summary_writer_and_planning_sheet_updater_locked(filtered_df: pd.DataFrame, logs: list, date_: datetime) -> list:
+def _validation_summary_writer_and_planning_sheet_updater_locked(filtered_df: pd.DataFrame, logs: list, date_: datetime, region=None) -> list:
     global interdomain_kpi_activity_name_interdomain_kpi_required_check_dictionary
     global cr_itsm_details_dictionary
     global work_details_cr_hygiene_dictionary
     global cr_to_circle_checker_dictionary
     global nodes_count_remarks_dictionary
     
-    workbook = os.path.join(os.getenv("PLANNING_SHEET_DOWNLOAD_FOLDER").format(date_.strftime('%d-%b-%y')), os.getenv("PLANNING_SHEET_WORKBOOK_NAME"))
-    summary_excel_file_path = os.getenv("CR_HYGIENE_CHECKS_FILE").format(date_.strftime('%d-%b-%y'))
+    workbook = str(
+        format_env_path(
+            "PLANNING_SHEET_DOWNLOAD_FOLDER",
+            task_date_label(2, date_),
+            region,
+        )
+        / os.getenv("PLANNING_SHEET_WORKBOOK_NAME")
+    )
+    summary_excel_file_path = str(
+        format_env_path("CR_HYGIENE_CHECKS_FILE", task_date_label(2, date_), region)
+    )
 
     summary_excel_folder = os.path.dirname(summary_excel_file_path)
 
@@ -826,6 +840,7 @@ def run_task(
     page = None
 
     parsed_date = dp.parse(selected_date)
+    region_name = primary_region(regions)
 
     if regions is not None:
         regions = [str(region).upper() for region in regions]
@@ -983,12 +998,16 @@ def run_task(
         node_count_mismatch_thread.join()
         plan_files_cr_hygiene_thread.join()
 
-        GLOBAL_LOGS = validation_summary_writer_and_planning_sheet_updater(filtered_df, GLOBAL_LOGS, parsed_date)
+        GLOBAL_LOGS = validation_summary_writer_and_planning_sheet_updater(
+            filtered_df, GLOBAL_LOGS, parsed_date, region_name
+        )
 
     return {
         "status": "Completed",
         "message": f"{task['name']} completed successfully.",
         "download_ready": True,
-        "download_name": str(os.getenv("CR_HYGIENE_CHECKS_FILE")).format(parsed_date.strftime("%d-%b-%y")),
+        "download_name": str(
+            format_env_path("CR_HYGIENE_CHECKS_FILE", task_date_label(2, parsed_date), region_name)
+        ),
         "counts": {},
     }

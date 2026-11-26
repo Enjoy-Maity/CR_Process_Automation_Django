@@ -21,6 +21,7 @@ from dashboard.views import _make_serializable, _timestamp
 from dashboard.models import MasterCRDatabase, SelectedDateTable, CRWiseStatus
 from dashboard.task_modules.dependencies.extra_dependencies import selected_date_df_maker
 from dashboard.task_modules.dependencies.extra_dependencies import cr_wise_status_df_maker, _norm_series
+from dashboard.utils.region_paths import format_env_path, primary_region, task_date_label
 
 
 queue_ = Queue()
@@ -407,6 +408,7 @@ def run_task(
     try:
         parsed_date = dp.parse(selected_date)
         date_ = parsed_date
+        region_name = primary_region(regions)
 
         if regions is not None:
             regions = [str(region).upper() for region in regions]
@@ -500,7 +502,9 @@ def run_task(
             )
         )
 
-        workbook_parent = os.getenv("PLAN_FILES_DOWNLOAD_FOLDER").format(date_.strftime("%d-%b-%y"))
+        workbook_parent = str(
+            format_env_path("PLAN_FILES_DOWNLOAD_FOLDER", task_date_label(3, date_), region_name)
+        )
         os.makedirs(workbook_parent,exist_ok=True)
         
         GLOBAL_LOGS = plan_files_downloader(
@@ -508,14 +512,16 @@ def run_task(
         )
         
         GLOBAL_LOGS = zip_maker(
-            os.path.join(
-                os.getenv("PLAN_FILES_DOWNLOAD_FOLDER").format(date_.strftime("%d-%b-%y")),
-                "Install_and_Backout_Plan_Files"
-            ), 
+            os.path.join(workbook_parent, "Install_and_Backout_Plan_Files"),
             GLOBAL_LOGS,
             str(
-                os.getenv("PLAN_FILES_ZIP_FILE")
-            ).format(date_.strftime("%d-%b-%y"), date_.strftime("%d-%B-%Y"))
+                format_env_path(
+                    "PLAN_FILES_ZIP_FILE",
+                    task_date_label(3, date_),
+                    region_name,
+                    label=date_.strftime("%d-%B-%Y"),
+                )
+            )
         )
     
     except Exception as e:
@@ -534,6 +540,13 @@ def run_task(
             "status": "Completed",
             "message": f"{task['name']} completed successfully.",
             "download_ready": True,
-            "download_name": str(os.getenv("PLAN_FILES_ZIP_FILE")).format(date_.strftime("%d-%b-%y"), date_.strftime("%d-%B-%Y")),
+            "download_name": str(
+                format_env_path(
+                    "PLAN_FILES_ZIP_FILE",
+                    task_date_label(3, date_),
+                    region_name,
+                    label=date_.strftime("%d-%B-%Y"),
+                )
+            ),
             "counts": {},
         }

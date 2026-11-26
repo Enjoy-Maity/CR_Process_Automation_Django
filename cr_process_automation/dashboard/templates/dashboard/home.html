@@ -69,7 +69,7 @@
                         <td>
                             <div class="download-area">
                             {% if task.id == 1 or task.id == 2 or task.id == 3 or task.id == 4 or task.id == 5 or task.id == 6 %}
-                                {% if task.status == 'Completed' and task.download_ready %}
+                                {% if task.download_ready %}
                                     <a href="{% url 'download_task_output' task.id %}" class="action-btn download-btn compact-btn js-download-link auto-ready" data-task-id="{{ task.id }}">Download</a>
                                 {% else %}
                                     <a href="#" class="action-btn download-btn compact-btn js-download-link hidden" data-task-id="{{ task.id }}">Download</a>
@@ -88,12 +88,71 @@
             </table>
         </div>
     </div>
+
+    <div class="data-panel" style="margin-top:16px;">
+        <div class="data-panel-scroll">
+            <div class="cr-history-filter-label" id="cr-planning-table-meta" style="margin-bottom:8px;">Select a date and region(s) to load CRs from the backend automatically.</div>
+            <table class="task-table compact-task-table ultra-compact-task-table" id="cr-planning-cr-table">
+                <thead>
+                    <tr>
+                        <th>CR No</th>
+                        <th>Region</th>
+                        <th>Circle</th>
+                        <th>Priority</th>
+                        <th>Planning Status</th>
+                        <th>NIAM Required</th>
+                        <th>NIAM Node Type</th>
+                        <th>Node Details</th>
+                        <th>Activity Description</th>
+                    </tr>
+                </thead>
+                <tbody id="cr-planning-cr-table-body">
+                    <tr><td colspan="9" class="text-muted">No CRs loaded.</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
 </div>
 
 <script>
 const HOME_SESSION_KEY = 'home_page_state';
 
-function saveHomeSessionState(date, regions, countsAll, countsPlanned) {
+function escapeHtml(value) {
+    if (value === null || value === undefined) return '';
+    const div = document.createElement('div');
+    div.textContent = String(value);
+    return div.innerHTML;
+}
+
+function renderCrPlanningRows(rows) {
+    const body = document.getElementById('cr-planning-cr-table-body');
+    const meta = document.getElementById('cr-planning-table-meta');
+    if (!body) return;
+
+    const list = Array.isArray(rows) ? rows : [];
+    if (list.length === 0) {
+        body.innerHTML = '<tr><td colspan="9" class="text-muted">No CRs found for the selected date and region(s).</td></tr>';
+        if (meta) meta.textContent = 'No backend CR rows for this filter.';
+        return;
+    }
+
+    body.innerHTML = list.map(row => `
+        <tr>
+            <td>${escapeHtml(row.cr_no)}</td>
+            <td>${escapeHtml(row.region)}</td>
+            <td>${escapeHtml(row.circle)}</td>
+            <td>${escapeHtml(row.priority)}</td>
+            <td>${escapeHtml(row.planning_status)}</td>
+            <td>${escapeHtml(row.niam_ticket_required)}</td>
+            <td>${escapeHtml(row.niam_node_type)}</td>
+            <td>${escapeHtml(row.node_details)}</td>
+            <td>${escapeHtml(row.activity_description)}</td>
+        </tr>
+    `).join('');
+    if (meta) meta.textContent = `Loaded ${list.length} CR row(s) from the backend MasterCRDatabase table.`;
+}
+
+function saveHomeSessionState(date, regions, countsAll, countsPlanned, crRows) {
     const perTaskCounts = [];
 
     document.querySelectorAll("tr[data-task-id]").forEach(row => {
@@ -118,12 +177,68 @@ function saveHomeSessionState(date, regions, countsAll, countsPlanned) {
         date,
         regions,
         perTaskCounts,
+        cr_rows: Array.isArray(crRows) ? crRows : [],
     };
 
     try {
         sessionStorage.setItem(HOME_SESSION_KEY, JSON.stringify(state));
     } catch (e) {
         // ignore storage errors
+    }
+}
+
+async function applyRegionFilter(silent) {
+    const dateInput = document.getElementById("cr_filter_date");
+    const date = dateInput ? dateInput.value.trim() : '';
+    const checkboxes = document.querySelectorAll(".region-checkbox:checked");
+    const regions = Array.from(checkboxes).map(cb => cb.value);
+
+    if (!date || regions.length === 0) {
+        renderCrPlanningRows([]);
+        const meta = document.getElementById('cr-planning-table-meta');
+        if (meta) meta.textContent = 'Select a date and region(s) to load CRs from the backend automatically.';
+        saveHomeSessionState(date, regions, {}, {}, []);
+        if (!silent) alert("Please select a date and at least one region.");
+        return false;
+    }
+
+    const params = new URLSearchParams({ date: date, regions: regions.join(",") });
+    try {
+        const response = await fetch(`/filter-region-crs/?${params.toString()}`);
+        const data = await response.json();
+        if (!data.ok) {
+            if (!silent) alert(data.message || "Failed to fetch region CR counts.");
+            return false;
+        }
+
+        const countsAll = data.counts_all || {};
+        const countsPlanned = data.counts_planned || {};
+        const crRows = Array.isArray(data.rows) ? data.rows : (data.cr_rows || []);
+
+        document.querySelectorAll("tr[data-task-id]").forEach(row => {
+            const taskId = parseInt(row.dataset.taskId, 10);
+            const totalCell = row.querySelector(".js-total-crs");
+            const northCell = row.querySelector(".js-north-crs");
+            const westCell = row.querySelector(".js-west-crs");
+            const eastCell = row.querySelector(".js-east-crs");
+            const southCell = row.querySelector(".js-south-crs");
+
+            const src = (taskId === 1) ? countsAll : countsPlanned;
+
+            if (totalCell) totalCell.textContent = src.total_crs ?? 0;
+            if (northCell) northCell.textContent = src.north_crs ?? 0;
+            if (westCell) westCell.textContent = src.west_crs ?? 0;
+            if (eastCell) eastCell.textContent = src.east_crs ?? 0;
+            if (southCell) southCell.textContent = src.south_crs ?? 0;
+        });
+
+        // The CR table is refreshed from the backend on every filter change.
+        renderCrPlanningRows(crRows);
+        saveHomeSessionState(date, regions, countsAll, countsPlanned, crRows);
+        return true;
+    } catch (e) {
+        if (!silent) alert("Error fetching region CR data.");
+        return false;
     }
 }
 
@@ -134,13 +249,10 @@ function restoreHomeSessionState() {
     } catch (e) {
         saved = null;
     }
-
     if (!saved) return false;
 
     const dateInput = document.getElementById("cr_filter_date");
-    if (saved.date && dateInput) {
-        dateInput.value = saved.date;
-    }
+    if (saved.date && dateInput) dateInput.value = saved.date;
 
     const regionCheckboxes = document.querySelectorAll(".region-checkbox");
     if (Array.isArray(saved.regions) && regionCheckboxes.length) {
@@ -149,84 +261,28 @@ function restoreHomeSessionState() {
         });
     }
 
-    if (Array.isArray(saved.perTaskCounts)) {
-        saved.perTaskCounts.forEach(savedRow => {
-            const row = document.querySelector(`tr[data-task-id="${savedRow.task_id}"]`);
-            if (!row) return;
+    renderCrPlanningRows(saved.cr_rows || []);
 
-            const totalCell = row.querySelector(".js-total-crs");
-            const northCell = row.querySelector(".js-north-crs");
-            const westCell = row.querySelector(".js-west-crs");
-            const eastCell = row.querySelector(".js-east-crs");
-            const southCell = row.querySelector(".js-south-crs");
-
-            if (totalCell) totalCell.textContent = savedRow.total_crs ?? "";
-            if (northCell) northCell.textContent = savedRow.north_crs ?? "";
-            if (westCell) westCell.textContent = savedRow.west_crs ?? "";
-            if (eastCell) eastCell.textContent = savedRow.east_crs ?? "";
-            if (southCell) southCell.textContent = savedRow.south_crs ?? "";
-            // CHANGED: restore download button state (load-time bridge only).
-            // Guard on `link` skips "Not Applicable" rows (no .js-download-link).
-            // We only reveal a ready button; we never force-hide, so tasks that
-            // became ready server-side still render correctly, and the
-            // dashboard.js poll remains the source of truth afterwards.
-            const link = row.querySelector(".js-download-link");
-            const placeholder = row.querySelector(".js-download-placeholder");
-            if (link && savedRow.download_ready) {
-                if (savedRow.download_url) link.setAttribute("href", savedRow.download_url);
-                link.classList.remove("hidden");
-                if (placeholder) placeholder.classList.add("hidden");
-            }
-        });
+    // Re-fetch from the backend instead of trusting the cached rows/counts.
+    if (saved.date && Array.isArray(saved.regions) && saved.regions.length) {
+        applyRegionFilter(true);
     }
-
     return true;
 }
 
 document.getElementById("apply_region_filter_btn").addEventListener("click", function () {
-    const date = document.getElementById("cr_filter_date").value;
-    const checkboxes = document.querySelectorAll(".region-checkbox:checked");
-    const regions = Array.from(checkboxes).map(cb => cb.value);
+    applyRegionFilter(false);
+});
 
-    if (!date || regions.length === 0) {
-        alert("Please select a date and at least one region.");
-        return;
-    }
-
-    const params = new URLSearchParams({ date: date, regions: regions.join(",") });
-
-    fetch(`/filter-region-crs/?${params.toString()}`)
-        .then(res => res.json())
-        .then(data => {
-            if (!data.ok) {
-                alert(data.message || "Failed to fetch region CR counts.");
-                return;
-            }
-
-            const countsAll = data.counts_all || {};
-            const countsPlanned = data.counts_planned || {};
-
-            document.querySelectorAll("tr[data-task-id]").forEach(row => {
-                const taskId = parseInt(row.dataset.taskId, 10);
-                const totalCell = row.querySelector(".js-total-crs");
-                const northCell = row.querySelector(".js-north-crs");
-                const westCell = row.querySelector(".js-west-crs");
-                const eastCell = row.querySelector(".js-east-crs");
-                const southCell = row.querySelector(".js-south-crs");
-
-                const src = (taskId === 1) ? countsAll : countsPlanned;
-
-                if (totalCell) totalCell.textContent = src.total_crs ?? 0;
-                if (northCell) northCell.textContent = src.north_crs ?? 0;
-                if (westCell) westCell.textContent = src.west_crs ?? 0;
-                if (eastCell) eastCell.textContent = src.east_crs ?? 0;
-                if (southCell) southCell.textContent = src.south_crs ?? 0;
-            });
-
-            // Persist full per-task state
-            saveHomeSessionState(date, regions, countsAll, countsPlanned);
-        })
-        .catch(() => alert("Error fetching region CR counts."));
+// Selecting the night or changing regions refreshes the table from the
+// backend immediately; the Apply button remains for an explicit re-fetch.
+document.getElementById("cr_filter_date").addEventListener("change", function () {
+    applyRegionFilter(true);
+});
+document.querySelectorAll(".region-checkbox").forEach(function (checkbox) {
+    checkbox.addEventListener("change", function () {
+        applyRegionFilter(true);
+    });
 });
 
 // Restore when the page loads

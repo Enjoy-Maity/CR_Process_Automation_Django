@@ -24,6 +24,7 @@ from django.db import transaction
 # from django.core.cache import cache
 from dashboard.models import MasterCRDatabase, CRWiseStatus, SelectedDateTable
 from dashboard.utils.file_locks import file_lock
+from dashboard.utils.region_paths import format_env_path, primary_region, task_date_label
 
 def check_admin_status():
     try:
@@ -534,6 +535,7 @@ def run_task(
                 runtime,
                 timestamp_fn,
                 date_=selected_date,
+                region=primary_region(regions),
             )
 
             if page:
@@ -569,10 +571,14 @@ def run_task(
                 pass
 
 
-    folder_date = (dp.parse(selected_date)).strftime("%d-%b-%y")
-    report_file_date = (dp.parse(selected_date))
+    folder_date = task_date_label(1, selected_date)
+    report_file_date = dp.parse(selected_date)
+    region_name = primary_region(regions)
 
-    report_file = os.path.join(str(os.getenv("RAW_REPORT_DOWNLOAD_FOLDER").format(folder_date)), f"PS_Core_Raw_Report_{report_file_date.strftime('%Y-%m-%d')}.csv")
+    report_file = str(
+        format_env_path("RAW_REPORT_DOWNLOAD_FOLDER", folder_date, region_name)
+        / f"PS_Core_Raw_Report_{report_file_date.strftime('%Y-%m-%d')}.csv"
+    )
     encoding_thread = CustomThread(target=encoding_fetcher, args=(report_file,))
     encoding_thread.start()
     encoding = encoding_thread.join()
@@ -583,7 +589,9 @@ def run_task(
     valid_status= "|".join(["Request For Authorization", "Scheduled For Approval", "Request For Change"])
     report_df_filtered = report_df[report_df["Status*"].str.contains(valid_status, regex= True, case= False)]
 
-    planning_workbook_folder = str(os.getenv("PLANNING_SHEET_DOWNLOAD_FOLDER").format(folder_date))
+    planning_workbook_folder = str(
+        format_env_path("PLANNING_SHEET_DOWNLOAD_FOLDER", folder_date, region_name)
+    )
     if not os.path.exists(planning_workbook_folder):
         os.makedirs(planning_workbook_folder, exist_ok=True)
         

@@ -37,6 +37,8 @@ from .models import (
 from .utils import task_runtime
 from .utils.task_runtime import RUN_REGISTRY
 from .utils.niam_paths import niam_output_path_for, niam_template_path_for
+from .utils import region_paths
+from .utils.region_paths import primary_region
 from .exceptions import (
     ValidationException,
     NotFoundException,
@@ -849,25 +851,28 @@ def start_task(request, task_id):
     runtime["logs"] = []
     runtime["username"] = request.user.username
 
-    # raw_report_file and planning_sheet are deliberately shared between users.
-    # Their canonical paths are recorded on the run for traceability; only the
-    # results copied into run_dir are private.
-    runtime["shared_inputs"] = task_runtime.shared_input_paths(selected_date)
+    # raw_report_file and planning_sheet are shared per night/region. Their
+    # canonical paths are recorded on the run for traceability.
+    runtime["selected_date"] = selected_date
+    runtime["regions"] = region_values
+    runtime["shared_inputs"] = task_runtime.shared_input_paths(
+        selected_date, region_values
+    )
     runtime["raw_report_file"] = runtime["shared_inputs"]["raw_report_file"]
     runtime["planning_sheet"] = runtime["shared_inputs"]["planning_sheet"]
 
-    # NIAM template/output workbooks are user-owned (unlike the two shared
-    # source files above). Record their private locations on the run.
+    # NIAM workbooks follow the same region-based hierarchy as the other tasks.
     niam_night = (
         datetime.strptime(selected_date, "%Y-%m-%d")
         if selected_date
         else datetime.now()
     )
+    niam_region = primary_region(region_values)
     runtime["niam_template_path"] = str(
-        niam_template_path_for(niam_night, request.user)
+        niam_template_path_for(niam_night, region=niam_region)
     )
     runtime["niam_output_path"] = str(
-        niam_output_path_for(niam_night, request.user)
+        niam_output_path_for(niam_night, region=niam_region)
     )
 
     # Persist ownership so downloads and logs stay scoped to this user + login.
@@ -926,13 +931,20 @@ def start_task(request, task_id):
 
             runtime["status"] = result.get("status", "Completed")
 
-            # Separate this run's files from everyone else's by copying the
-            # produced artefact into the run's private folder.
+            # Region-based tasks publish the artefact into every selected
+            # region folder. Non-region tasks keep the private run copy.
             source = result.get("download_name") or runtime.get("download_name")
             if source:
-                isolated = task_runtime.isolate_output(runtime, source)
-                if isolated:
-                    runtime["download_name"] = isolated
+                if task_id in region_paths.REGION_TASK_IDS:
+                    published = region_paths.publish_region_output(
+                        task_id, selected_date, region_values, source
+                    )
+                    if published:
+                        runtime["download_name"] = published
+                else:
+                    isolated = task_runtime.isolate_output(runtime, source)
+                    if isolated:
+                        runtime["download_name"] = isolated
             runtime["download_ready"] = bool(
                 result.get("download_ready", False) and runtime.get("download_name")
             )
@@ -1101,17 +1113,53 @@ def submit_password(request, task_id):
 @require_GET
 @login_required(login_url="login")
 def task_dashboard_data(request):
-    """Get dashboard data for all tasks, scoped to the requesting user."""
+    """Get dashboard data for all tasks, scoped to the requesting user.
+
+    When ``date`` and ``regions`` are supplied (the CR Planning page), a
+    download is ready only if the artefact exists for *every* selected region.
+    This deliberately does not depend on the task status flag.
+    """
+    requested_date = request.GET.get("date", "").strip()
+    requested_regions = _parse_regions(request.GET.get("regions", ""))
+    check_region_files = bool(requested_date and requested_regions)
+    cr_planning_page = request.GET.get("cr_planning") == "1"
+
     tasks = []
     for task in _build_tasks_for_ui(request.user.id, include_niam=True):
         task_id = task["id"]
         requires_auth = _requires_auth(task_id)
+        download_ready = task["download_ready"]
+        download_name = task["download_name"]
+        if task_id in region_paths.REGION_TASK_IDS:
+            if check_region_files:
+                download_ready = region_paths.all_region_files_ready(
+                    task_id, requested_date, requested_regions
+                )
+            elif cr_planning_page:
+                # No date/regions selected on CR Planning: there is no AND
+                # condition to satisfy, so never expose a download button.
+                download_ready = False
+            if check_region_files and download_ready:
+                primary_path = region_paths.task_output_path(
+                    task_id, requested_date, requested_regions[0]
+                )
+                if primary_path:
+                    download_name = str(primary_path)
+                    runtime_ctx = RUN_REGISTRY.peek(request.user.id, task_id)
+                    if runtime_ctx:
+                        runtime_ctx["download_name"] = download_name
+                        runtime_ctx["download_ready"] = True
+                        # Keep the run metadata in step with the filters that
+                        # produced this download_name; stale regions would make
+                        # the download endpoint's AND check reject a valid file.
+                        runtime_ctx["selected_date"] = requested_date
+                        runtime_ctx["regions"] = list(requested_regions)
         tasks.append({
             "id": task_id,
             "status": task["status"],
-            "download_ready": task["download_ready"],
-            "download_name": task["download_name"],
-            "download_url": f"/download/task/{task_id}/" if task["download_ready"] else "",
+            "download_ready": download_ready,
+            "download_name": download_name,
+            "download_url": f"/download/task/{task_id}/" if download_ready else "",
             "total_crs": task["total_crs"],
             "north_crs": task["north_crs"],
             "west_crs": task["west_crs"],
@@ -1191,13 +1239,34 @@ def download_task_output(request, task_id):
             title="File Not Found"
         )
 
-    # Reject any path outside this run's private directory.
-    allowed_root = Path(settings.MEDIA_ROOT) / "task_runs" / runtime["run_key"]
+    # With a selected date/regions the file must exist for every region (AND).
+    if (
+        task_id in region_paths.REGION_TASK_IDS
+        and runtime.get("selected_date")
+        and runtime.get("regions")
+        and not region_paths.all_region_files_ready(
+            task_id, runtime["selected_date"], runtime["regions"]
+        )
+    ):
+        raise NotFoundException(
+            "The output file is not available for all selected regions.",
+            title="File Not Ready"
+        )
+
+    # Region outputs live under HOST_DOWNLOAD_FOLDER; older runs may still use
+    # the private task_runs copy. Allow both, never an arbitrary filesystem path.
+    allowed_roots = [
+        Path(settings.HOST_DOWNLOAD_FOLDER),
+        Path(settings.MEDIA_ROOT) / "task_runs" / runtime["run_key"],
+    ]
     try:
-        inside_run_dir = allowed_root.resolve() in path_obj.resolve().parents
+        resolved_path = path_obj.resolve()
+        inside_allowed_root = any(
+            root.resolve() in resolved_path.parents for root in allowed_roots
+        )
     except OSError:
-        inside_run_dir = False
-    if not inside_run_dir:
+        inside_allowed_root = False
+    if not inside_allowed_root:
         raise NotFoundException("Invalid download path.", title="Access Denied")
 
     logger.info(f"Downloading task {task_id} output for user {request.user.username}: {path_obj.name}")
@@ -1236,11 +1305,15 @@ def filter_region_crs(request):
     counts_all = empty_counts.copy()
     counts_planned = empty_counts.copy()
 
+    empty_rows: list = []
+
     if not date_str or not selected_regions:
         return JsonResponse({
             "ok": True,
             "counts_all": counts_all,
             "counts_planned": counts_planned,
+            "rows": empty_rows,
+            "cr_rows": empty_rows,
         })
 
     try:
@@ -1288,7 +1361,38 @@ def filter_region_crs(request):
         counts_planned["south_crs"]
     ])
 
-    logger.info(f"Filtered CRs for date {date_str}, regions {selected_regions}")
+    # Return the backend CR rows themselves so the CR Planning page can refresh
+    # its table from MasterCRDatabase, not from stale browser state.
+    region_filter = Q(
+        *[Q(region__iexact=region) for region in selected_regions],
+        _connector=Q.OR,
+    )
+    row_fields = (
+        "cr_no",
+        "execution_date",
+        "region",
+        "circle",
+        "priority",
+        "planning_status",
+        "niam_ticket_required",
+        "niam_node_type",
+        "node_details",
+        "activity_description",
+    )
+    cr_rows = list(
+        MasterCRDatabase.objects.filter(
+            region_filter,
+            execution_date=filter_date,
+            is_active=True,
+        )
+        .order_by("region", "cr_no")
+        .values(*row_fields)[:2000]
+    )
+
+    logger.info(
+        "Filtered %s CR rows for date %s, regions %s",
+        len(cr_rows), date_str, selected_regions,
+    )
 
     return JsonResponse({
         "ok": True,
@@ -1296,6 +1400,8 @@ def filter_region_crs(request):
         "regions": selected_regions,
         "counts_all": counts_all,
         "counts_planned": counts_planned,
+        "rows": cr_rows,
+        "cr_rows": cr_rows,
     })
 
 
@@ -4278,17 +4384,21 @@ def save_niam_template_changes(request):
     if workbook_exec_dates:
         try:
             for exec_date in workbook_exec_dates:
-                # Write to this user's template workbook, not a shared path.
-                workbook_path = niam_template_path_for(
-                    datetime.combine(exec_date - timedelta(days=1), datetime.min.time()),
-                    request.user,
-                )
-                count, warn = _write_niam_edits_to_workbook(
-                    workbook_path, updates_by_key
-                )
-                workbook_updated += count
-                if warn and warning is None:
-                    warning = warn
+                night = datetime.combine(exec_date - timedelta(days=1), datetime.min.time())
+                # Update the region workbook(s) the saved rows belong to.
+                regions_for_date = sorted({
+                    primary_region([obj.region])
+                    for obj in objects.values()
+                    if obj.execution_date == exec_date and getattr(obj, "region", None)
+                }) or [region_paths.DEFAULT_REGION]
+                for region_name in regions_for_date:
+                    workbook_path = niam_template_path_for(night, region=region_name)
+                    count, warn = _write_niam_edits_to_workbook(
+                        workbook_path, updates_by_key
+                    )
+                    workbook_updated += count
+                    if warn and warning is None:
+                        warning = warn
         except Exception as exc:  # never fail the DB save because of the file
             warning = (
                 "Rows saved to the database, but the workbook could not be "

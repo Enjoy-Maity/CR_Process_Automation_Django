@@ -164,9 +164,31 @@ function showPendingAlert(tasks) {
     seenAlertKeys.add(alertKey);
 }
 
+function currentCrPlanningFilters() {
+    const body = document.body;
+    if (!body || body.dataset.selectedOption !== 'cr_planning') return null;
+
+    const filters = { cr_planning: '1' };
+    const dateInput = document.getElementById('cr_filter_date');
+    const date = dateInput ? dateInput.value.trim() : '';
+    const regions = Array.prototype.slice
+        .call(document.querySelectorAll('.region-checkbox:checked'))
+        .map(function (cb) { return cb.value; });
+    if (!date || regions.length === 0) return filters;
+    filters.date = date;
+    filters.regions = regions.join(',');
+    return filters;
+}
+
 async function refreshTaskPanels() {
     try {
-        const response = await fetch('/api/task/dashboard-data/'); // Ensure this matches your urls.py path
+        // CR Planning sends the selected night/regions so the backend can
+        // decide download readiness from actual per-region files (AND).
+        const filters = currentCrPlanningFilters();
+        const url = filters
+            ? `/api/task/dashboard-data/?${new URLSearchParams(filters).toString()}`
+            : '/api/task/dashboard-data/';
+        const response = await fetch(url);
         const data = await response.json();
         const runningBox = document.getElementById('running-task-box');
         const logBox = document.getElementById('task-log-box');

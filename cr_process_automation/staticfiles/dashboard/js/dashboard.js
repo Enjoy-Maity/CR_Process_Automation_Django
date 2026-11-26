@@ -73,7 +73,7 @@ function updateCountCells(row, task) {
 // Track which task currently has an iframe open, and what type,
 // so we don't reset the iframe src while the user is typing.
 let activeIframeTaskId = null;
-let activeIframeType = null;   // 'otp' | 'password'
+let activeIframeType = null;   // 'otp' | 'password' | 'notice'
 
 function openAuthIframe(taskId, type) {
     const authOverlay = document.getElementById('auth-overlay');
@@ -83,10 +83,21 @@ function openAuthIframe(taskId, type) {
     // Only (re)load the iframe when the task OR the type changes
     // (don't reload while user is typing)
     if (activeIframeTaskId !== taskId || activeIframeType !== type) {
-        const url = (type === 'password')
-            ? `/playwright-password-iframe/?task_id=${taskId}`
-            : `/playwright-auth-iframe/?task_id=${taskId}`;
+        let url;
+        if (type === 'password') {
+            url = `/playwright-password-iframe/?task_id=${taskId}`;
+        } else if (type === 'notice') {
+            url = `/playwright-notice-iframe/?task_id=${taskId}`;
+        } else if (type === 'alert') {
+            url = `/playwright-alert-iframe/?task_id=${taskId}`;
+        } else {
+            url = `/playwright-auth-iframe/?task_id=${taskId}`;
+        }
         authIframe.src = url;
+        // The sign-in code needs a little more room than the auth form.
+        authIframe.style.height =
+            (type === 'notice') ? '340px' :
+            (type === 'alert') ? '320px' : '';
         activeIframeTaskId = taskId;
         activeIframeType = type;
     }
@@ -97,14 +108,87 @@ function closeAuthIframe() {
     const authOverlay = document.getElementById('auth-overlay');
     const authIframe = document.getElementById('auth-iframe');
     if (authOverlay) authOverlay.style.display = 'none';
-    if (authIframe) authIframe.src = '';
+    if (authIframe) {
+        authIframe.src = '';
+        authIframe.style.height = '';
+    }
     activeIframeTaskId = null;
     activeIframeType = null;
 }
 
+// The shared overlay lives in base_main.html; bind its close button once the
+// DOM is ready (page scripts such as night_execution.js bind it as well).
+function bindAuthCloseBtn() {
+    const closeBtn = document.getElementById('auth-modal-close');
+    if (closeBtn) {
+        closeBtn.addEventListener('click', closeAuthIframe);
+    }
+}
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', bindAuthCloseBtn);
+} else {
+    bindAuthCloseBtn();
+}
+
+// Alert dialogs raised by the backend (e.g. missing/wrong NIAM credentials).
+// They open in the same iframe overlay as the password / OTP prompts. Remember
+// which ones were shown so the 3-second poll does not reopen them.
+const seenAlertKeys = new Set();
+
+function appAlertKey(task) {
+    return `${task.id}:${task.run_key || ''}:${task.alert_seq || 0}`;
+}
+
+function showPendingAlert(tasks) {
+    let alertTask = null;
+    let alertKey = '';
+    (tasks || []).forEach(task => {
+        const needed =
+            task.alert_required === true ||
+            task.alert_required === 'true' ||
+            task.alert_required === 1;
+        if (!needed) return;
+        const key = appAlertKey(task);
+        if (seenAlertKeys.has(key)) return;
+        // Prefer the most recent alert when several are pending.
+        if (!alertTask || Number(task.alert_seq || 0) >= Number(alertTask.alert_seq || 0)) {
+            alertTask = task;
+            alertKey = key;
+        }
+    });
+    if (!alertTask) return;
+    if (!document.getElementById('auth-overlay')) return;
+    openAuthIframe(alertTask.id, 'alert');
+    // The iframe now owns the dialog; only reopen it for a NEW alert
+    // (different run / alert_seq), not on every poll.
+    seenAlertKeys.add(alertKey);
+}
+
+function currentCrPlanningFilters() {
+    const body = document.body;
+    if (!body || body.dataset.selectedOption !== 'cr_planning') return null;
+
+    const filters = { cr_planning: '1' };
+    const dateInput = document.getElementById('cr_filter_date');
+    const date = dateInput ? dateInput.value.trim() : '';
+    const regions = Array.prototype.slice
+        .call(document.querySelectorAll('.region-checkbox:checked'))
+        .map(function (cb) { return cb.value; });
+    if (!date || regions.length === 0) return filters;
+    filters.date = date;
+    filters.regions = regions.join(',');
+    return filters;
+}
+
 async function refreshTaskPanels() {
     try {
-        const response = await fetch('/api/task/dashboard-data/'); // Ensure this matches your urls.py path
+        // CR Planning sends the selected night/regions so the backend can
+        // decide download readiness from actual per-region files (AND).
+        const filters = currentCrPlanningFilters();
+        const url = filters
+            ? `/api/task/dashboard-data/?${new URLSearchParams(filters).toString()}`
+            : '/api/task/dashboard-data/';
+        const response = await fetch(url);
         const data = await response.json();
         const runningBox = document.getElementById('running-task-box');
         const logBox = document.getElementById('task-log-box');
@@ -117,6 +201,21 @@ async function refreshTaskPanels() {
 
         // Track whether ANY task still needs input this cycle
         let anyInputRequired = false;
+
+        // Read-only notices (Microsoft Authenticator sign-in code) may belong to
+        // a task that has no table row on this page, so scan every task.
+        const noticeTask = (data.tasks || []).find(task => {
+            const noticeNeeded =
+                task.notice_required === true ||
+                task.notice_required === 'true' ||
+                task.notice_required === 1;
+            return noticeNeeded && String(task.notice_text || '').trim() !== '';
+        });
+
+        if (noticeTask) {
+            anyInputRequired = true;
+            openAuthIframe(noticeTask.id, 'notice');
+        }
 
         document.querySelectorAll('tr[data-task-id]').forEach(row => {
         const taskId = parseInt(row.getAttribute('data-task-id'), 10);
@@ -153,9 +252,26 @@ async function refreshTaskPanels() {
         }
     });
 
+        // Blocking alert dialog (e.g. missing/wrong NIAM credentials) opens in
+        // the same overlay as the password / OTP prompts. Interactive prompts
+        // and the time-sensitive sign-in code keep priority; the alert shows
+        // once they are done.
+        if (
+            activeIframeType !== 'password' &&
+            activeIframeType !== 'otp' &&
+            activeIframeType !== 'notice'
+        ) {
+            showPendingAlert(data.tasks);
+        }
+
         // If the backend cleared both flags (input submitted or timed out)
-        // and an iframe is still showing, close it automatically.
-        if (!anyInputRequired && activeIframeTaskId !== null) {
+        // and an iframe is still showing, close it automatically. The alert
+        // dialog stays until the user dismisses it (OK / X) or it is cleared.
+        if (
+            !anyInputRequired &&
+            activeIframeTaskId !== null &&
+            activeIframeType !== 'alert'
+        ) {
             closeAuthIframe();
         }
     } catch (err) {
@@ -284,4 +400,4 @@ async function waitForReplicaSync(syncId) {
     }
 }
 
-setInterval(refreshTaskPanels, 3000);
+setInterval(refreshTaskPanels, 500);

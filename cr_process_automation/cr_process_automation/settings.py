@@ -42,6 +42,11 @@ HOST_DOWNLOAD_DIR = os.environ.get(
     )
 )
 
+# Public name used by task output paths:
+#   HOST_DOWNLOAD_FOLDER/{date}/{Task-Wise folder}/{Region-name}
+# HOST_DOWNLOAD_DIR remains as the legacy name so existing settings keep working.
+HOST_DOWNLOAD_FOLDER = HOST_DOWNLOAD_DIR
+
 # Hosts allowed to reach the app. Defaults to '*' so a client can connect using
 # the server's IP/hostname out of the box; set DJANGO_ALLOWED_HOSTS (comma or
 # space separated, e.g. "10.0.0.5,cr-app.internal,localhost") to restrict it.

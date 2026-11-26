@@ -29,7 +29,8 @@ from django.http import JsonResponse
 from django.db import transaction
 from django.db.models import Q
 from dashboard.utils.file_locks import file_lock
-from dashboard.utils.niam_paths import niam_template_path_for, niam_user_root
+from dashboard.utils.niam_paths import niam_template_path_for
+from dashboard.utils.region_paths import DEFAULT_REGION, primary_region
 from dashboard.task_modules.dependencies.excel_modifier import ExcelModifier
 from dashboard.task_modules.dependencies.extra_dependencies import (
     selected_date_df_maker, 
@@ -46,16 +47,13 @@ from dashboard.task_modules.dependencies.extra_dependencies import (
 )
 
 
-# Legacy fallback used only when no request user is available (e.g. a direct
-# script call). Web runs replace this with the authenticated user's directory.
-workbook_path = os.path.join(settings.HOST_DOWNLOAD_DIR, "NIAM_Excel_files")
+# Set by run_task; this module is loaded fresh for every run.
+active_region = DEFAULT_REGION
 
 
-def niam_workbook_path_for(date_: datetime, user=None) -> Path:
-    """RITM Input workbook path for one user (falls back to the legacy path)."""
-    if user is not None:
-        return niam_template_path_for(date_, user=user)
-    return niam_template_path_for(date_, base=workbook_path)
+def niam_workbook_path_for(date_: datetime, region=None) -> Path:
+    """RITM Input workbook path for one night and region."""
+    return niam_template_path_for(date_, region=region or active_region)
 
 
 def get_max_row_in_column(worksheet, column_index: int) -> int:
@@ -1121,7 +1119,7 @@ def run_task(
     user_name=None, 
     regions=None
 ):
-    global glogs, workbook_path
+    global glogs, active_region
     if GLOBAL_LOGS is None:
         GLOBAL_LOGS = []
     timestamp_fn = timestamp_fn or _timestamp
@@ -1130,12 +1128,13 @@ def run_task(
     runtime["download_ready"] = False
 
     # This module is loaded fresh for every run, so its globals are private to
-    # this user. Point the template writer at their own directory; another
-    # user's Fetch CR run can never overwrite this workbook.
-    request_user = getattr(request, "user", None)
-    workbook_path = str(niam_user_root(request_user) / "templates")
+    # this run. The workbook itself is region-based; per-user isolation remains
+    # in the browser session files and TaskRun ownership.
     night = dp.parse(str(selected_date)) if selected_date else datetime.now()
-    runtime["niam_template_path"] = str(niam_workbook_path_for(night))
+    active_region = primary_region(regions)
+    runtime["niam_template_path"] = str(
+        niam_workbook_path_for(night, region=active_region)
+    )
 
     # Password fields (new)
     runtime["password_required"] = False

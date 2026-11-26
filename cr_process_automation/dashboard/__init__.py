@@ -56,18 +56,19 @@ else:
 #     r"C:\Users\username\Desktop\my_files"
 # )
 
-os.environ["RAW_REPORT_DOWNLOAD_FOLDER"]=os.path.join(settings.HOST_DOWNLOAD_DIR, "{}",  "Raw_Report_to_Template", )
+# Generated task files use named placeholders so every caller supplies the
+# task-owned date label and the selected region explicitly:
+#   HOST_DOWNLOAD_FOLDER/{date}/{Task-Wise folder}/{Region-name}
+os.environ["RAW_REPORT_DOWNLOAD_FOLDER"]=os.path.join(settings.HOST_DOWNLOAD_FOLDER, "{date}", "Raw_Report_to_Template", "{region}")
 
-# if not os.path.exists(os.path.join(settings.HOST_DOWNLOAD_DIR, "Planning_Sheet",)):
-#     Path(os.path.join(settings.HOST_DOWNLOAD_DIR, "Planning_Sheet")).mkdir(parents=True)
-os.environ["PLANNING_SHEET_DOWNLOAD_FOLDER"]=os.path.join(settings.HOST_DOWNLOAD_DIR, "{}", "Planning_Sheet")
-os.environ["CR_HYGIENE_CHECKS_FILE"]=os.path.join(settings.HOST_DOWNLOAD_DIR, "{}", "CR_Hygiene_Checks", "CR_Hygiene_Checks.xlsx")
-os.environ["BPMS_CR_HYGIENE_CHECKS_FILE"]=os.path.join(settings.HOST_DOWNLOAD_DIR, "{}", "BPMS_CR_Hygiene_Checks", "BPMS_CR_Hygiene_Checks.xlsx")
-os.environ["BPMS_DB"]=os.path.join(settings.HOST_DOWNLOAD_DIR, "BPMS_DB", "BPMS DATA.xlsx")
-os.environ["PLAN_FILES_DOWNLOAD_FOLDER"]=os.path.join(settings.HOST_DOWNLOAD_DIR, "{}", "Plan_Files_Download")
-os.environ["PLAN_FILES_ZIP_FILE"]=os.path.join(settings.HOST_DOWNLOAD_DIR, os.environ["PLAN_FILES_DOWNLOAD_FOLDER"], "Plan_Files_Download_{}.zip")
-os.environ["MOP_ATTACHMENT_INVENTORY_SHEET"]=os.path.join(settings.HOST_DOWNLOAD_DIR, "MOP_ATTACHMENT_INVENTORY", "PS_Core_MOP link with Protocol.xlsx")
-os.environ["MOP_ATTACHMENT_CR_APPROVAL_VALIDATION_FILE"]=os.path.join(settings.HOST_DOWNLOAD_DIR, "{}", "Mop_Attachment_Approval", "MOP_Attachment_Approval_status.xlsx")
+os.environ["PLANNING_SHEET_DOWNLOAD_FOLDER"]=os.path.join(settings.HOST_DOWNLOAD_FOLDER, "{date}", "Planning_Sheet", "{region}")
+os.environ["CR_HYGIENE_CHECKS_FILE"]=os.path.join(settings.HOST_DOWNLOAD_FOLDER, "{date}", "CR_Hygiene_Checks", "{region}", "CR_Hygiene_Checks.xlsx")
+os.environ["BPMS_CR_HYGIENE_CHECKS_FILE"]=os.path.join(settings.HOST_DOWNLOAD_FOLDER, "{date}", "BPMS_CR_Hygiene_Checks", "{region}", "BPMS_CR_Hygiene_Checks.xlsx")
+os.environ["BPMS_DB"]=os.path.join(settings.HOST_DOWNLOAD_FOLDER, "BPMS_DB", "BPMS DATA.xlsx")
+os.environ["PLAN_FILES_DOWNLOAD_FOLDER"]=os.path.join(settings.HOST_DOWNLOAD_FOLDER, "{date}", "Plan_Files_Download", "{region}")
+os.environ["PLAN_FILES_ZIP_FILE"]=os.path.join(settings.HOST_DOWNLOAD_FOLDER, "{date}", "Plan_Files_Download", "{region}", "Plan_Files_Download_{label}.zip")
+os.environ["MOP_ATTACHMENT_INVENTORY_SHEET"]=os.path.join(settings.HOST_DOWNLOAD_FOLDER, "MOP_ATTACHMENT_INVENTORY", "PS_Core_MOP link with Protocol.xlsx")
+os.environ["MOP_ATTACHMENT_CR_APPROVAL_VALIDATION_FILE"]=os.path.join(settings.HOST_DOWNLOAD_FOLDER, "{date}", "Mop_Attachment_Approval", "{region}", "MOP_Attachment_Approval_status.xlsx")
 os.environ["PLANNING_SHEET_WORKBOOK_NAME"]= "Standard_Planning_Sheet.xlsx"
 # Load variables from .env into the system environment
 load_dotenv()

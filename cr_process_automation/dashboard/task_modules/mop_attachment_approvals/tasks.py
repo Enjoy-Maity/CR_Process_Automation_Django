@@ -23,10 +23,13 @@ from dashboard.task_modules.dependencies.extra_dependencies import (
     )
 from dashboard.task_modules.dependencies.excel_modifier import ExcelModifier
 from dashboard.models import CRWiseStatus, SelectedDateTable, MasterCRDatabase, UserManagement
+from dashboard.utils.region_paths import DEFAULT_REGION, format_env_path, primary_region, task_date_label
 
 
 
 glogs = None
+# Set by run_task; the module is loaded fresh for every run.
+active_region = DEFAULT_REGION
 cr_approval_queue = None
 mop_attachment_queue = None
 cr_to_circle_dict = None
@@ -77,7 +80,13 @@ def attachment_queue_writer(
     logs: list,
     date_: datetime
 ) -> List[AnyStr]:            
-    validation_file_path = os.environ["MOP_ATTACHMENT_CR_APPROVAL_VALIDATION_FILE"].format(date_.strftime("%d-%b-%y"))
+    validation_file_path = str(
+        format_env_path(
+            "MOP_ATTACHMENT_CR_APPROVAL_VALIDATION_FILE",
+            task_date_label(5, date_),
+            active_region,
+        )
+    )
     
     os.makedirs(
         os.path.dirname(validation_file_path),
@@ -737,6 +746,7 @@ def run_task(
     global cr_to_risk_dict
     global cr_to_region_dict
     global cr_to_activity_description_dict
+    global active_region
 
     glogs = Queue()
     cr_approval_queue = Queue()
@@ -762,15 +772,23 @@ def run_task(
     try:
         parsed_date = dp.parse(selected_date)
         date_ = parsed_date
+        active_region = primary_region(regions)
 
-        os.makedirs(os.path.dirname(os.getenv("MOP_ATTACHMENT_CR_APPROVAL_VALIDATION_FILE").format(date_.strftime("%d-%b-%y"))), exist_ok=True)
-        if not os.path.exists(os.getenv("MOP_ATTACHMENT_CR_APPROVAL_VALIDATION_FILE").format(date_.strftime("%d-%b-%y"))):
+        validation_file_path = str(
+            format_env_path(
+                "MOP_ATTACHMENT_CR_APPROVAL_VALIDATION_FILE",
+                task_date_label(5, date_),
+                active_region,
+            )
+        )
+        os.makedirs(os.path.dirname(validation_file_path), exist_ok=True)
+        if not os.path.exists(validation_file_path):
             GLOBAL_LOGS.append("No MOP Attachment and CR Approval file found, Creating one.")
             from openpyxl import Workbook
             wb = Workbook()
             ws = wb.active
             ws.title = "MOP Attachment and CR Approval"
-            wb.save(os.getenv("MOP_ATTACHMENT_CR_APPROVAL_VALIDATION_FILE").format(date_.strftime("%d-%b-%y")))
+            wb.save(validation_file_path)
             wb.close()
             del wb
 
@@ -922,7 +940,13 @@ def run_task(
             "status": "Completed",
             "message": f"{task['name']} completed successfully.",
             "download_ready": True,
-            "download_name": str(os.getenv("MOP_ATTACHMENT_CR_APPROVAL_VALIDATION_FILE")).format(date_.strftime("%d-%b-%y"), date_.strftime("%d-%B-%Y")),
+            "download_name": str(
+                format_env_path(
+                    "MOP_ATTACHMENT_CR_APPROVAL_VALIDATION_FILE",
+                    task_date_label(5, date_),
+                    active_region,
+                )
+            ),
             "counts": {},
         }
 

@@ -16,7 +16,8 @@ from playwright.sync_api import sync_playwright
 
 import dashboard.task_modules.dependencies.batch_methods as cbm
 from dashboard.models import NIAMTicketGenerationTable
-from dashboard.utils.niam_paths import niam_output_path_for, niam_user_root
+from dashboard.utils.niam_paths import niam_output_path_for, niam_template_path_for
+from dashboard.utils.region_paths import DEFAULT_REGION, primary_region
 from dashboard.task_modules.dependencies import playwright_common_methods_ as pcm
 from dashboard.task_modules.dependencies.extra_dependencies import (
     NIAM_COLUMN_TO_FIELD_MAPPING,
@@ -38,23 +39,21 @@ _FIELD_TO_NIAM_COLUMN = {v: k for k, v in NIAM_COLUMN_TO_FIELD_MAPPING.items()}
 # the raising result columns.
 NIAM_OUTPUT_COLUMNS = list(NIAM_COLUMN_TO_FIELD_MAPPING) + ["Failure Reason"]
 
-workbook_path = ""
+# Set by run_task; this module is loaded fresh for every run.
+active_region = DEFAULT_REGION
 
 
-def get_niam_workbook_path_for(date_: datetime) -> Path:
-    """Canonical input-template workbook for a date (written by Fetch CR)."""
-    global workbook_path
-    return Path(workbook_path).joinpath(
-        date_.strftime("%d_%b_%Y"),
-        f"RITM Input_PS_Core_{date_.strftime('%d_%b_%Y')}.xlsx",
+def get_niam_workbook_path_for(date_: datetime, region=None) -> Path:
+    """Canonical input-template workbook for a night and region."""
+    return niam_template_path_for(
+        date_,
+        region=region or active_region,
     )
 
 
-def get_niam_output_path_for(date_: datetime, user=None) -> Path:
-    """Result workbook for one user (falls back to the run's base directory)."""
-    if user is not None:
-        return niam_output_path_for(date_, user=user)
-    return niam_output_path_for(date_, base=workbook_path or None)
+def get_niam_output_path_for(date_: datetime, region=None) -> Path:
+    """Result workbook for one night and region."""
+    return niam_output_path_for(date_, region=region or active_region)
 
 
 def thread_task(
@@ -1003,7 +1002,7 @@ def run_task(
     NIAMTicketGenerationTable with each row's RITM number / failure reason and
     writes ``RITM Output_PS_Core_<night>.xlsx`` for download.
     """
-    global glogs, sr_or_change_index, queue_, workbook_path
+    global glogs, sr_or_change_index, queue_, active_region
 
     logs = GLOBAL_LOGS if GLOBAL_LOGS is not None else []
     # Respect the dashboard's timestamp helper when one is supplied.
@@ -1036,13 +1035,14 @@ def run_task(
     glogs = Queue()
     sr_or_change_index = 0
 
-    # This module is loaded fresh for every run, so its globals are private to
-    # this user. Keep the result workbook under their own directory and never
-    # under the shared HOST_DOWNLOAD_DIR tree.
-    request_user = getattr(request, "user", None)
-    workbook_path = str(niam_user_root(request_user) / "outputs")
+    # This module is loaded fresh for every run. The workbook is region-based;
+    # the per-user isolation remains in the browser session file and TaskRun
+    # ownership.
     night = _parse_selected_date(selected_date)
-    runtime["niam_output_path"] = str(get_niam_output_path_for(night))
+    active_region = primary_region(regions)
+    runtime["niam_output_path"] = str(
+        get_niam_output_path_for(night, region=active_region)
+    )
 
     # Each run gets its own NIAM browser session storage file so concurrent
     # users never overwrite each other's cookies.
