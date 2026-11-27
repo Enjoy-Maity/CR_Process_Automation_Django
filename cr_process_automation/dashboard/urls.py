@@ -29,7 +29,8 @@ urlpatterns = [
     path('api/region-locks/acquire/', views.acquire_region_locks, name='acquire_region_locks'),
     path('api/region-locks/release/', views.release_region_locks, name='release_region_locks'),
     path('api/region-locks/status/', views.region_lock_status, name='region_lock_status'),
-    
+    path('api/region-selection/', views.region_selection, name='region_selection'),
+
     # path("import-master-cr/", views.import_master_cr_view, name="import-master-cr")
     # path('playwright-auth-iframe/', views.playwright_auth_iframe, name='playwright_auth_iframe'),
     path('filter-region-crs/', views.filter_region_crs, name="filter_region_crs"),

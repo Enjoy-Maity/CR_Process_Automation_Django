@@ -4,6 +4,8 @@
   <div class="region-cr-panel">
     <div class="region-filter-panel">
       <h2 class="module-page-title compact-module-title">CR Wise Status (PAN-INDIA)</h2>
+      <br>
+      <span class="cr-history-filter-label">Selected regions: {{ selected_regions|join:", "|default:"none" }}</span>
 
       <div class="region-filter-row">
         <label for="status-cr-date" class="region-date-label">Date</label>
@@ -168,6 +170,10 @@ function renderStatusTable(rows) {
     `).join('');
 }
 
+function selectedStatusRegions() {
+    return Array.isArray(window.SELECTED_REGIONS) ? window.SELECTED_REGIONS : [];
+}
+
 function fetchStatusCRs() {
     const date = document.getElementById('status-cr-date').value;
 
@@ -182,7 +188,11 @@ function fetchStatusCRs() {
     setStatusMeta('Loading CR status...');
     setStatusTableMessage('Loading data...', 20);
 
-    fetch(`{% url 'fetch_cr_wise_status' %}?${new URLSearchParams({ date }).toString()}`)
+    const params = new URLSearchParams({ date });
+    const regions = selectedStatusRegions();
+    if (regions.length) params.set('regions', regions.join(','));
+
+    fetch(`{% url 'fetch_cr_wise_status' %}?${params.toString()}`)
         .then(res => res.json())
         .then(data => {
             if (!data.ok) {

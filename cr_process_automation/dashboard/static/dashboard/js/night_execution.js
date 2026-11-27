@@ -22,6 +22,12 @@
     }
     
     const CSRF_TOKEN = getCookie('csrftoken');
+
+    // The durable selection is rendered by base_main.html. It can narrow what
+    // the server returns; it can never widen it.
+    function selectedRegions() {
+        return Array.isArray(window.SELECTED_REGIONS) ? window.SELECTED_REGIONS : [];
+    }
     // Injected by night_execution.html as window.USER_EMAIL; falls back to ""
     // if the page doesn't provide it (never sends the literal string "None").
     const USER_EMAIL = (typeof window.USER_EMAIL === "string" && window.USER_EMAIL) ? window.USER_EMAIL : "";
@@ -218,6 +224,7 @@
                 body: JSON.stringify({
                     cr_no: crNo,
                     task_key: taskKey,
+                    regions: selectedRegions(),
                 }),
             });
 
@@ -278,6 +285,7 @@
                     },
                     body: JSON.stringify({
                         date: selectedDate,
+                        regions: selectedRegions(),
                     }),
                 });
 
@@ -325,6 +333,7 @@
                     body: JSON.stringify({
                         cr_numbers: crNumbers,
                         user_email: USER_EMAIL,
+                        regions: selectedRegions(),
                     }),
                 });
                 const startData = await startResp.json();

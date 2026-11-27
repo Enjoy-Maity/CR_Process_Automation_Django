@@ -5,6 +5,7 @@
     <div class="region-filter-panel">
       <h2 class="module-page-title compact-module-title">CR History (PAN-INDIA)</h2>
       <br>
+      <span class="cr-history-filter-label">Selected regions: {{ selected_regions|join:", "|default:"none" }}</span>
       <div class="region-filter-row cr-history-filter-row">
         <label class="history-date-option">
         <input type="date" id="crhistorydate" class="history-date-input">
@@ -73,6 +74,10 @@ let HISTORY_SELECTED_DATE = null;
 let HISTORY_STATUS_TIMEOUT = null;
 
 const CR_HISTORY_SESSION_KEY = 'cr_history_page_state';
+
+function selectedHistoryRegions() {
+    return Array.isArray(window.SELECTED_REGIONS) ? window.SELECTED_REGIONS : [];
+}
 
 function saveCrHistorySessionState() {
     const state = {
@@ -311,6 +316,8 @@ function fetchHistoryCRs() {
     } else {
         params.set('range', HISTORY_SELECTED_RANGE);
     }
+    const regions = selectedHistoryRegions();
+    if (regions.length) params.set('regions', regions.join(','));
 
     fetch(`{% url 'fetch_cr_history' %}?${params.toString()}`)
         .then(res => res.json())
@@ -362,6 +369,8 @@ function downloadHistoryCRs() {
     } else {
         params.set('range', HISTORY_SELECTED_RANGE);
     }
+    const regions = selectedHistoryRegions();
+    if (regions.length) params.set('regions', regions.join(','));
 
     window.location.href = `{% url 'download_cr_history' %}?${params.toString()}`;
 }

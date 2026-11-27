@@ -16,7 +16,9 @@ from django.views.decorators.clickjacking import xframe_options_sameorigin
 from django.views.decorators.http import require_GET, require_POST
 from dashboard.models import MasterCRDatabase
 from dashboard.views import _common_context
+from dashboard.utils.selected_regions import effective_regions
 from django.db import transaction
+from django.db.models import Q
 from django.views.decorators.csrf import csrf_exempt
 import json
 from datetime import datetime, timedelta
@@ -54,6 +56,20 @@ def fetch_cr_wise_status(request):
     except ValueError:
         return JsonResponse({"ok": False, "message": "Invalid date format."}, status=400)
 
+    selected_regions = effective_regions(request, request.GET.get("regions", ""))
+    if not selected_regions:
+        return JsonResponse(
+            {
+                "ok": False,
+                "message": "Select at least one region on CR Planning before viewing CR status.",
+            },
+            status=403,
+        )
+    region_filter = Q(
+        *[Q(region__iexact=region) for region in selected_regions],
+        _connector=Q.OR,
+    )
+
     columns_meta = _cr_wise_status_columns()
     field_list = [c["name"] for c in columns_meta if c["name"] != "NIAM_Ticket"]
     if not field_list:
@@ -63,7 +79,9 @@ def fetch_cr_wise_status(request):
     try:
         result = list(
             CRWiseStatus.objects.filter(
-                execution_date=parsed_date, is_active=True
+                region_filter,
+                execution_date=parsed_date,
+                is_active=True,
             ).values(*field_list)
         )
     except Exception:
@@ -79,6 +97,7 @@ def fetch_cr_wise_status(request):
     return JsonResponse({
         "ok": True,
         "date": date_str,
+        "regions": selected_regions,
         "fields": field_list,
         "columns": columns,
         "column_labels": {c["name"]: c["label"] for c in columns_meta},

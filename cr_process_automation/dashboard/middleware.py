@@ -84,6 +84,16 @@ class SessionIdleTimeoutMiddleware:
 
             if last and now - last > timedelta(seconds=self.idle_seconds):
                 RUN_REGISTRY.clear_all_for_user(user.id)
+                # Idle expiry must clear the same state as explicit logout:
+                # persisted region selections (in the session) and region locks.
+                try:
+                    from .models import RegionLock
+
+                    RegionLock.objects.using("default").filter(
+                        locked_by_id=user.id
+                    ).delete()
+                except Exception:
+                    logger.exception("Failed to release region locks on idle timeout")
                 logout(request)  # flushes the session and logs the user out
 
             # logout() makes request.user anonymous, so refresh only if still

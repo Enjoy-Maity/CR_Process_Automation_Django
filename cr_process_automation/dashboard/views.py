@@ -41,6 +41,13 @@ from .utils.niam_paths import niam_output_path_for, niam_template_path_for
 from .utils import region_paths
 from .utils import region_status
 from .utils.region_paths import primary_region
+from .utils.selected_regions import (
+    get_selected_regions,
+    set_selected_regions,
+    effective_regions,
+    region_is_selected,
+)
+from .utils.niam_region import region_for_niam_row
 from .exceptions import (
     ValidationException,
     NotFoundException,
@@ -535,15 +542,9 @@ def night_spoc_view(request):
 
 def _parse_regions(raw):
     """Normalize a regions value (list or comma string) to known region keys."""
-    if raw is None:
-        return []
-    items = raw if isinstance(raw, (list, tuple)) else str(raw).split(",")
-    result = []
-    for item in items:
-        key = str(item).strip().lower()
-        if key in REGION_KEYS and key not in result:
-            result.append(key)
-    return result
+    from .utils.selected_regions import parse_regions
+
+    return parse_regions(raw)
 
 
 def _purge_expired_region_locks():
@@ -723,6 +724,40 @@ def region_lock_status(request):
     })
 
 
+@require_http_methods(["GET", "POST"])
+@login_required(login_url="login")
+@handle_exceptions
+def region_selection(request):
+    """Read or replace the persisted region selection for this session.
+
+    Only the CR Planning checkboxes call POST. Locks are acquired/released
+    separately, so closing a tab or losing a lock never clears the selection;
+    logout (explicit or idle) flushes the session and clears it.
+    """
+    if request.method == "GET":
+        return JsonResponse({
+            "ok": True,
+            "regions": get_selected_regions(request),
+            "all_regions": list(REGION_KEYS),
+        })
+
+    if request.content_type == "application/json":
+        try:
+            payload = json.loads(request.body.decode("utf-8") or "{}")
+        except (ValueError, UnicodeDecodeError):
+            return JsonResponse({"ok": False, "message": "Invalid JSON body."}, status=400)
+        raw = payload.get("regions", payload.get("region", []))
+    else:
+        raw = request.POST.get("regions", request.POST.get("region", ""))
+
+    regions = set_selected_regions(request, raw)
+    return JsonResponse({
+        "ok": True,
+        "regions": regions,
+        "message": "Region selection updated.",
+    })
+
+
 def _validate_fetch_crs_date(date_str):
     """Ensure the Fetch CRs date has active CR rows for that night's execution.
 
@@ -834,8 +869,33 @@ def start_task(request, task_id):
     if task_id == FETCH_CRS_TASK_ID:
         _validate_fetch_crs_date(selected_date)
 
-    # Parse region input
-    region_values = _parse_regions(request.POST.get('region', ''))
+    # Parse region input. The browser may only start tasks on regions that are
+    # still persisted in this login session; a stale/tampered POST is rejected
+    # before any task state is created.
+    requested_regions = _parse_regions(
+        request.POST.get('regions', request.POST.get('region', ''))
+    )
+    selected_regions = get_selected_regions(request)
+    unselected = [r for r in requested_regions if r not in selected_regions]
+    if unselected:
+        raise ValidationException(
+            "Select these region(s) on CR Planning before running this task: "
+            + ", ".join(unselected) + ".",
+            title="Region Not Selected",
+        )
+
+    if task_id in region_paths.REGION_TASK_IDS:
+        # Task 9 is included in REGION_TASK_IDS, so its NIAM page POST is held
+        # to exactly the same session-backed rule as tasks 1-5. No task can
+        # fall back to DEFAULT_REGION from a stale or hand-edited form.
+        region_values = [r for r in requested_regions if r in selected_regions]
+        if not region_values:
+            raise ValidationException(
+                "Please select at least one region on CR Planning before starting this task.",
+                title="Missing Region",
+            )
+    else:
+        region_values = requested_regions
 
     # Enforce the region lock: a user may only run on regions nobody else holds.
     conflicts = _locked_by_others(request.user, region_values)
@@ -1230,7 +1290,7 @@ def task_dashboard_data(request):
     This deliberately does not depend on the task status flag.
     """
     requested_date = request.GET.get("date", "").strip()
-    requested_regions = _parse_regions(request.GET.get("regions", ""))
+    requested_regions = effective_regions(request, request.GET.get("regions", ""))
     check_region_files = bool(requested_date and requested_regions)
     cr_planning_page = request.GET.get("cr_planning") == "1"
 
@@ -1361,7 +1421,20 @@ def download_task_output(request, task_id):
     # CR Planning carries the filters on the link, so a simultaneous user can
     # resolve the shared artefact without a run of their own in RUN_REGISTRY.
     requested_date = request.GET.get("date", "").strip()
-    requested_regions = _parse_regions(request.GET.get("regions", ""))
+    # A download link may narrow the persisted selection, but a hand-edited URL
+    # must never widen it into regions the user has not selected.
+    requested_regions = effective_regions(request, request.GET.get("regions", ""))
+    current_selection = get_selected_regions(request)
+    runtime_regions_raw = _parse_regions(runtime.get("regions")) if runtime else []
+    unselected_run_regions = [
+        r for r in runtime_regions_raw if r not in current_selection
+    ]
+    if unselected_run_regions:
+        raise NotFoundException(
+            "That run used region(s) no longer selected on CR Planning: "
+            + ", ".join(unselected_run_regions) + ".",
+            title="Region Not Selected",
+        )
     shared_path = None
     if (
         task_id in region_paths.REGION_TASK_IDS
@@ -1395,7 +1468,7 @@ def download_task_output(request, task_id):
             )
 
         # Older per-user runs must still satisfy the AND condition.
-        runtime_regions = _parse_regions(runtime.get("regions"))
+        runtime_regions = effective_regions(request, runtime.get("regions"))
         if (
             task_id in region_paths.REGION_TASK_IDS
             and runtime.get("selected_date")
@@ -1456,8 +1529,9 @@ REGION_FIELD_MAP = {
 def filter_region_crs(request):
     """Filter CRs by region and date."""
     date_str = request.GET.get("date", "").strip()
-    selected_regions = request.GET.get("regions", "").strip()
-    selected_regions = [r.strip().lower() for r in selected_regions.split(",") if r.strip()]
+    # The persisted selection is the authority. A query string may narrow it,
+    # but never widen it (stale browser state or a hand-edited URL).
+    selected_regions = effective_regions(request, request.GET.get("regions", ""))
 
     empty_counts = {
         "total_crs": 0,
@@ -4182,6 +4256,12 @@ def fetch_niam_template_data(request):
             d = model_to_dict(obj)
             row = {"id": obj.pk}
             row.update({name: d.get(name) for name in columns})
+            # NIAM rows have no DB region column: derive it from node details
+            # (with the CR's region as a fallback) and mark only rows in the
+            # user's persisted selection as editable.
+            row_region = region_for_niam_row(obj)
+            row["region"] = row_region
+            row["editable"] = region_is_selected(request, row_region)
             # Datetime columns are returned as naive IST wall-clock strings —
             # the same values the RITM workbook holds, without any timezone.
             for field in NIAM_DATETIME_FIELDS:
@@ -4200,6 +4280,7 @@ def fetch_niam_template_data(request):
             ],
             "options": _niam_dropdown_config()["options"],
             "can_edit": _user_can_edit_region_crs(request.user),
+            "selected_regions": get_selected_regions(request),
             "rows": rows,
             "count": len(rows),
             "range": used_range,
@@ -4443,6 +4524,13 @@ def save_niam_template_changes(request):
             status=403,
         )
 
+    selected_regions = get_selected_regions(request)
+    if not selected_regions:
+        return JsonResponse(
+            {"ok": False, "message": "Select at least one region on CR Planning before editing."},
+            status=403,
+        )
+
     try:
         payload = json.loads(request.body.decode("utf-8") or "{}")
     except (ValueError, UnicodeDecodeError):
@@ -4469,6 +4557,7 @@ def save_niam_template_changes(request):
         except (TypeError, ValueError):
             continue
     current_values = {}
+    current_regions = {}
     if requested_ids:
         for obj in NIAMTicketGenerationTable.objects.using("default").filter(
             pk__in=requested_ids
@@ -4477,6 +4566,7 @@ def save_niam_template_changes(request):
                 field: (getattr(obj, field) or "").strip()
                 for field in NIAM_EDITABLE_FIELDS
             }
+            current_regions[obj.pk] = region_for_niam_row(obj)
 
     errors = []
     cleaned = []
@@ -4485,6 +4575,20 @@ def save_niam_template_changes(request):
             row_id = int(row.get("id"))
         except (TypeError, ValueError):
             errors.append({"row": idx, "message": "Missing or invalid row id."})
+            continue
+
+        # Never trust the browser's region claim: recompute it from the stored
+        # node details and refuse rows outside the persisted selection.
+        row_region = current_regions.get(row_id, "")
+        if row_region not in selected_regions:
+            errors.append({
+                "row": idx,
+                "message": (
+                    "This row belongs to an unselected region"
+                    + (f" ({row_region})" if row_region else "")
+                    + ". Select it on CR Planning first."
+                ),
+            })
             continue
 
         values = {}
@@ -4513,6 +4617,13 @@ def save_niam_template_changes(request):
         )
 
     updates_by_key = {}
+    update_region_by_key = {}
+
+    def _record_update(key, values, row_id):
+        """Keep workbook writes scoped to the row's derived region."""
+        updates_by_key[key] = values
+        update_region_by_key[key] = current_regions.get(row_id, "")
+
     renumber_dates = set()
     with transaction.atomic(using="default"):
         objects = {
@@ -4551,7 +4662,11 @@ def save_niam_template_changes(request):
                 base_vals2 = dict(base_vals)
                 base_vals2['access_type'] = 'READWRITE'
                 NIAMTicketGenerationTable.objects.using("default").create(**base_vals2)
-                updates_by_key[(_niam_key(sr_key), _niam_key(node_key))] = item["values"]
+                _record_update(
+                    (_niam_key(sr_key), _niam_key(node_key)),
+                    item["values"],
+                    obj.pk,
+                )
                 renumber_dates.add(exec_date)
                 continue
             # Check if reverting from split rows back to single
@@ -4592,16 +4707,22 @@ def save_niam_template_changes(request):
                         r.delete()
                     obj.delete()
                     NIAMTicketGenerationTable.objects.using("default").create(**merged)
-                    updates_by_key[(_niam_key(sr_key), _niam_key(node_key))] = item["values"]
+                    _record_update(
+                        (_niam_key(sr_key), _niam_key(node_key)),
+                        item["values"],
+                        obj.pk,
+                    )
                     renumber_dates.add(exec_date)
                     continue
             # Normal update
             for field, value in item["values"].items():
                 setattr(obj, field, value)
             obj.save(using="default", update_fields=list(item["values"].keys()))
-            updates_by_key[
-                (_niam_key(obj.sr_or_change_number), _niam_key(obj.node_name))
-            ] = item["values"]
+            _record_update(
+                (_niam_key(obj.sr_or_change_number), _niam_key(obj.node_name)),
+                item["values"],
+                obj.pk,
+            )
 
         for renumber_date in renumber_dates:
             renumber_niam_sno(renumber_date, using="default", compact=True)
@@ -4625,14 +4746,20 @@ def save_niam_template_changes(request):
                 night = datetime.combine(exec_date - timedelta(days=1), datetime.min.time())
                 # Update the region workbook(s) the saved rows belong to.
                 regions_for_date = sorted({
-                    primary_region([obj.region])
+                    current_regions.get(obj.pk) or region_for_niam_row(obj)
                     for obj in objects.values()
-                    if obj.execution_date == exec_date and getattr(obj, "region", None)
+                    if obj.execution_date == exec_date
+                    and (current_regions.get(obj.pk) or region_for_niam_row(obj))
                 }) or [region_paths.DEFAULT_REGION]
                 for region_name in regions_for_date:
                     workbook_path = niam_template_path_for(night, region=region_name)
+                    region_updates = {
+                        key: values
+                        for key, values in updates_by_key.items()
+                        if update_region_by_key.get(key) == region_name
+                    }
                     count, warn = _write_niam_edits_to_workbook(
-                        workbook_path, updates_by_key
+                        workbook_path, region_updates
                     )
                     workbook_updated += count
                     if warn and warning is None:

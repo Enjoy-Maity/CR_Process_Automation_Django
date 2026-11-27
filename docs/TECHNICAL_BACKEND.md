@@ -58,7 +58,7 @@ Related documentation: [`PROJECT_DOCUMENTATION.md`](PROJECT_DOCUMENTATION.md) fo
 | Path | View | Method/purpose |
 |---|---|---|
 | `/`, `/login/` | `views.login_view` | GET/POST login via `LoginForm`; success redirects to `cr_planning`. |
-| `/logout/` | `views.logout_view` | Clears `RUN_REGISTRY`, deletes user `RegionLock` rows, logs out. |
+| `/logout/` | `views.logout_view` | Clears `RUN_REGISTRY`, deletes user `RegionLock` rows, logs out and flushes the session (including selected regions). |
 | `/health`, `/health/` | `views.health_check` | Liveness/DB probe. |
 | `/home/` | `views.cr_planning_view` | CR Planning page. |
 | `/dashboard/` | `views.dashboard_view` | Analysis dashboard page. |
@@ -73,7 +73,8 @@ Related documentation: [`PROJECT_DOCUMENTATION.md`](PROJECT_DOCUMENTATION.md) fo
 | `/playwright-auth-iframe/`, `/playwright-password-iframe/` | `views.playwright_auth_iframe`, `views.playwright_password_iframe` | OTP/password form iframes bound to `task_id` + `run_key`; stale submissions are rejected. |
 | `/playwright-notice-iframe/`, `/playwright-alert-iframe/` | `views.playwright_notice_iframe`, `views.playwright_alert_iframe` | Read-only sign-in notice / blocking alert iframes, also bound to `task_id` + `run_key`. |
 | `/api/region-locks/acquire/`, `/api/region-locks/release/`, `/api/region-locks/status/` | `views.acquire_region_locks`, `views.release_region_locks`, `views.region_lock_status` | Region lock heartbeat endpoints. |
-| `/filter-region-crs/` | `views.filter_region_crs` | GET `date`, `regions`; returns `counts_all`, `counts_planned`, `rows`, `cr_rows`. Selected night maps to `execution_date = date + 1`. |
+| `/api/region-selection/` | `views.region_selection` | GET returns the session-backed selection; POST replaces it with the exact checked set. Query-string regions elsewhere can narrow but never widen it. |
+| `/filter-region-crs/` | `views.filter_region_crs` | GET `date`, optional `regions` (narrows only); returns `counts_all`, `counts_planned`, `rows`, `cr_rows`. Selected night maps to `execution_date = date + 1`. |
 | `/region-crs/fetch-region-cr-details/`, `/cr_history/fetch-region-cr-details/` | `Region_views.fetch_region_cr_details` | Fetch region CR rows. |
 | `/region-crs/save-region-cr-details` | `Region_views.save_region_cr_details` | Save edits (no trailing slash in route). |
 | `/fetch-cr-history/`, `/download-cr-history/` | `Region_views.fetch_cr_history`, `Region_views.download_cr_history` | History query/export. |
@@ -273,7 +274,7 @@ Resolved files must be under `settings.HOST_DOWNLOAD_FOLDER` or the user's priva
 - `acquire_region_locks()` returns `ok`, `acquired`, `conflicts`, `locks`, `ttl`.
 - `release_region_locks()` releases all user locks or a subset.
 - `region_lock_status()` returns `ok`, `locks`, `ttl`.
-- `logout_view()` deletes the user's `RegionLock` rows. Idle timeout only clears runtimes/logs out, so locks then expire by TTL.
+- `logout_view()` deletes the user's `RegionLock` rows and flushes the Django session. Idle timeout now does the same: it clears runtimes, deletes that user's `RegionLock` rows, and logs out, which also removes the persisted selection.
 
 ## 6. Task modules
 
@@ -366,7 +367,7 @@ Defined in `task_modules/dependencies/extra_dependencies.py`:
 | NIAM browser sessions | One storage file per `run_key`; credentials stored per Django user. |
 | ITSM browser sessions | `get_itsm_session_file_path(runtime)` writes `itsm_session_<run_key>.json`; `session_breaker(runtime=...)` logs out/deletes only that file. Threads inherit the same per-run path. |
 | ITSM MFA | All three Microsoft prompts try verification-code entry; push approval shows the sign-in code and detects rejection/timeout. Visible prompts are selected per variant so hidden Microsoft templates cannot stall one run. OTP is requested only when `#idTxtBx_SAOTCC_OTC` is visible. The notice is cleared only on a real approval signal (ServiceNow app list, "Stay signed in?", or leaving the Microsoft login domain with no MFA prompt), never on a transient hidden template. |
-| Idle sessions | `SessionIdleTimeoutMiddleware` logs out after `USER_IDLE_TIMEOUT_SECONDS` and excludes polling URLs in `NON_ACTIVITY_PATHS`. |
+| Idle sessions | `SessionIdleTimeoutMiddleware` logs out after `USER_IDLE_TIMEOUT_SECONDS` and excludes polling URLs in `NON_ACTIVITY_PATHS`. Region-lock acquire/release heartbeats are activity; on expiry it clears runtimes, deletes that user's locks, and flushes the session. |
 | Process model | One WSGI process with many threads is required; multiple worker processes split `RUN_REGISTRY`. `wsgi_app.py` now forces `WSGI_WORKERS=1` when a larger value is configured. |
 
 ## 9. Frontend integration contract
@@ -415,7 +416,7 @@ Other settings: `AUTH_USER_MODEL = "dashboard.UserManagement"`, DB-backed sessio
 | Area | Limitation |
 |---|---|
 | Task 6 | `final_email_package.tasks` does not exist; starting task 6 fails before thread start. |
-| NIAM region metadata | `NIAMTicketGenerationTable` has no `region` field, although `save_niam_template_changes()` reads `obj.region`; workbook write-back therefore targets `all` unless a region is supplied elsewhere. |
+| NIAM region metadata | `NIAMTicketGenerationTable` has no `region` field. `utils/niam_region.py` derives one from `node_details`/`node_name` (CR region fallback); unknown/mixed rows stay read-only and workbook write-back is scoped per derived region. |
 | NIAM fan-out | Only task 9 (`RITM Output`) is in `REGION_TASK_IDS`; task 7/8 input workbooks are not fanned out by `publish_region_output()`. |
 | Replica sync | `check_replica_sync_status()` always returns `complete`/`ready`; `utils/replica_sync.py` is still SQLite-oriented while settings use PostgreSQL. |
 | Process-local state | `RUN_REGISTRY` and fresh module objects do not survive worker restarts; daemon threads are not resumed. Multiple WSGI workers break polling and iframe submission. |

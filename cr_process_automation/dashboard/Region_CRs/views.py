@@ -20,7 +20,13 @@ from django.views.decorators.clickjacking import xframe_options_sameorigin
 from django.views.decorators.http import require_GET, require_POST
 from dashboard.models import MasterCRDatabase, SelectedDateTable, CRWiseStatus,UserManagement  # CHANGED: added CRWiseStatus
 from dashboard.views import _common_context
+from dashboard.utils.selected_regions import (
+    get_selected_regions,
+    region_is_selected,
+    effective_regions,
+)
 from django.db import transaction
+from django.db.models import Q
 from django.views.decorators.csrf import csrf_exempt
 from django.core.management import call_command
 import json
@@ -687,6 +693,17 @@ def save_region_cr_details(request):
             status=403,
         )
 
+    selected_regions = get_selected_regions(request)
+    if not selected_regions:
+        return JsonResponse(
+            {
+                "ok": False,
+                "message": "Select at least one region on CR Planning before editing.",
+                "errors": [],
+            },
+            status=403,
+        )
+
     # --- Parse payload ---
     try:
         payload = json.loads(request.body.decode("utf-8"))
@@ -813,6 +830,18 @@ def save_region_cr_details(request):
                     })
                     continue
 
+                # Only rows in the persisted selection may be edited. This is
+                # checked against the stored row, never browser-supplied data.
+                if not region_is_selected(request, active_obj.region):
+                    errors.append({
+                        "id": row_id,
+                        "message": (
+                            "This row belongs to an unselected region "
+                            f"({active_obj.region or 'unknown'})."
+                        ),
+                    })
+                    continue
+
                 # --- CoW step 1: deactivate current active row (guarded) ---
                 deactivated = (
                     MasterCRDatabase.objects.using(DB_MASTER)
@@ -929,11 +958,23 @@ def _get_history_start_date(range_key):
     return None, None
 
 
-def _get_cr_history_queryset(date_str=None, range_key=None):
+def _get_cr_history_queryset(date_str=None, range_key=None, selected_regions=None):
     """
     Returns queryset routed to replica.
-    Only returns is_active=True records (latest CoW versions).
+
+    Only returns is_active=True records (latest CoW versions), and never
+    records outside the user's persisted CR Planning selection. Passing an
+    explicit empty list means "no regions selected" (no rows), not "all".
     """
+    region_filter = None
+    if selected_regions is not None:
+        if not selected_regions:
+            return None, None, None, "Select at least one region on CR Planning."
+        region_filter = Q(
+            *[Q(region__iexact=region) for region in selected_regions],
+            _connector=Q.OR,
+        )
+
     if date_str:
         try:
             selected_date = datetime.strptime(date_str, "%Y-%m-%d").date()
@@ -944,9 +985,10 @@ def _get_cr_history_queryset(date_str=None, range_key=None):
             MasterCRDatabase.objects
             .using(DB_REPLICA)
             .filter(execution_date=selected_date, is_active=True)
-            .order_by("cr_no")
         )
-        return qs, selected_date, selected_date, None
+        if region_filter is not None:
+            qs = qs.filter(region_filter)
+        return qs.order_by("cr_no"), selected_date, selected_date, None
 
     start_date, end_date = _get_history_start_date(range_key)
     if not start_date:
@@ -961,9 +1003,10 @@ def _get_cr_history_queryset(date_str=None, range_key=None):
             execution_date__lte=end_date,
             is_active=True,     # Only show latest CoW versions
         )
-        .order_by("-execution_date", "cr_no")
     )
-    return qs, start_date, end_date, None
+    if region_filter is not None:
+        qs = qs.filter(region_filter)
+    return qs.order_by("-execution_date", "cr_no"), start_date, end_date, None
 
 
 # ────────────────────────────────────────────────────────────────
@@ -975,7 +1018,10 @@ def fetch_cr_history(request):
     date_str  = request.GET.get("date", "").strip()
     range_key = request.GET.get("range", "").strip()
 
-    qs, start_date, end_date, err = _get_cr_history_queryset(date_str, range_key)
+    selected_regions = effective_regions(request, request.GET.get("regions", ""))
+    qs, start_date, end_date, err = _get_cr_history_queryset(
+        date_str, range_key, selected_regions
+    )
     if err:
         return JsonResponse({"ok": False, "message": err}, status=400)
 
@@ -1035,7 +1081,10 @@ def download_cr_history(request):
     date_str  = request.GET.get("date", "").strip()
     range_key = request.GET.get("range", "").strip()
 
-    qs, start_date, end_date, err = _get_cr_history_queryset(date_str, range_key)
+    selected_regions = effective_regions(request, request.GET.get("regions", ""))
+    qs, start_date, end_date, err = _get_cr_history_queryset(
+        date_str, range_key, selected_regions
+    )
     if err:
         return JsonResponse({"ok": False, "message": err}, status=400)
 

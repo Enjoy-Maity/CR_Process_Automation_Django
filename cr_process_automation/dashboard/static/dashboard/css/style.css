@@ -678,6 +678,21 @@ input {
     background-color: #F17720;
 }
 
+/* Unselected regions can still be viewed, but never edited. */
+.region-tab-btn.unselected-region-tab {
+    background-color: #9ca3af;
+    color: #f3f4f6;
+}
+
+.region-tab-btn.unselected-region-tab.active {
+    background-color: #6b7280;
+}
+
+.read-only-region {
+    background-color: #f3f4f6;
+    color: #6b7280;
+}
+
 
 .region-crs-page {
     width: 100%;

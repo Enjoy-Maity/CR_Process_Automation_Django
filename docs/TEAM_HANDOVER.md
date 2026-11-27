@@ -19,7 +19,7 @@ Related documentation: [`PROJECT_DOCUMENTATION.md`](PROJECT_DOCUMENTATION.md) fo
 - Playwright launches a **non-headless** Chromium. On a headless Linux host, `start.sh` wraps the server in `xvfb-run` when `DISPLAY` is unset. Install Xvfb with `sudo apt-get install xvfb`; use `NO_XVFB=1` to disable the wrapper.
 - Browser binary path is resolved in `dashboard/__init__.py` from `cr_process_automation/pw-browsers/chromium-*`; missing folders raise `FileNotFoundError` at startup.
 - Important port mismatch: the README examples and nginx sample use port **8000**, but the current `wsgi_app.py` default is **9000**. Pass `--port` explicitly to avoid surprises.
-- Database sessions are stored in the database and idle out after `USER_IDLE_TIMEOUT_SECONDS` (default `1800` seconds). Browser polling does not extend the idle timer.
+- Database sessions are stored in the database and idle out after `USER_IDLE_TIMEOUT_SECONDS` (default `1800` seconds). Browser polling does not extend the idle timer. The selected-region list lives in the session, so logout/idle expiry clears it.
 - Generated files and logs live under `DJANGO_DOWNLOAD_DIR` (`HOST_DOWNLOAD_FOLDER` is the same path). Logs are in `<download-root>/logs/errors.log` and `<download-root>/logs/notice_timing.log`; private media is under `<download-root>/media/`.
 
 ## 2. Main pages
@@ -44,7 +44,8 @@ Useful API routes:
 
 - `/api/task/start/<task_id>/`, `/api/task/dashboard-data/`, `/download/task/<task_id>/`
 - `/api/region-locks/acquire/`, `/api/region-locks/release/`, `/api/region-locks/status/`
-- `/filter-region-crs/` — refreshes per-region CR counts from `MasterCRDatabase`.
+- `/api/region-selection/` — GET reads, POST replaces the persisted selected-region list. Unchecking a region removes it immediately; unload/lock release does not.
+- `/filter-region-crs/` — refreshes per-region CR counts from `MasterCRDatabase`, narrowed to the persisted selection.
 - `/api/niam/fetch-crs/`, `/api/niam/generate-ticket/`, `/api/niam/save-changes/`
 - `/api/user/update-niam-credentials/`
 - Login-support iframes: `/playwright-auth-iframe/`, `/playwright-password-iframe/`, `/playwright-notice-iframe/`, `/playwright-alert-iframe/`
@@ -94,8 +95,8 @@ Defined in `dashboard/views.py`.
 ### CR Planning (tasks 1–5)
 
 1. Open `/home/`.
-2. Select the night date and at least one region. The page note requires this before starting a task.
-3. Selecting a region acquires a DB-backed lock; other users see it disabled with the holder's name. The `/filter-region-crs/` call refreshes all/planned CR counts for the selected regions.
+2. Select the night date and at least one region. The exact checked set is saved to the Django session; it stays selected across page navigation and reloads until you uncheck it or the session ends.
+3. Selecting a region also acquires a DB-backed lock; other users see it disabled with the holder's name. A lock held by someone else never silently clears your saved selection. The `/filter-region-crs/` call refreshes all/planned CR counts for the selected regions.
 4. Start tasks in sequence. A task runs in a background thread with an isolated runtime, logs, and `TaskRun` owned by the current user/session.
 5. Watch the status cell and log panel; `dashboard.js` polls the dashboard API every 500 ms and includes `run_key` in every auth iframe URL. Statuses include `Running`, `Completed`, `Failed`, `Waiting for Password`, `Waiting for OTP`, and `Waiting for Sign-in Approval`. A second start is rejected while the same user/task is still active.
 6. Download becomes available when the expected artefact exists for **all** selected regions, independent of the badge status. Older private `MEDIA_ROOT/task_runs/<run_key>/` copies remain owner/session scoped.
@@ -104,7 +105,7 @@ Defined in `dashboard/views.py`.
 
 1. Open `/niam-template-db/` and select the **night** date (or a range shortcut).
 2. Click **Fetch CR** (task 8). The backend refuses dates without CRs for `D + 1` and tells you if you picked the execution date by mistake.
-3. Edit allowed NIAM columns where permitted, then **Save Changes**. Blank values are allowed for placeholders; list columns must use allowed options. Saves write to both `NIAMTicketGenerationTable` and the dated regional workbook.
+3. Edit allowed NIAM columns where permitted, then **Save Changes**. Only rows whose derived region is in the persisted selection are editable. Blank values are allowed for placeholders; list columns must use allowed options. Saves write to both `NIAMTicketGenerationTable` and the derived regional workbook.
 4. Click **Download Template** for `RITM Input_PS_Core_<night>.xlsx`.
 5. Click **NIAM Ticket Generator** (task 9). When it finishes, the page offers the `RITM Output` workbook download.
 6. If Microsoft sign-in needs attention, use the iframe prompt described in section 7. Do not restart the task while the prompt is open.
@@ -112,8 +113,9 @@ Defined in `dashboard/views.py`.
 ### Night Execution, Region CRs, CR History, CR-Wise Status
 
 - These pages use the **execution date** directly.
-- Night Execution filters active `MasterCRDatabase` rows by `activity_executor` matching the logged-in user's employee name, username, or full name. Statuses are fetched in batches of at most 3 CRs.
-- Region CRs and NIAM Template Database share the same edit-role check (`Admin`, `Validator`, `Night-SPOC`).
+- Night Execution filters active `MasterCRDatabase` rows by `activity_executor` matching the logged-in user's employee name, username, or full name **and** by the persisted region selection. Statuses/task buttons reject CRs outside that selection.
+- CR-Wise Status and CR History are read-only but also filter rows server-side to the persisted selection, including exports.
+- Region CRs and NIAM Template Database share the same edit-role check (`Admin`, `Validator`, `Night-SPOC`) and additionally mark unselected-region rows read-only.
 - Region CR saves can rebuild `SelectedDateTable` for affected execution dates and renumber NIAM rows.
 
 ## 6. Region locks and shared artefacts
@@ -123,8 +125,8 @@ Defined in `dashboard/views.py`.
 - Region keys: `north`, `west`, `east`, `south`.
 - Lock records are in the `RegionLock` table on the default database.
 - TTL is `REGION_LOCK_TTL_SECONDS = 120`.
-- `region_locks.js` polls status every `3000` ms and renews the selected regions on each heartbeat. Locks are released on uncheck, page unload, or logout; expired rows are purged lazily.
-- Another user's region checkbox is disabled and shows the holder's full name or username.
+- `region_locks.js` polls status every `3000` ms and renews the selected regions on each heartbeat. Locks are released on uncheck, page unload, or logout; expired rows are purged lazily. Heartbeats are real activity and keep the session alive.
+- Another user's region checkbox is disabled and shows the holder's full name or username. If the region is still in your saved selection it remains checked, so losing a lock does not silently clear the selection.
 - `start_task()` rechecks conflicts and rejects the start with title `Region Locked` if any selected region is held by someone else.
 - Acquire is transactional (`select_for_update` plus an `IntegrityError` retry) so simultaneous selections of the same region cannot both win.
 
@@ -269,7 +271,8 @@ Configuration is read from the process environment or `cr_process_automation/das
 
 | Symptom | Check |
 | --- | --- |
-| Region checkbox disabled with another user's name | The holder owns the lock. Wait for the 120 s TTL to expire or ask the holder to uncheck/close the page/log out. |
+| Region checkbox disabled with another user's name | The holder owns the lock. Wait for the 120 s TTL to expire or ask the holder to uncheck/close the page/log out. Your saved selection is not cleared by this. |
+| Save Changes disabled / rows read-only | The row's region is not in your persisted selection. Return to CR Planning and check that region; an empty selection means no region is editable. |
 | Task start fails with `Region Locked` | A selected region was acquired by someone else between selection and start. Refresh and reselect. |
 | Status stays `Pending` but files exist | The selected regions must all have the expected artefact. Check the per-region folder and `.task_status/<task>/<date>/<region>.json`. A `Running` marker reduces to `Pending`. |
 | Download button hidden | Download requires the artefact in **every** selected region folder, not just one. Verify the task-owned date label (`%d-%b-%y` vs `%d_%b_%Y`). |
@@ -287,7 +290,7 @@ Configuration is read from the process environment or `cr_process_automation/das
 
 ## 11. Recent region-based changes
 
-Current local HEAD is `cefe5dc Derive task status from shared region results with AND logic`. Relevant recent history:
+Current committed HEAD is `5564b1d Fix concurrent ITSM authentication`. Relevant recent history:
 
 - `a5485c2` — user-scoped sessions and NIAM file isolation.
 - `d49a4c6` — NIAM login timing diagnostics and robust MFA handling.

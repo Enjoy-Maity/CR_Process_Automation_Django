@@ -52,7 +52,10 @@
             const lockedByOther = !!info.locked && !info.mine;
             suppressChange = true;
             cb.disabled = lockedByOther;
-            if (lockedByOther) cb.checked = false;
+            // A temporary lock held by someone else must not silently clear the
+            // user's durable selection. Keep the checkbox checked (but disabled)
+            // when the Django session still owns that region.
+            if (lockedByOther && !isPersistedSelection(region)) cb.checked = false;
             suppressChange = false;
 
             if (lockedByOther) {
@@ -69,6 +72,15 @@
         return Array.prototype.slice
             .call(document.querySelectorAll(".region-checkbox:checked"))
             .map(function (cb) { return cb.value; });
+    }
+
+    function isPersistedSelection(region) {
+        const persisted = Array.isArray(window.SELECTED_REGIONS)
+            ? window.SELECTED_REGIONS
+            : [];
+        return persisted.some(function (value) {
+            return String(value).toLowerCase() === region;
+        });
     }
 
     function postForm(url, regions) {

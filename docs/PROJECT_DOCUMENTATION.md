@@ -59,7 +59,8 @@ Related documents:
 | `POST /api/region-locks/acquire/` | `views.acquire_region_locks` | Acquires/renews DB-backed region locks. |
 | `POST /api/region-locks/release/` | `views.release_region_locks` | Releases the current user's locks. |
 | `GET /api/region-locks/status/` | `views.region_lock_status` | Returns lock state for frontend polling. |
-| `GET /filter-region-crs/` | `views.filter_region_crs` | Returns CR counts/rows for a night date and selected regions. |
+| `GET/POST /api/region-selection/` | `views.region_selection` | Reads or replaces the durable per-session region selection. POST clears regions the user unchecked; locks are separate. |
+| `GET /filter-region-crs/` | `views.filter_region_crs` | Returns CR counts/rows for a night date, narrowed to the persisted selection. |
 | `GET /region-crs/fetch-region-cr-details/`, `/cr_history/fetch-region-cr-details/` | `Region_views.fetch_region_cr_details` | Fetches editable region CR rows. |
 | `POST /region-crs/save-region-cr-details` | `Region_views.save_region_cr_details` | Saves edited region CR rows with CoW handling. |
 | `GET /fetch-cr-history/` | `Region_views.fetch_cr_history` | Fetches CR history rows. |
@@ -114,8 +115,16 @@ Related documents:
 - **Task execution:** each start creates a per-user runtime via `RUN_REGISTRY`,
   a `TaskRun`, a background thread, a fresh copy of the task module, and persisted
   `TaskLog` rows.
+- **Persistent region selection:** CR Planning checkboxes are saved to
+  `request.session["selected_regions"]`. The exact checked set is replaced on every
+  change; the selection survives navigation/page reload and is cleared only by the
+  user unchecking a region, explicit logout, or idle timeout.
 - **Region locks:** `RegionLock` with a 120-second TTL and heartbeat prevents two
-  users running the same region.
+  users running the same region. A lock is temporary concurrency state; losing or
+  releasing a lock never clears the persistent selection.
+- **Selected-region gating:** Region CRs and NIAM rows outside the persisted
+  selection are read-only; Night Execution, CR-Wise Status and CR History filter
+  rows/actions server-side so a hand-edited request cannot widen the selection.
 - **Region outputs:** shared artefacts live at
   `settings.HOST_DOWNLOAD_FOLDER/{date}/{Task-Wise folder}/{Region-name}/`.
   A download button appears only when the artefact exists for **all** selected
@@ -159,6 +168,8 @@ Related documents:
 | `utils/region_paths.py` | Region-safe artefact paths, date labels, readiness and fan-out. | `REGION_KEYS`, `DEFAULT_REGION`, `REGION_TASK_IDS`, `TASK_FOLDER_ENV`, `safe_region`, `primary_region`, `task_date_label`, `format_env_path`, `task_output_path`, `all_region_files_ready`, `publish_region_output`. |
 | `utils/region_status.py` | Shared per-region status markers and AND reduction. | `status_path`, `publish`, `combined_status`; markers under `HOST_DOWNLOAD_FOLDER/.task_status/<task>/<date>/<region>.json`. `Failed` wins, then all `Completed`, then legacy artefact fallback, otherwise `Pending`. |
 | `utils/niam_paths.py` | Region-scoped NIAM workbook paths. | `niam_date_folder`, `niam_region_root`, `niam_template_path_for`, `niam_output_path_for`; `<root>/<night>/NIAM_Excel_files/<region>/`. |
+| `utils/selected_regions.py` | Authoritative per-session selection and narrowing rules. | `SESSION_KEY`, `parse_regions`, `get_selected_regions`, `set_selected_regions`, `effective_regions`, `region_is_selected`. Empty means "no region may be edited", never "all". |
+| `utils/niam_region.py` | Derives a region key for NIAM rows without a DB column. | `NODE_PREFIX_TO_REGION`, `normalise_region`, `region_from_node_text`, `region_for_niam_row`; node details first, CR region as fallback, unknown stays read-only. |
 | `utils/file_locks.py` | Cross-platform advisory file lock with a per-path thread lock. | `file_lock(path, timeout=300.0, poll=0.1)` creates `<path>.lock`, yields the resolved path, raises `TimeoutError` on timeout. Used by tasks 1, 2, 4, 7, 8. |
 | `utils/exception_handler.py` | Decorator/model lookup helpers for JSON errors. | `handle_exceptions`, `get_or_404`. `get_or_404` raises `NotFoundException` on `DoesNotExist`. |
 | `utils/cow_helpers.py` | Copy-on-write deactivation helper. | `deactivate_record(queryset, db_alias="default")`; triggers `async_sync_master_to_replica()` when rows change. |
@@ -424,7 +435,7 @@ All templates extending `dashboard/base_main.html` inherit `dashboard/css/style.
 | Task 6 | `final_email_package.tasks` is mapped but absent; starting it fails before the thread starts. |
 | Task 7 UI | Startable via generic API but has no dedicated NIAM page button. |
 | Region fan-out | Only tasks 1–5 and 9 are in `REGION_TASK_IDS`; NIAM input workbooks for tasks 7/8 are not fanned out. |
-| NIAM metadata | `NIAMTicketGenerationTable` has no `region` field; workbook write-back targets `all`. |
+| NIAM metadata | `NIAMTicketGenerationTable` has no `region` field; its display/edit region is derived from node details (CR region as fallback), and workbook write-back is scoped to that derived region. |
 | Status markers | Stale markers and the legacy artefact fallback can show Completed after older runs. |
 | Process-local state | `RUN_REGISTRY`, `TASK_RUNTIME`, and Night Execution `_JOBS` do not survive restarts or multiple workers. The launcher now forces `WSGI_WORKERS=1`; scale with threads only. |
 | Date validation | `start_task()` requires a date for tasks 1, 2, 7, 8, 9 but not 3, 4, 5, although tasks 2–5 parse a date immediately. |
@@ -439,7 +450,7 @@ All templates extending `dashboard/base_main.html` inherit `dashboard/css/style.
 | Deployment | `deploy/nginx.conf` targets port `8000`; `wsgi_app.py` defaults to `9000`. Pass `--port` explicitly. |
 | Dockerfile | CMD uses Windows-style backslashes inside a Linux image. |
 | Tests | `dashboard/tests.py` is an empty placeholder. |
-| Idle locks | Idle timeout clears run contexts but does not delete `RegionLock` rows; expiry relies on TTL/heartbeat lapse. |
+| Idle locks | Idle timeout clears run contexts, flushes the session (including selected regions), and deletes that user's `RegionLock` rows. |
 | Frontend timing | `dashboard.js` comment says 3 seconds but task polling uses 500 ms. |
 | NIAM validation | `NIAM_EDITABLE_FIELDS` comment says all seven must be filled, but `save_niam_template_changes()` accepts blanks. |
 | Dormant endpoints | `fetch_current_date_crs`, `update_hygiene_check`, upload/import routes, and vendor dashboard routes have no active URL entry. |

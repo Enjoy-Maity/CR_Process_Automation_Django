@@ -300,6 +300,9 @@ async function startTask(taskId, row) {
 
     const formData = new FormData();
     formData.append('date', selectedDate);
+    // Send both spellings during the rollout: the backend now treats the
+    // plural value as authoritative, while older handlers still read singular.
+    formData.append('regions', regionValues);
     formData.append('region', regionValues);
 
     try {

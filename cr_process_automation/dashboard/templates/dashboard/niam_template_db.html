@@ -8,6 +8,7 @@
     <div class="region-filter-panel" style="margin-bottom:16px;padding:14px;border:1px solid #d5dde8;border-radius:10px;background:#f7f9fc;">
         <div style="margin-bottom:12px;">
             <span class="cr-history-filter-label">Note:- The selected date is the <strong>night date</strong>. Fetch CR and NIAM Ticket Generator run for the night starting on that date; the CRs execute the next day, so their CR Start Date-Time is the following date. The table, Download Template and Save use the same night date. Example: to work on the night whose CRs execute on 13-11-2026, select 12-11-2026.</span>
+            <span class="cr-history-filter-label">Selected regions are editable; other rows are read-only. Current selection: {{ selected_regions|join:", "|default:"none" }}</span>
         </div>
         <div style="display:flex;gap:20px;align-items:center;flex-wrap:wrap;">
             <div>
@@ -16,7 +17,7 @@
             </div>
             <button type="button" id="fetch_niam_template_btn" class="action-btn compact-btn fetch-cr-black-btn">Fetch CR</button>
             <button type="button" id="niam_generate_ticket_btn" class="action-btn compact-btn start-btn">NIAM Ticket Generator</button>
-            <button type="button" id="save_niam_template_btn" class="action-btn compact-btn save-btn">Save Changes</button>
+            <button type="button" id="save_niam_template_btn" class="action-btn compact-btn save-btn" {% if not can_edit_niam or not selected_regions %}disabled{% endif %}>Save Changes</button>
             <button type="button" id="download_niam_template_btn" class="action-btn compact-btn download-btn">Download Template</button>
             <a id="niam_ticket_download_link" class="action-btn compact-btn download-btn" href="#" style="display:none;">Download NIAM Ticket</a>
         </div>
@@ -44,6 +45,10 @@ const SAVE_NIAM_URL = "{% url 'save_niam_template_changes' %}";
 const NIAM_COLUMNS = JSON.parse(document.getElementById('niam-columns-data').textContent);
 const NIAM_EDITABLE_CONFIG = JSON.parse(document.getElementById('niam-editable-config-data').textContent);
 const CAN_EDIT_NIAM = {{ can_edit_niam|yesno:"true,false" }};
+const SELECTED_REGIONS = new Set(
+    (window.SELECTED_REGIONS || []).map(region => String(region).toLowerCase())
+);
+let NIAM_HAS_EDITABLE_ROWS = false;
 
 const EDITABLE_COLUMNS = (NIAM_EDITABLE_CONFIG.editable_columns || []).map(c => c.name);
 const NIAM_OPTIONS = NIAM_EDITABLE_CONFIG.options || {};
@@ -58,11 +63,10 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
-function isEditable(name) {
-    // A column is editable when the server advertises it as editable. As a
-    // safety net, also treat any column that has dropdown options configured
-    // as editable, so a missing entry in ``editable_columns`` cannot turn an
-    // existing dropdown (e.g. Access Type) into a plain text cell.
+function isEditable(name, row) {
+    // The server supplies row.editable from the persisted region selection.
+    // Within an editable row, keep the Access Type and other dropdowns intact.
+    if (!row || !row.editable) return false;
     return EDITABLE_COLUMNS.indexOf(name) !== -1 ||
         Object.prototype.hasOwnProperty.call(NIAM_OPTIONS, name);
 }
@@ -85,7 +89,7 @@ function renderNiamSkeleton(columns) {
     body.innerHTML = '<tr><td colspan="' + columns.length + '" class="text-center">Select date and fetch data.</td></tr>';
 }
 
-function buildEditableCell(field, value) {
+function buildEditableCell(field, value, row) {
     const td = document.createElement('td');
     const select = document.createElement('select');
     select.className = 'niam-input';
@@ -114,7 +118,10 @@ function buildEditableCell(field, value) {
         select.appendChild(o);
     });
 
-    if (!CAN_EDIT_NIAM) select.disabled = true;
+    if (!CAN_EDIT_NIAM || !row || !row.editable) {
+        select.disabled = true;
+        td.title = 'Region not selected - read-only';
+    }
     td.appendChild(select);
     return td;
 }
@@ -140,24 +147,32 @@ function renderNiamTable(data) {
     });
 
     if (!data.rows || data.rows.length === 0) {
+        NIAM_HAS_EDITABLE_ROWS = false;
         body.innerHTML = '<tr><td colspan="' + columns.length + '" class="text-center">No records found for selected period.</td></tr>';
+        setSaveEnabled(false);
         return;
     }
 
+    NIAM_HAS_EDITABLE_ROWS = data.rows.some(row => Boolean(row.editable));
     data.rows.forEach(row => {
         const tr = document.createElement('tr');
         tr.dataset.rowId = row.id;
+        tr.dataset.region = row.region || '';
+        tr.dataset.editable = row.editable ? 'true' : 'false';
+        if (!row.editable) tr.classList.add('read-only-region');
         columns.forEach(name => {
-            if (isEditable(name)) {
-                tr.appendChild(buildEditableCell(name, row[name]));
+            if (isEditable(name, row)) {
+                tr.appendChild(buildEditableCell(name, row[name], row));
             } else {
                 const td = document.createElement('td');
                 td.innerHTML = escapeHtml(row[name] ?? '');
+                if (!row.editable) td.title = 'Region not selected - read-only';
                 tr.appendChild(td);
             }
         });
         body.appendChild(tr);
     });
+    setSaveEnabled(NIAM_HAS_EDITABLE_ROWS);
 }
 
 function setNiamStatus(message) {
@@ -168,8 +183,9 @@ function setNiamStatus(message) {
 function setSaveEnabled(enabled) {
     const btn = document.getElementById('save_niam_template_btn');
     if (!btn) return;
-    // Never present an editable-looking Save button to read-only users.
-    btn.disabled = !enabled || !CAN_EDIT_NIAM;
+    // Never present an editable-looking Save button to read-only users or
+    // when every loaded row belongs to an unselected region.
+    btn.disabled = !enabled || !CAN_EDIT_NIAM || !NIAM_HAS_EDITABLE_ROWS;
 }
 
 function selectedNiamDate() {
@@ -255,6 +271,7 @@ document.getElementById('fetch_niam_template_btn').addEventListener('click', fun
 
     const body = new FormData();
     body.append('date', date);
+    body.append('regions', Array.from(SELECTED_REGIONS).join(','));
 
     fetch("{% url 'start_niam_fetch_crs' %}", {
         method: 'POST',
@@ -287,6 +304,7 @@ document.getElementById('fetch_niam_template_btn').addEventListener('click', fun
 function collectNiamRows() {
     const rows = [];
     document.querySelectorAll('#niam_template_table_body tr[data-row-id]').forEach(tr => {
+        if (tr.dataset.editable !== 'true' || !CAN_EDIT_NIAM) return;
         const row = { id: tr.dataset.rowId };
         tr.querySelectorAll('select.niam-input').forEach(sel => {
             row[sel.dataset.col] = sel.value;
@@ -299,6 +317,10 @@ function collectNiamRows() {
 document.getElementById('save_niam_template_btn').addEventListener('click', function () {
     if (!CAN_EDIT_NIAM) {
         alert('You are not authorized to edit the NIAM template.');
+        return;
+    }
+    if (!SELECTED_REGIONS.size || !NIAM_HAS_EDITABLE_ROWS) {
+        alert('Select the row region on CR Planning before editing NIAM rows.');
         return;
     }
     const date = selectedNiamDate();
@@ -382,7 +404,11 @@ function setGenerateEnabled(enabled) {
 }
 
 function pollNiamTicket() {
-    fetch('/api/task/dashboard-data/')
+    const params = new URLSearchParams();
+    const dateEl = document.getElementById('niam_date');
+    if (dateEl && dateEl.value) params.set('date', dateEl.value);
+    if (SELECTED_REGIONS.size) params.set('regions', Array.from(SELECTED_REGIONS).join(','));
+    fetch('/api/task/dashboard-data/?' + params.toString())
         .then(res => res.json())
         .then(data => {
             const task = (data.tasks || []).find(item => Number(item.id) === RAISE_NIAM_TICKET_TASK_ID);
@@ -427,6 +453,7 @@ document.getElementById('niam_generate_ticket_btn').addEventListener('click', fu
 
     const body = new FormData();
     body.append('date', date);
+    body.append('regions', Array.from(SELECTED_REGIONS).join(','));
 
     fetch(GENERATE_NIAM_URL, {
         method: 'POST',
@@ -453,7 +480,8 @@ document.getElementById('niam_generate_ticket_btn').addEventListener('click', fu
 
 // Render DB column skeleton on page load (before any fetch).
 renderNiamSkeleton(NIAM_COLUMNS);
-if (!CAN_EDIT_NIAM) {
+setSaveEnabled(false);
+if (!CAN_EDIT_NIAM || !SELECTED_REGIONS.size) {
     const saveBtn = document.getElementById('save_niam_template_btn');
     if (saveBtn) saveBtn.style.display = 'none';
 }

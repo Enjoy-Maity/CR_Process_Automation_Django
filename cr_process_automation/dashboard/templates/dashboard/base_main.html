@@ -7,7 +7,13 @@
     <title>{{ page_title }}</title>
     <link rel="stylesheet" href="{% static 'dashboard/css/style.css' %}">
 </head>
-<body data-selected-option="{{ selected_option }}">
+<body data-selected-option="{{ selected_option }}" data-selected-regions="{{ selected_regions|join:',' }}">
+    {{ selected_regions|json_script:"selected-regions-data" }}
+    <script>
+        window.SELECTED_REGIONS = JSON.parse(
+            document.getElementById('selected-regions-data').textContent
+        );
+    </script>
     <a class="skip-link" href="#main-content">Skip to content</a>
     <div class="app-shell">
         <header class="top-header">

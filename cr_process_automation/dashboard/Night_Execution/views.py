@@ -26,6 +26,7 @@ from dashboard.Night_Execution.services import (
     build_cr_status_payload_from_itsm,
 )
 from dashboard.models import MasterCRDatabase
+from dashboard.utils.selected_regions import effective_regions
 from django import forms
 
 # Custom forms for Night Execution (using job_id instead of task_id)
@@ -100,6 +101,17 @@ def _job_for_request(job_id, request):
     return job
 
 
+def _selected_regions(request, requested=None):
+    """Persisted selection, optionally narrowed by a request value."""
+    return effective_regions(request, requested)
+
+
+def _region_q(regions):
+    if not regions:
+        return None
+    return Q(*[Q(region__iexact=region) for region in regions], _connector=Q.OR)
+
+
 # ── Page render ─────────────────────────────────────────────────────────────
 @login_required(login_url="login")
 @require_GET
@@ -167,6 +179,19 @@ def fetch_night_execution_crs(request):
             {"ok": False, "message": "Invalid date format. Use YYYY-MM-DD."}, status=400
         )
 
+    # Only CRs in the user's persisted CR Planning selection may be viewed or
+    # acted on. The browser value can narrow the selection but never widen it.
+    selected_regions = _selected_regions(request, body.get("regions"))
+    if not selected_regions:
+        return JsonResponse(
+            {
+                "ok": False,
+                "message": "Select at least one region on CR Planning before fetching CRs.",
+            },
+            status=403,
+        )
+    region_filter = _region_q(selected_regions)
+
     # Get current user information
     user_email = request.user.email if request.user.is_authenticated else None
     user_name = getattr(request.user, 'employee_name', request.user.username if request.user.is_authenticated else None)
@@ -193,9 +218,10 @@ def fetch_night_execution_crs(request):
     crs = MasterCRDatabase.objects.filter(
         execution_date=selected_date,
         is_active=True
-    ).filter(name_query).values(
-        'cr_no', 
-        'circle', 
+    ).filter(region_filter).filter(name_query).values(
+        'cr_no',
+        'circle',
+        'region',
         'activity_description',
         'activity_executor'
     )
@@ -206,6 +232,7 @@ def fetch_night_execution_crs(request):
         cr_list.append({
             'cr_no': cr['cr_no'],
             'circle': cr['circle'] or '',
+            'region': cr['region'] or '',
             'activity_title': cr['activity_description'] or '',
             'change_responsible': cr['activity_executor'] or '',
             'cr_status': '',  # Will be populated by fetch status endpoint
@@ -250,6 +277,24 @@ def start_night_execution_task(request):
     if task_key not in valid_tasks:
         return JsonResponse(
             {"ok": False, "message": f"Invalid task_key: {task_key}"}, status=400
+        )
+
+    selected_regions = _selected_regions(request, body.get("regions"))
+    region_filter = _region_q(selected_regions)
+    if (
+        not region_filter
+        or not MasterCRDatabase.objects.filter(
+            region_filter, cr_no__iexact=cr_no, is_active=True
+        ).exists()
+    ):
+        return JsonResponse(
+            {
+                "ok": False,
+                "message": (
+                    "Select the CR's region on CR Planning before starting this task."
+                ),
+            },
+            status=403,
         )
 
     # This is a placeholder for actual task execution logic
@@ -319,6 +364,34 @@ def fetch_night_cr_status(request):
         return JsonResponse(
             {"ok": False, "message": "cr_numbers must be a non-empty list"},
             status=400,
+        )
+
+    selected_regions = _selected_regions(request, body.get("regions"))
+    region_filter = _region_q(selected_regions)
+    if not region_filter:
+        return JsonResponse(
+            {
+                "ok": False,
+                "message": "Select at least one region on CR Planning before fetching status.",
+            },
+            status=403,
+        )
+    allowed_crs = set(
+        MasterCRDatabase.objects.filter(region_filter, is_active=True)
+        .filter(cr_no__in=cr_numbers)
+        .values_list("cr_no", flat=True)
+    )
+    unselected_crs = [cr for cr in cr_numbers if cr not in allowed_crs]
+    if unselected_crs:
+        return JsonResponse(
+            {
+                "ok": False,
+                "message": (
+                    "These CRs are outside your selected regions: "
+                    + ", ".join(unselected_crs)
+                ),
+            },
+            status=403,
         )
 
     # Server-authoritative fallback: never trust the client blindly, and never
